@@ -4,6 +4,11 @@
     "installCommand": "npm --prefix frontend install",
     "buildCommand": "npm --prefix frontend run build",
     "outputDirectory": "frontend/dist",
+    "functions": {
+        "api/[...path].js": {
+            "maxDuration": 30
+        }
+    },
     "rewrites": [
         { "source": "/(.*)", "destination": "/index.html" }
     ]
