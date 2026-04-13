@@ -39,12 +39,7 @@ export default function LoginPage() {
         data = { detail: raw || 'Unknown server response.' }
       }
       if (!res.ok) {
-        const detail = typeof data?.detail === 'string' ? data.detail : ''
-        if ([400, 401, 403].includes(res.status)) {
-          setLoginError('Wrong email or password.')
-        } else {
-          setLoginError(detail || 'Login failed. Please try again.')
-        }
+        setLoginError('Wrong email or password.')
         return
       }
       setAuthSession(
