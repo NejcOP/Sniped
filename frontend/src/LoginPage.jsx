@@ -12,6 +12,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [rememberMe, setRememberMe] = useState(() => getRememberPreference())
   const [loading, setLoading] = useState(false)
+  const [loginError, setLoginError] = useState('')
 
   useEffect(() => {
     const existingToken = getStoredValue('lf_token')
@@ -22,6 +23,7 @@ export default function LoginPage() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    setLoginError('')
     setLoading(true)
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
@@ -37,6 +39,12 @@ export default function LoginPage() {
         data = { detail: raw || 'Unknown server response.' }
       }
       if (!res.ok) {
+        const detail = typeof data?.detail === 'string' ? data.detail : ''
+        if (res.status === 401) {
+          setLoginError(detail || 'Invalid email or password.')
+        } else {
+          setLoginError(detail || 'Login failed. Please try again.')
+        }
         return
       }
       setAuthSession(
@@ -55,6 +63,7 @@ export default function LoginPage() {
       localStorage.removeItem('lf_pending_signup')
       navigate('/app')
     } catch {
+      setLoginError('Could not connect to the server. Please try again.')
       return
     } finally {
       setLoading(false)
@@ -77,6 +86,16 @@ export default function LoginPage() {
           <h1 className="text-2xl font-bold text-white mb-1">Login</h1>
           <p className="text-sm text-slate-400 mb-6">Access your Sniped account</p>
 
+          {loginError ? (
+            <div
+              className="mb-4 rounded-lg px-3 py-2 text-sm"
+              role="alert"
+              style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.35)', color: '#fecaca' }}
+            >
+              {loginError}
+            </div>
+          ) : null}
+
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email */}
             <div>
@@ -87,7 +106,10 @@ export default function LoginPage() {
                   type="email"
                   required
                   value={email}
-                  onChange={e => setEmail(e.target.value)}
+                  onChange={e => {
+                    setEmail(e.target.value)
+                    if (loginError) setLoginError('')
+                  }}
                   placeholder="you@agency.com"
                   className="w-full pl-9 pr-4 py-2.5 rounded-lg text-sm text-white placeholder-slate-600 outline-none focus:ring-2 focus:ring-yellow-400/40"
                   style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
@@ -104,7 +126,10 @@ export default function LoginPage() {
                   type={showPassword ? 'text' : 'password'}
                   required
                   value={password}
-                  onChange={e => setPassword(e.target.value)}
+                  onChange={e => {
+                    setPassword(e.target.value)
+                    if (loginError) setLoginError('')
+                  }}
                   placeholder="••••••••"
                   className="w-full pl-9 pr-10 py-2.5 rounded-lg text-sm text-white placeholder-slate-600 outline-none focus:ring-2 focus:ring-yellow-400/40"
                   style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
