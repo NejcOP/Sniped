@@ -9,6 +9,9 @@ const API_BASE = import.meta.env.VITE_API_URL ?? ''
 
 function getFriendlyAiError(status, detail) {
   const normalized = String(detail || '').toLowerCase()
+  if (status === 503 || normalized.includes('backend is not configured') || normalized.includes('backend request failed')) {
+    return detail || 'Backend is not configured for production yet. Please contact support.'
+  }
   if (normalized.includes('insufficient_quota') || normalized.includes('quota') || normalized.includes('credit') || normalized.includes('billing')) {
     return 'Please check your API credits.'
   }

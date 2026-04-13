@@ -9,7 +9,8 @@
             "maxDuration": 30
         }
     },
-    "rewrites": [
-        { "source": "/(.*)", "destination": "/index.html" }
+    "routes": [
+        { "src": "/api/(.*)", "dest": "/api/[...path].js" },
+        { "src": "/(.*)", "dest": "/index.html" }
     ]
 }
