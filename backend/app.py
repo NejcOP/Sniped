@@ -12521,6 +12521,12 @@ def create_app() -> FastAPI:
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
             try:
+                existing = sb_client.table("users").select("id").eq("email", email).limit(1).execute()
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Supabase register query failed: {exc}")
+            if list(getattr(existing, "data", None) or []):
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            try:
                 sb_client.table("users").insert(
                     {
                         "email": email,
@@ -12564,6 +12570,13 @@ def create_app() -> FastAPI:
             return {"token": token, "niche": req.niche, "email": email, "display_name": display_name}
 
         ensure_users_table(DEFAULT_DB_PATH)
+        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM users WHERE email = ? LIMIT 1",
+                (email,),
+            ).fetchone()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
         try:
             with sqlite3.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
@@ -13400,6 +13413,12 @@ def create_app() -> FastAPI:
             sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            try:
+                existing = sb_client.table("users").select("id").eq("email", email).limit(1).execute()
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Supabase onboarding query failed: {exc}")
+            if list(getattr(existing, "data", None) or []):
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
             try:
                 sb_client.table("users").insert(
@@ -13434,6 +13453,13 @@ def create_app() -> FastAPI:
             }
 
         ensure_users_table(DEFAULT_DB_PATH)
+        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM users WHERE email = ? LIMIT 1",
+                (email,),
+            ).fetchone()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
         try:
             with sqlite3.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
