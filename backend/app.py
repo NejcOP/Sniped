@@ -1832,6 +1832,7 @@ def ensure_users_table(db_path: Path) -> None:
                 stripe_customer_id TEXT,
                 quickstart_completed INTEGER NOT NULL DEFAULT 0,
                 average_deal_value REAL NOT NULL DEFAULT 1000,
+                smtp_accounts_json TEXT,
                 reset_token   TEXT,
                 reset_token_expires_at TEXT,
                 created_at    TEXT    NOT NULL,
@@ -1858,6 +1859,7 @@ def ensure_users_table(db_path: Path) -> None:
             ("stripe_customer_id", "TEXT"),
             ("quickstart_completed", "INTEGER NOT NULL DEFAULT 0"),
             ("average_deal_value", f"REAL NOT NULL DEFAULT {DEFAULT_AVERAGE_DEAL_VALUE}"),
+            ("smtp_accounts_json", "TEXT"),
             ("reset_token", "TEXT"),
             ("reset_token_expires_at", "TEXT"),
             ("updated_at", "TEXT"),
@@ -3663,6 +3665,165 @@ def get_primary_smtp_account(config_path: Path) -> dict:
     return account
 
 
+def _normalize_single_smtp_account(raw: dict[str, Any], existing: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    existing = dict(existing or {})
+    account = {
+        "host": str(raw.get("host") if raw.get("host") is not None else existing.get("host", "")).strip(),
+        "port": int(raw.get("port") if raw.get("port") is not None else existing.get("port", 587) or 587),
+        "email": str(raw.get("email") if raw.get("email") is not None else existing.get("email", "")).strip(),
+        "password": str(existing.get("password", "") or ""),
+        "use_tls": bool(raw.get("use_tls") if raw.get("use_tls") is not None else existing.get("use_tls", True)),
+        "use_ssl": bool(raw.get("use_ssl") if raw.get("use_ssl") is not None else existing.get("use_ssl", False)),
+        "from_name": str(raw.get("from_name") if raw.get("from_name") is not None else existing.get("from_name", "")).strip(),
+        "signature": str(raw.get("signature") if raw.get("signature") is not None else existing.get("signature", "")).strip(),
+    }
+    if raw.get("password") is not None and str(raw.get("password") or "").strip():
+        account["password"] = str(raw.get("password") or "").strip()
+    return account
+
+
+def _normalize_smtp_accounts(raw_accounts: list[dict[str, Any]], existing_accounts: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+    existing_accounts = list(existing_accounts or [])
+    normalized_accounts: list[dict[str, Any]] = []
+    for idx, raw in enumerate(raw_accounts):
+        existing = existing_accounts[idx] if idx < len(existing_accounts) else {}
+        next_account = _normalize_single_smtp_account(raw, existing)
+        if next_account["host"] and next_account["email"]:
+            normalized_accounts.append(next_account)
+    return normalized_accounts
+
+
+def _safe_smtp_accounts(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    safe_accounts: list[dict[str, Any]] = []
+    for item in accounts:
+        safe_accounts.append(
+            {
+                "host": str(item.get("host", "") or ""),
+                "port": int(item.get("port", 587) or 587),
+                "email": str(item.get("email", "") or ""),
+                "use_tls": bool(item.get("use_tls", True)),
+                "use_ssl": bool(item.get("use_ssl", False)),
+                "from_name": str(item.get("from_name", "") or ""),
+                "signature": str(item.get("signature", "") or ""),
+                "password_set": bool(str(item.get("password", "") or "").strip()),
+            }
+        )
+    return safe_accounts
+
+
+def _parse_smtp_accounts_json(raw_value: Any) -> list[dict[str, Any]]:
+    if not raw_value:
+        return []
+    try:
+        parsed = raw_value if isinstance(raw_value, list) else json.loads(str(raw_value))
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def load_user_smtp_accounts(*, session_token: Optional[str] = None, user_id: Optional[str] = None, db_path: Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+    session_token = str(session_token or "").strip()
+    user_id = str(user_id or "").strip()
+    if not session_token and not user_id:
+        return []
+
+    if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+        if not ensure_supabase_users_table(DEFAULT_CONFIG_PATH):
+            return []
+        sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if sb_client is None:
+            return []
+        try:
+            query = sb_client.table("users").select("smtp_accounts_json")
+            if session_token:
+                query = query.eq("token", session_token)
+            else:
+                try:
+                    query = query.eq("id", int(user_id))
+                except Exception:
+                    query = query.eq("id", user_id)
+            response = query.limit(1).execute()
+            rows = list(getattr(response, "data", None) or [])
+        except Exception as exc:
+            if "does not exist" in str(exc):
+                return []
+            raise HTTPException(status_code=502, detail=f"SMTP lookup failed: {exc}")
+        if not rows:
+            return []
+        return _parse_smtp_accounts_json(rows[0].get("smtp_accounts_json"))
+
+    ensure_users_table(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if session_token:
+            row = conn.execute("SELECT smtp_accounts_json FROM users WHERE token = ?", (session_token,)).fetchone()
+        else:
+            row = conn.execute("SELECT smtp_accounts_json FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        return []
+    return _parse_smtp_accounts_json(row["smtp_accounts_json"])
+
+
+def save_user_smtp_accounts(session_token: str, accounts: list[dict[str, Any]], db_path: Path = DEFAULT_DB_PATH) -> None:
+    token = str(session_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+    existing_accounts = load_user_smtp_accounts(session_token=token, db_path=db_path)
+    normalized_accounts = _normalize_smtp_accounts(accounts, existing_accounts)
+    payload = json.dumps(normalized_accounts, ensure_ascii=False)
+
+    if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+        if not ensure_supabase_users_table(DEFAULT_CONFIG_PATH):
+            raise HTTPException(status_code=503, detail="Supabase users table is missing.")
+        sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if sb_client is None:
+            raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+        try:
+            response = sb_client.table("users").select("id").eq("token", token).limit(1).execute()
+            rows = list(getattr(response, "data", None) or [])
+            if not rows:
+                raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+            execute_supabase_update_with_retry(
+                sb_client,
+                "users",
+                {"smtp_accounts_json": payload, "updated_at": utc_now_iso()},
+                eq_filters={"id": rows[0].get("id")},
+                operation_name="smtp settings update",
+            )
+            return
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if "does not exist" in str(exc):
+                raise HTTPException(status_code=503, detail="Supabase users schema is missing smtp_accounts_json column.")
+            raise HTTPException(status_code=502, detail=f"SMTP save failed: {exc}")
+
+    ensure_users_table(db_path)
+    with sqlite3.connect(db_path) as conn:
+        updated = conn.execute(
+            "UPDATE users SET smtp_accounts_json = ?, updated_at = ? WHERE token = ?",
+            (payload, utc_now_iso(), token),
+        )
+        if int(updated.rowcount or 0) <= 0:
+            raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+        conn.commit()
+
+
+def get_primary_user_smtp_account(*, session_token: Optional[str] = None, user_id: Optional[str] = None, db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
+    accounts = load_user_smtp_accounts(session_token=session_token, user_id=user_id, db_path=db_path)
+    if not accounts:
+        raise HTTPException(status_code=503, detail="SMTP is not configured for this account.")
+    account = dict(accounts[0] or {})
+    host = str(account.get("host", "") or "").strip()
+    email = str(account.get("email", "") or "").strip()
+    password = str(account.get("password", "") or "").strip()
+    if not host or not email or not password:
+        raise HTTPException(status_code=503, detail="SMTP is not fully configured for this account.")
+    return account
+
+
 def send_auth_email(account: dict, recipient: str, subject: str, text_body: str, html_body: Optional[str] = None) -> None:
     host = str(account.get("host", "") or "").strip()
     port = int(account.get("port", 587) or 587)
@@ -3834,6 +3995,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         stripe_customer_id TEXT,
         quickstart_completed BOOLEAN NOT NULL DEFAULT FALSE,
         average_deal_value DOUBLE PRECISION NOT NULL DEFAULT 1000,
+        smtp_accounts_json TEXT,
         reset_token TEXT,
         reset_token_expires_at TEXT,
         created_at TEXT NOT NULL,
@@ -3859,6 +4021,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS quickstart_completed BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS average_deal_value DOUBLE PRECISION NOT NULL DEFAULT 1000;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS smtp_accounts_json TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT NOW()::text;
@@ -7333,6 +7496,7 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
             config_path=str(config_path),
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
             user_id=str(payload_data.get("user_id") or "legacy"),
+            smtp_accounts_override=load_user_smtp_accounts(user_id=str(payload_data.get("user_id") or "legacy"), db_path=db_path),
         )
         # Use auto-detected base URL for tracking pixel if not manually configured in config
         if not mailer.open_tracking_base_url:
@@ -7449,20 +7613,17 @@ def run_weekly_report_digest(_app: FastAPI) -> None:
         logging.info("Weekly report: disabled in config.")
         return
 
-    try:
-        account = get_primary_smtp_account(config_path)
-    except HTTPException as exc:
-        logging.warning("Weekly report: SMTP is not ready — %s", exc.detail)
-        return
-
     for recipient_info in _list_reporting_users(db_path):
         recipient = str(recipient_info.get("email") or _load_user_email_for_reports(db_path, recipient_info["user_id"]) or "").strip()
         if not recipient:
             continue
         try:
+            account = get_primary_user_smtp_account(user_id=str(recipient_info["user_id"]), db_path=db_path)
             summary = build_weekly_report_summary(db_path, recipient_info["user_id"])
             send_weekly_report_email(account, recipient, summary)
             logging.info("Weekly report sent to %s for %s.", recipient, recipient_info["user_id"])
+        except HTTPException as exc:
+            logging.warning("Weekly report: SMTP is not ready for %s — %s", recipient_info["user_id"], exc.detail)
         except Exception as exc:
             logging.warning("Weekly report SMTP send failed for %s: %s", recipient, exc)
 
@@ -7481,21 +7642,18 @@ def run_monthly_report_digest(_app: FastAPI) -> None:
         logging.info("Monthly report: disabled in config.")
         return
 
-    try:
-        account = get_primary_smtp_account(config_path)
-    except HTTPException as exc:
-        logging.warning("Monthly report: SMTP is not ready — %s", exc.detail)
-        return
-
     for recipient_info in _list_reporting_users(db_path):
         recipient = str(recipient_info.get("email") or _load_user_email_for_reports(db_path, recipient_info["user_id"]) or "").strip()
         if not recipient:
             continue
         try:
+            account = get_primary_user_smtp_account(user_id=str(recipient_info["user_id"]), db_path=db_path)
             summary = build_monthly_report_summary(db_path, recipient_info["user_id"])
             pdf_bytes = _build_report_pdf(f"Sniped Monthly Report — {summary.get('month_label', 'Current Month')}", summary, period_key="monthly")
             send_monthly_report_email(account, recipient, summary, pdf_bytes)
             logging.info("Monthly report sent to %s for %s.", recipient, recipient_info["user_id"])
+        except HTTPException as exc:
+            logging.warning("Monthly report: SMTP is not ready for %s — %s", recipient_info["user_id"], exc.detail)
         except Exception as exc:
             logging.warning("Monthly report SMTP send failed for %s: %s", recipient, exc)
 
@@ -8472,29 +8630,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
-        require_authenticated_session(request)
+        session_token = require_authenticated_session(request)
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
         openai_key = str(cfg.get("openai", {}).get("api_key", "") or "")
-        smtp_accounts = cfg.get("smtp_accounts", [])
+        smtp_accounts = load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH)
         mailer_cfg = cfg.get("mailer", {}) if isinstance(cfg, dict) else {}
-        safe_accounts = []
-        for item in smtp_accounts:
-            safe_accounts.append(
-                {
-                    "host": str(item.get("host", "") or ""),
-                    "port": int(item.get("port", 587) or 587),
-                    "email": str(item.get("email", "") or ""),
-                    "use_tls": bool(item.get("use_tls", True)),
-                    "use_ssl": bool(item.get("use_ssl", False)),
-                    "from_name": str(item.get("from_name", "") or ""),
-                    "signature": str(item.get("signature", "") or ""),
-                    "password_set": bool(str(item.get("password", "") or "").strip()),
-                }
-            )
+        safe_accounts = _safe_smtp_accounts(smtp_accounts)
         first_smtp = smtp_accounts[0] if smtp_accounts else {}
         supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
         return {
@@ -8529,7 +8674,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/config")
     def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
-        require_authenticated_session(request)
+        session_token = require_authenticated_session(request)
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -8548,42 +8693,26 @@ def create_app() -> FastAPI:
             cfg.pop(deprecated_key, None)
 
         if payload.smtp_accounts is not None:
-            existing_accounts = cfg.get("smtp_accounts", []) if isinstance(cfg, dict) else []
-            normalized_accounts: list[dict] = []
-            for idx, account_payload in enumerate(payload.smtp_accounts):
-                existing = existing_accounts[idx] if idx < len(existing_accounts) else {}
-                next_account = {
-                    "host": str(account_payload.host if account_payload.host is not None else existing.get("host", "")).strip(),
-                    "port": int(account_payload.port if account_payload.port is not None else existing.get("port", 587) or 587),
-                    "email": str(account_payload.email if account_payload.email is not None else existing.get("email", "")).strip(),
-                    "password": str(existing.get("password", "") or ""),
-                    "use_tls": bool(account_payload.use_tls if account_payload.use_tls is not None else existing.get("use_tls", True)),
-                    "use_ssl": bool(account_payload.use_ssl if account_payload.use_ssl is not None else existing.get("use_ssl", False)),
-                    "from_name": str(account_payload.from_name if account_payload.from_name is not None else existing.get("from_name", "")).strip(),
-                    "signature": str(account_payload.signature if account_payload.signature is not None else existing.get("signature", "")).strip(),
-                }
-
-                if account_payload.password is not None and account_payload.password.strip():
-                    next_account["password"] = account_payload.password.strip()
-
-                if next_account["host"] and next_account["email"]:
-                    normalized_accounts.append(next_account)
-
-            cfg["smtp_accounts"] = normalized_accounts
+            save_user_smtp_accounts(
+                session_token,
+                [account_payload.model_dump() for account_payload in payload.smtp_accounts],
+                db_path=DEFAULT_DB_PATH,
+            )
         elif any(v is not None for v in [payload.smtp_host, payload.smtp_port, payload.smtp_email, payload.smtp_password]):
-            smtp_accounts = cfg.get("smtp_accounts", [{}])
-            if not smtp_accounts:
-                smtp_accounts = [{}]
-            acct = dict(smtp_accounts[0])
-            if payload.smtp_host is not None:
-                acct["host"] = payload.smtp_host.strip()
-            if payload.smtp_port is not None:
-                acct["port"] = int(payload.smtp_port)
-            if payload.smtp_email is not None:
-                acct["email"] = payload.smtp_email.strip()
-            if payload.smtp_password is not None and payload.smtp_password.strip():
-                acct["password"] = payload.smtp_password.strip()
-            cfg["smtp_accounts"] = [acct] + smtp_accounts[1:]
+            existing_accounts = load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH)
+            existing_first = existing_accounts[0] if existing_accounts else {}
+            merged_first = _normalize_single_smtp_account(
+                {
+                    "host": payload.smtp_host,
+                    "port": payload.smtp_port,
+                    "email": payload.smtp_email,
+                    "password": payload.smtp_password,
+                },
+                existing_first,
+            )
+            save_user_smtp_accounts(session_token, [merged_first, *existing_accounts[1:]], db_path=DEFAULT_DB_PATH)
+
+        cfg.pop("smtp_accounts", None)
 
         if payload.mail_signature is not None:
             cfg["mail_signature"] = payload.mail_signature.strip()
@@ -8652,14 +8781,15 @@ def create_app() -> FastAPI:
         return {"status": "saved", **load_config_health(DEFAULT_CONFIG_PATH)}
 
     @app.post("/api/config/test-smtp")
-    def test_smtp_connection(payload: SMTPTestRequest) -> dict:
+    def test_smtp_connection(payload: SMTPTestRequest, request: Request) -> dict:
+        session_token = require_authenticated_session(request)
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
 
-        existing_accounts = cfg.get("smtp_accounts", []) if isinstance(cfg, dict) else []
+        existing_accounts = load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH)
         existing = {}
         if payload.account_index is not None and 0 <= int(payload.account_index) < len(existing_accounts):
             existing = dict(existing_accounts[int(payload.account_index)])
@@ -8826,7 +8956,7 @@ def create_app() -> FastAPI:
         recipient = _load_user_email_for_reports(DEFAULT_DB_PATH, user_id)
         if not recipient:
             raise HTTPException(status_code=422, detail="No signup email is available for this user.")
-        account = get_primary_smtp_account(DEFAULT_CONFIG_PATH)
+        account = get_primary_user_smtp_account(user_id=user_id, db_path=DEFAULT_DB_PATH)
         send_weekly_report_email(account, recipient, summary)
         return {"status": "sent", "recipient": recipient, "period_label": summary.get("period_label")}
 
@@ -8860,7 +8990,7 @@ def create_app() -> FastAPI:
         recipient = _load_user_email_for_reports(DEFAULT_DB_PATH, user_id)
         if not recipient:
             raise HTTPException(status_code=422, detail="No signup email is available for this user.")
-        account = get_primary_smtp_account(DEFAULT_CONFIG_PATH)
+        account = get_primary_user_smtp_account(user_id=user_id, db_path=DEFAULT_DB_PATH)
         pdf_response = download_monthly_reporting_pdf(request)
         send_monthly_report_email(account, recipient, summary, pdf_response.body)
         return {"status": "sent", "recipient": recipient, "month_label": summary.get("month_label")}
@@ -11897,6 +12027,7 @@ def create_app() -> FastAPI:
                 config_path=str(config_path),
                 model_name_override=str(access.get("ai_model") or DEFAULT_AI_MODEL),
                 user_id=user_id,
+                smtp_accounts_override=load_user_smtp_accounts(session_token=session_token, db_path=db_path),
             )
             if payload.mail_signature is not None:
                 mailer.mail_signature = payload.mail_signature.strip()
@@ -11988,6 +12119,7 @@ def create_app() -> FastAPI:
                 config_path=str(config_path),
                 model_name_override=str(access.get("ai_model") or DEFAULT_AI_MODEL),
                 user_id=user_id,
+                smtp_accounts_override=load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -12695,6 +12827,7 @@ def create_app() -> FastAPI:
             if not rows:
                 return {"ok": True, "message": "If the account exists, a reset link has been sent."}
             row = rows[0]
+            smtp_user_id = str(row.get("id") or "").strip()
             try:
                 sb_client.table("users").update(
                     {"reset_token": reset_token, "reset_token_expires_at": expires_at}
@@ -12708,13 +12841,14 @@ def create_app() -> FastAPI:
                 row = conn.execute("SELECT id, email FROM users WHERE email = ?", (email,)).fetchone()
                 if row is None:
                     return {"ok": True, "message": "If the account exists, a reset link has been sent."}
+                smtp_user_id = str(row["id"])
                 conn.execute(
                     "UPDATE users SET reset_token = ?, reset_token_expires_at = ? WHERE id = ?",
                     (reset_token, expires_at, row["id"]),
                 )
                 conn.commit()
 
-        smtp_account = get_primary_smtp_account(DEFAULT_CONFIG_PATH)
+        smtp_account = get_primary_user_smtp_account(user_id=smtp_user_id, db_path=DEFAULT_DB_PATH)
         reset_link = f"{base_url}?token={quote_plus(reset_token)}"
         text_body = (
             "Sniped password reset\n\n"

@@ -232,7 +232,7 @@ class SMTPAccount:
 
 
 class AIMailer:
-    def __init__(self, db_path: str = "leads.db", config_path: str = "config.json", model_name_override: Optional[str] = None, user_id: Optional[str] = None) -> None:
+    def __init__(self, db_path: str = "leads.db", config_path: str = "config.json", model_name_override: Optional[str] = None, user_id: Optional[str] = None, smtp_accounts_override: Optional[list[dict]] = None) -> None:
         self.db_path = db_path
         self.config_path = Path(config_path)
         self.user_id = str(user_id).strip() if user_id is not None and str(user_id).strip() else None
@@ -240,6 +240,8 @@ class AIMailer:
         self._ensure_mailer_columns()
 
         self.config = self._load_config()
+        if smtp_accounts_override is not None:
+            self.config["smtp_accounts"] = list(smtp_accounts_override)
         self.model_name = str(model_name_override or FORCED_AI_MODEL).strip() or FORCED_AI_MODEL
         api_key = os.environ.get("OPENAI_API_KEY") or self.config.get("openai", {}).get("api_key", "")
         if not api_key or api_key == "YOUR_OPENAI_API_KEY":
