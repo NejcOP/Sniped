@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Runtime and logs
+logs/
+runtime/
+*.log
+
+# Local browser/profile data
+profiles/
+
+# Databases and local state
+*.db
+*.db.backup
+
+# Secrets / local config
+.env
+.env.*
+config.json
+config.local.json
+
+# Build artifacts
+frontend/dist/
+frontend/.vite/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

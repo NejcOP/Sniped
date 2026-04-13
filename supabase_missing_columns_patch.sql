@@ -1,0 +1,207 @@
+-- Run this in Supabase SQL Editor:
+-- https://supabase.com/dashboard/project/dwxunoinmgdqftvnaziz/sql/new
+--
+-- Adds all columns that exist in SQLite but may be missing from Supabase leads table.
+
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS ai_description text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS contact_name text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS email text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS insecure_site bigint default 0;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS main_shortcoming text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS enriched_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS enrichment_data text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS status text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS enrichment_status text default 'pending';
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS sent_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS generated_email_body text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS crm_comment text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS status_updated_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS last_sender_email text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS last_contacted_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS follow_up_count bigint default 0;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS ai_score double precision;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS client_tier text default 'standard';
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS next_mail_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS is_ads_client bigint default 0;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS is_website_client bigint default 0;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS worker_id bigint;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS assigned_worker_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS paid_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS open_tracking_token text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS open_count bigint default 0;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS first_opened_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS last_opened_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS campaign_sequence_id bigint;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS campaign_step bigint default 1;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS ab_variant text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS last_subject_line text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS reply_detected_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS bounced_at text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS bounce_reason text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS phone_formatted text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS phone_type text;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS pipeline_stage text DEFAULT 'Scraped';
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS client_folder_id bigint;
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'legacy';
+ALTER TABLE public.leads ADD COLUMN IF NOT EXISTS created_at text DEFAULT NOW()::text;
+
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_limit bigint default 50;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_quota bigint default 50;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_start_date text;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS topup_credits_balance bigint default 0;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_balance bigint default 0;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_limit bigint default 50;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_active boolean default false;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_status text;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_cancel_at text;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_cancel_at_period_end boolean default false;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS plan_key text default 'free';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS stripe_customer_id text;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at text;
+
+UPDATE public.users
+SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), 50)
+WHERE monthly_quota IS NULL OR monthly_quota <= 0;
+
+UPDATE public.users
+SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), 50)
+WHERE monthly_limit IS NULL OR monthly_limit <= 0;
+
+UPDATE public.users
+SET monthly_limit = monthly_quota,
+	credits_limit = monthly_quota
+WHERE monthly_quota > 0;
+
+UPDATE public.users
+SET topup_credits_balance = COALESCE(topup_credits_balance, 0)
+WHERE topup_credits_balance IS NULL;
+
+UPDATE public.users
+SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, false)
+WHERE subscription_cancel_at_period_end IS NULL;
+
+UPDATE public.users
+SET plan_key = CASE
+	WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
+		THEN LOWER(TRIM(COALESCE(plan_key, '')))
+	WHEN COALESCE(subscription_active, false) = true THEN 'pro'
+	ELSE 'free'
+END;
+
+ALTER TABLE public.workers ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'legacy';
+ALTER TABLE public.delivery_tasks ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'legacy';
+ALTER TABLE public.delivery_tasks ADD COLUMN IF NOT EXISTS position bigint;
+ALTER TABLE public.system_tasks ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'legacy';
+ALTER TABLE public.revenue_log ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'legacy';
+
+-- Mailer campaign entities (sequence builder, template library, analytics)
+CREATE TABLE IF NOT EXISTS public.CampaignSequences (
+    id bigint generated by default as identity primary key,
+    user_id text NOT NULL DEFAULT 'legacy',
+    name text NOT NULL,
+    step1_subject text,
+    step1_body text,
+    step2_delay_days bigint DEFAULT 3,
+    step2_subject text,
+    step2_body text,
+    step3_delay_days bigint DEFAULT 7,
+    step3_subject text,
+    step3_body text,
+    ab_subject_a text,
+    ab_subject_b text,
+    active boolean DEFAULT true,
+    created_at text NOT NULL,
+    updated_at text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.SavedTemplates (
+    id bigint generated by default as identity primary key,
+    user_id text NOT NULL DEFAULT 'legacy',
+    name text NOT NULL,
+    category text DEFAULT 'general',
+    prompt_text text,
+    subject_template text,
+    body_template text,
+    created_at text NOT NULL,
+    updated_at text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.CampaignEvents (
+    id bigint generated by default as identity primary key,
+    lead_id bigint,
+    user_id text NOT NULL DEFAULT 'legacy',
+    email text,
+    event_type text NOT NULL,
+    subject_variant text,
+    subject_line text,
+    metadata_json text,
+    occurred_at text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.ClientFolders (
+    id bigint generated by default as identity primary key,
+    user_id text NOT NULL DEFAULT 'legacy',
+    name text NOT NULL,
+    color text DEFAULT '#38bdf8',
+    notes text,
+    created_at text NOT NULL,
+    updated_at text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.SavedSegments (
+    id bigint generated by default as identity primary key,
+    user_id text NOT NULL DEFAULT 'legacy',
+    name text NOT NULL,
+    filters_json text NOT NULL,
+    created_at text NOT NULL,
+    updated_at text NOT NULL
+);
+
+-- Backfill all existing rows with the first (oldest) user's ID so they remain visible.
+-- If you have multiple users, replace the subquery with the correct user ID.
+UPDATE public.leads
+SET user_id = (SELECT id::text FROM public.users ORDER BY id ASC LIMIT 1)
+WHERE user_id = 'legacy';
+
+UPDATE public.workers
+SET user_id = (SELECT id::text FROM public.users ORDER BY id ASC LIMIT 1)
+WHERE user_id = 'legacy';
+
+UPDATE public.delivery_tasks
+SET user_id = (SELECT id::text FROM public.users ORDER BY id ASC LIMIT 1)
+WHERE user_id = 'legacy';
+
+UPDATE public.delivery_tasks
+SET position = id
+WHERE position IS NULL OR position <= 0;
+
+UPDATE public.leads
+SET campaign_step = 1
+WHERE campaign_step IS NULL OR campaign_step <= 0;
+
+UPDATE public.leads
+SET created_at = COALESCE(NULLIF(created_at, ''), NULLIF(scraped_at, ''), NOW()::text)
+WHERE created_at IS NULL OR TRIM(COALESCE(created_at, '')) = '';
+
+UPDATE public.system_tasks
+SET user_id = (SELECT id::text FROM public.users ORDER BY id ASC LIMIT 1)
+WHERE user_id = 'legacy';
+
+UPDATE public.revenue_log
+SET user_id = (SELECT id::text FROM public.users ORDER BY id ASC LIMIT 1)
+WHERE user_id = 'legacy';
+
+CREATE INDEX IF NOT EXISTS idx_leads_user_id ON public.leads(user_id);
+CREATE INDEX IF NOT EXISTS idx_leads_user_created_at ON public.leads(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_open_tracking_token ON public.leads(open_tracking_token);
+CREATE INDEX IF NOT EXISTS idx_leads_user_client_folder ON public.leads(user_id, client_folder_id);
+CREATE INDEX IF NOT EXISTS idx_workers_user_id ON public.workers(user_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_tasks_user_id ON public.delivery_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_tasks_user_position ON public.delivery_tasks(user_id, position);
+CREATE INDEX IF NOT EXISTS idx_system_tasks_user_id ON public.system_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_revenue_log_user_id ON public.revenue_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_sequences_user_active ON public.CampaignSequences(user_id, active);
+CREATE INDEX IF NOT EXISTS idx_saved_templates_user_category ON public.SavedTemplates(user_id, category);
+CREATE INDEX IF NOT EXISTS idx_campaign_events_user_type ON public.CampaignEvents(user_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_client_folders_user_updated ON public.ClientFolders(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_saved_segments_user_updated ON public.SavedSegments(user_id, updated_at);

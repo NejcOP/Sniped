@@ -1,0 +1,15 @@
+{
+  "name": "leadgen-fullstack",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": ".\\.venv\\Scripts\\python.exe -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "start": ".\\.venv\\Scripts\\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port 8000"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

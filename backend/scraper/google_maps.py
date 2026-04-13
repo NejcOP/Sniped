@@ -1,0 +1,677 @@
+import logging
+import random
+import re
+import time
+from pathlib import Path
+from typing import Callable, List, Optional
+from urllib.parse import quote_plus
+
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+
+try:
+    from playwright_stealth import stealth_sync
+
+    PLAYWRIGHT_STEALTH_SYNC_AVAILABLE = True
+except Exception:
+    stealth_sync = None
+    PLAYWRIGHT_STEALTH_SYNC_AVAILABLE = False
+
+from .anti_bot import (
+    MODERN_USER_AGENT,
+    apply_stealth,
+    google_domain_for_country,
+    human_like_scroll,
+    human_type,
+    locale_for_country,
+    normalize_country_code,
+    random_delay,
+    random_mouse_movements,
+    random_user_agent,
+)
+from .models import Lead
+
+
+class GoogleMapsScraper:
+    def __init__(
+        self,
+        headless: bool = True,
+        user_agent: str = MODERN_USER_AGENT,
+        country: Optional[str] = None,
+        country_code: str = "us",
+        user_data_dir: str = "profiles/maps_profile",
+        proxy_url: Optional[str] = None,
+        proxy_urls: Optional[List[str]] = None,
+    ) -> None:
+        self.headless = headless
+        self.user_agent = user_agent
+        self.country_code = normalize_country_code(country or country_code)
+        self.google_domain = google_domain_for_country(self.country_code)
+        self.locale = locale_for_country(self.country_code)
+        self.user_data_dir = str(Path(user_data_dir))
+        # Build rotation pool: prefer proxy_urls list, fall back to single proxy_url
+        pool = [p.strip() for p in (proxy_urls or []) if str(p or "").strip()]
+        if not pool and proxy_url:
+            pool = [proxy_url.strip()]
+        self._proxy_pool: List[str] = pool
+        self._proxy_pool_index: int = 0
+        self.proxy_url: str = self._next_proxy()
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self.page: Optional[Page] = None
+
+    def _next_proxy(self) -> str:
+        """Return the next proxy from the rotation pool (round-robin)."""
+        if not self._proxy_pool:
+            return ""
+        proxy = self._proxy_pool[self._proxy_pool_index % len(self._proxy_pool)]
+        self._proxy_pool_index += 1
+        return proxy
+
+    def _country_hint(self) -> str:
+        mapping = {
+            "us": "United States",
+            "uk": "United Kingdom",
+            "gb": "United Kingdom",
+            "de": "Germany",
+            "at": "Austria",
+            "ch": "Switzerland",
+            "fr": "France",
+            "it": "Italy",
+            "es": "Spain",
+            "nl": "Netherlands",
+            "pl": "Poland",
+            "hr": "Croatia",
+            "rs": "Serbia",
+            "si": "Slovenia",
+            "be": "Belgium",
+            "se": "Sweden",
+            "no": "Norway",
+            "dk": "Denmark",
+            "fi": "Finland",
+            "cz": "Czech Republic",
+            "sk": "Slovakia",
+            "hu": "Hungary",
+            "ro": "Romania",
+            "bg": "Bulgaria",
+            "gr": "Greece",
+            "pt": "Portugal",
+            "ie": "Ireland",
+            "lt": "Lithuania",
+            "lv": "Latvia",
+            "ee": "Estonia",
+            "ua": "Ukraine",
+            "tr": "Turkey",
+            "ru": "Russia",
+            "ca": "Canada",
+            "mx": "Mexico",
+            "br": "Brazil",
+            "ar": "Argentina",
+            "cl": "Chile",
+            "co": "Colombia",
+            "au": "Australia",
+            "nz": "New Zealand",
+            "in": "India",
+            "cn": "China",
+            "jp": "Japan",
+            "kr": "South Korea",
+            "sg": "Singapore",
+            "ae": "United Arab Emirates",
+            "sa": "Saudi Arabia",
+            "il": "Israel",
+            "za": "South Africa",
+            "ng": "Nigeria",
+        }
+        return mapping.get(self.country_code, self.country_code.upper())
+
+    def _compose_search_query(self, keyword: str) -> str:
+        base = str(keyword or "").strip()
+        hint = self._country_hint()
+        if not base:
+            return hint
+        if hint.lower() in base.lower():
+            return base
+        return f"{base} in {hint}"
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def start(self) -> None:
+        self._playwright = sync_playwright().start()
+
+        # Rotate UA on every fresh session
+        self.user_agent = random_user_agent()
+
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-default-browser-check",
+        ]
+        proxy_config = None
+        if self.proxy_url:
+            proxy_config = {"server": self.proxy_url}
+            logging.info("Scraper: using proxy %s", self.proxy_url.split("@")[-1])
+
+        self._browser = self._playwright.chromium.launch(
+            headless=self.headless,
+            args=launch_args,
+            proxy=proxy_config,
+        )
+
+        context_kwargs: dict = {
+            "user_agent": self.user_agent,
+            "viewport": {"width": 1366, "height": 768},
+            "locale": self.locale,
+        }
+        if proxy_config:
+            context_kwargs["proxy"] = proxy_config
+
+        self._context = self._browser.new_context(**context_kwargs)
+        self.page = self._context.new_page()
+        self._apply_stealth()
+        self._handle_startup_consent()
+
+    def _restart_with_new_identity(self) -> None:
+        """Close the current session and open a fresh one with a new UA and next proxy.
+        Called automatically when a 403/429 block is detected.
+        """
+        logging.warning("Block detected — restarting browser session with new User-Agent and proxy.")
+        # Advance to next proxy in pool for the restarted session
+        self.proxy_url = self._next_proxy()
+        try:
+            self.close()
+        except Exception:
+            pass
+        time.sleep(2)
+        self.start()
+
+    def close(self) -> None:
+        # Playwright can already be closed by the page/site flow. Do not fail the whole task on cleanup.
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                logging.debug("Browser context already closed during cleanup.")
+            finally:
+                self._context = None
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                logging.debug("Browser already closed during cleanup.")
+            finally:
+                self._browser = None
+        if self._playwright:
+            try:
+                self._playwright.stop()
+            except Exception:
+                logging.debug("Playwright already stopped during cleanup.")
+            finally:
+                self._playwright = None
+
+    def _apply_stealth(self) -> None:
+        assert self.page is not None
+
+        if PLAYWRIGHT_STEALTH_SYNC_AVAILABLE and stealth_sync is not None:
+            try:
+                stealth_sync(self.page)
+                return
+            except Exception:
+                logging.warning("playwright_stealth.stealth_sync failed, trying fallback stealth adapter.")
+
+        apply_stealth(self.page)
+
+    def _handle_startup_consent(self) -> None:
+        assert self.page is not None
+
+        try:
+            self.page.goto(f"https://{self.google_domain}", wait_until="domcontentloaded")
+            self._accept_consent_if_present()
+        except Exception:
+            logging.debug("Startup consent check skipped due to navigation issue.")
+
+    def scrape(
+        self,
+        keyword: str,
+        max_results: int,
+        progress_callback: Optional[Callable[[int, int, int, Optional[Lead]], None]] = None,
+    ) -> List[Lead]:
+        if not self.page:
+            raise RuntimeError("Scraper not started. Use with-context or call start().")
+
+        self._open_maps_and_search(keyword)
+        leads: List[Lead] = []
+        seen_cards = set()
+        stalled_rounds = 0
+        scanned_count = 0
+
+        while len(leads) < max_results and stalled_rounds < 8:
+            cards = self.page.locator("div.Nv2PK, div[role='article']")
+            count = cards.count()
+            before_seen = len(seen_cards)
+
+            for idx in range(count):
+                if len(leads) >= max_results:
+                    break
+
+                card = cards.nth(idx)
+                card_key = self._card_key(card, idx)
+                if card_key in seen_cards:
+                    continue
+
+                seen_cards.add(card_key)
+                scanned_count += 1
+                if progress_callback is not None:
+                    try:
+                        progress_callback(len(leads), max_results, scanned_count, None)
+                    except Exception:
+                        logging.debug("Progress callback failed during card scan; continuing scrape.")
+                if not self._open_card(card):
+                    continue
+
+                lead = self._extract_business(keyword)
+                if not lead:
+                    continue
+
+                if lead.business_name and lead.address:
+                    leads.append(lead)
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(len(leads), max_results, scanned_count, lead)
+                        except Exception:
+                            logging.debug("Progress callback failed; continuing scrape.")
+
+                random_mouse_movements(self.page, count=random.randint(2, 4))
+                random_delay(300, 900)
+
+            if len(seen_cards) == before_seen:
+                stalled_rounds += 1
+            else:
+                stalled_rounds = 0
+
+            if len(leads) < max_results:
+                panel = self.page.locator("div[role='feed']").first
+                try:
+                    human_like_scroll(panel, steps=random.randint(2, 4))
+                except PlaywrightTimeoutError:
+                    logging.warning("Could not scroll results panel in this round.")
+
+        return leads[:max_results]
+
+    def _is_blocked_page(self) -> bool:
+        """Return True if Google is showing a CAPTCHA, 403, or rate-limit page."""
+        assert self.page is not None
+        try:
+            url = self.page.url or ""
+            title = self.page.title() or ""
+            content = self.page.content() or ""
+        except Exception:
+            return False
+        block_signals = [
+            "sorry/index" in url,
+            "recaptcha" in url.lower(),
+            "unusual traffic" in content.lower(),
+            "captcha" in content.lower(),
+            "403" in title,
+            "429" in title,
+        ]
+        return any(block_signals)
+
+    def _goto_with_retry(self, url: str, wait_until: str = "domcontentloaded", max_retries: int = 2) -> None:
+        """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
+        assert self.page is not None
+        for attempt in range(max_retries + 1):
+            try:
+                self.page.goto(url, wait_until=wait_until)
+            except PlaywrightTimeoutError:
+                logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
+
+            if not self._is_blocked_page():
+                return
+
+            if attempt < max_retries:
+                logging.warning("Block detected on %s — restarting session (attempt %d/%d)", url, attempt + 1, max_retries)
+                self._restart_with_new_identity()
+                time.sleep(2 * (attempt + 1))
+            else:
+                logging.error("Still blocked after %d retries for %s — continuing anyway.", max_retries, url)
+
+    def _open_maps_and_search(self, keyword: str) -> None:
+        assert self.page is not None
+        search_query = self._compose_search_query(keyword)
+
+        base_url = f"https://{self.google_domain}/maps"
+        self._goto_with_retry(base_url)
+        self._accept_consent_if_present()
+        random_mouse_movements(self.page, count=4)
+        random_delay(500, 1400)
+
+        search_box = self._get_search_box()
+        if search_box is None:
+            logging.warning("Search box not found on base maps URL, trying direct search URL fallback.")
+            if self._search_via_fallback_url(keyword):
+                return
+            raise RuntimeError("Google Maps search box was not found after consent handling.")
+
+        random_mouse_movements(self.page, count=random.randint(3, 6))
+        random_delay(220, 680)
+        search_box.click()
+        search_box.fill("")
+        human_type(search_box, search_query)
+        random_delay(300, 800)
+        search_box.press("Enter")
+        random_delay(1200, 2200)
+        self._accept_consent_if_present()
+
+        # If a business profile opens directly, we can still parse it.
+        try:
+            self.page.locator("div[role='feed']").first.wait_for(state="visible", timeout=8000)
+        except PlaywrightTimeoutError:
+            logging.info("Results feed not visible yet, trying direct search URL fallback.")
+            self._search_via_fallback_url(search_query)
+
+    def _search_via_fallback_url(self, keyword: str) -> bool:
+        assert self.page is not None
+
+        fallback_url = f"https://{self.google_domain}/maps/search/{quote_plus(keyword)}"
+        self._goto_with_retry(fallback_url)
+        self._accept_consent_if_present()
+        random_delay(1000, 1800)
+
+        try:
+            self.page.locator("div[role='feed']").first.wait_for(state="visible", timeout=9000)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    def _get_search_box(self):
+        assert self.page is not None
+
+        selectors = [
+            "input#searchboxinput",
+            "input[aria-label*='Search Google Maps']",
+            "input[aria-label*='Search']",
+            "input[placeholder*='Search']",
+        ]
+
+        for selector in selectors:
+            locator = self.page.locator(selector).first
+            try:
+                locator.wait_for(state="visible", timeout=6000)
+                return locator
+            except PlaywrightTimeoutError:
+                continue
+
+        return None
+
+    def _accept_consent_if_present(self) -> bool:
+        assert self.page is not None
+
+        text_patterns = [
+            "Accept all",
+            "Accept all cookies",
+            "I agree",
+            "Agree",
+            "Accept",
+            "Akzeptieren",
+            "Alle akzeptieren",
+            "Akzeptiere alle",
+            "Zustimmen",
+            "Strinjam",
+            "Sprejmi",
+            "Sprejmi vse",
+            "Aceptar",
+            "Aceptar todo",
+            "Acepto",
+            "Accepter",
+            "Tout accepter",
+            "Accetta",
+            "Accetta tutto",
+            "Souhlasim",
+            "Prihvatam",
+            "Slažem se",
+            "Allow all",
+        ]
+
+        selectors = [
+            "button#L2AGLb",
+            "button#introAgreeButton",
+            "button[jsname='higCR']",
+            "button[jscontroller]",
+            "button[aria-label*='Sprejmi']",
+            "button[aria-label*='vse']",
+            "button[aria-label*='Accept']",
+            "button[aria-label*='Agree']",
+            "button[aria-label*='Akzeptieren']",
+            "button[aria-label*='Strinjam']",
+            "button[aria-label*='Consent']",
+            "form [type='submit']",
+            "button:has-text('Accept all')",
+            "button:has-text('I agree')",
+            "button:has-text('Accept')",
+            "button:has-text('Akzeptieren')",
+            "button:has-text('Alle akzeptieren')",
+            "button:has-text('Strinjam')",
+            "button:has-text('Sprejmi')",
+            "button:has-text('Sprejmi vse')",
+            "button:has-text('Aceptar todo')",
+            "button:has-text('Tout accepter')",
+            "button:has-text('Accetta tutto')",
+            "[role='button']:has-text('Sprejmi vse')",
+        ]
+
+        for _ in range(5):
+            scopes = [self.page.main_frame, *self.page.frames]
+            for scope in scopes:
+                for selector in selectors:
+                    try:
+                        button = scope.locator(selector).first
+                        if button.count() > 0 and button.is_visible(timeout=700):
+                            button.click(timeout=1800)
+                            random_delay(350, 900)
+                            logging.info("Accepted Google consent prompt via selector.")
+                            return True
+                    except Exception:
+                        continue
+
+                for pattern in text_patterns:
+                    try:
+                        button = scope.get_by_role("button", name=re.compile(pattern, re.IGNORECASE)).first
+                        if button.count() > 0 and button.is_visible(timeout=700):
+                            button.click(timeout=1800)
+                            random_delay(350, 900)
+                            logging.info("Accepted Google consent prompt via button role.")
+                            return True
+                    except Exception:
+                        continue
+
+                    try:
+                        link_button = scope.get_by_role("link", name=re.compile(pattern, re.IGNORECASE)).first
+                        if link_button.count() > 0 and link_button.is_visible(timeout=700):
+                            link_button.click(timeout=1800)
+                            random_delay(350, 900)
+                            logging.info("Accepted Google consent prompt via link role.")
+                            return True
+                    except Exception:
+                        continue
+
+                for pattern in text_patterns:
+                    try:
+                        generic = scope.locator(f"text=/{pattern}/i").first
+                        if generic.count() > 0 and generic.is_visible(timeout=700):
+                            generic.click(timeout=1800)
+                            random_delay(350, 900)
+                            logging.info("Accepted Google consent prompt via text locator.")
+                            return True
+                    except Exception:
+                        continue
+
+            random_delay(300, 800)
+
+        return False
+
+    def _open_card(self, card) -> bool:
+        assert self.page is not None
+
+        try:
+            card.scroll_into_view_if_needed(timeout=3000)
+            random_delay(120, 450)
+            card.click(timeout=3000)
+        except PlaywrightTimeoutError:
+            try:
+                card.locator("a.hfpxzc").first.click(timeout=3000)
+            except PlaywrightTimeoutError:
+                return False
+
+        random_delay(800, 1600)
+
+        try:
+            self.page.locator("h1.DUwDvf").first.wait_for(state="visible", timeout=5000)
+        except PlaywrightTimeoutError:
+            return False
+
+        return True
+
+    def _extract_business(self, keyword: str) -> Optional[Lead]:
+        assert self.page is not None
+
+        name = self._safe_text(self.page.locator("h1.DUwDvf").first)
+        address = self._extract_address()
+
+        if not name or not address:
+            return None
+
+        website = self._extract_website() or "None"
+        phone = self._extract_phone() or "None"
+
+        rating_text = self._safe_text(self.page.locator("span.MW4etd").first)
+        if not rating_text:
+            rating_text = self._safe_text(self.page.locator("div.F7nice span").first)
+
+        review_text = self._safe_text(self.page.locator("span.UY7F9").first)
+        if not review_text:
+            review_text = self._safe_text(
+                self.page.locator("button[jsaction*='pane.reviewChart.moreReviews'] span").first
+            )
+
+        return Lead(
+            business_name=name,
+            website_url=website,
+            phone_number=phone,
+            rating=self._parse_float(rating_text),
+            review_count=self._parse_int(review_text),
+            address=address,
+            search_keyword=keyword,
+        )
+
+    def _extract_website(self) -> Optional[str]:
+        assert self.page is not None
+
+        website_link = self.page.locator("a[data-item-id='authority']").first
+        if website_link.count() > 0:
+            href = website_link.get_attribute("href")
+            if href:
+                return href.strip()
+
+        alternative = self.page.locator("a[aria-label*='Website'], a:has-text('Website')").first
+        if alternative.count() > 0:
+            href = alternative.get_attribute("href")
+            if href:
+                return href.strip()
+
+        return None
+
+    def _extract_phone(self) -> Optional[str]:
+        assert self.page is not None
+
+        candidates = [
+            self.page.locator("button[data-item-id^='phone:tel:']").first,
+            self.page.locator("button[aria-label^='Phone:']").first,
+            self.page.locator("button[data-tooltip='Copy phone number']").first,
+        ]
+
+        for locator in candidates:
+            if locator.count() == 0:
+                continue
+
+            label = locator.get_attribute("aria-label") or ""
+            text = self._safe_text(locator) or ""
+            blob = f"{label} {text}".strip()
+
+            match = re.search(r"\+?[\d][\d\s().-]{6,}", blob)
+            if match:
+                return match.group(0).strip()
+
+        return None
+
+    def _extract_address(self) -> Optional[str]:
+        assert self.page is not None
+
+        address_button = self.page.locator("button[data-item-id='address']").first
+        if address_button.count() > 0:
+            label = address_button.get_attribute("aria-label")
+            if label and "Address:" in label:
+                return label.split("Address:", 1)[1].strip()
+
+            text = self._safe_text(address_button)
+            if text:
+                return text
+
+        return None
+
+    def _card_key(self, card, idx: int) -> str:
+        link = None
+        title = None
+
+        try:
+            link = card.locator("a.hfpxzc").first.get_attribute("href")
+        except PlaywrightTimeoutError:
+            link = None
+
+        try:
+            title = self._safe_text(card.locator(".qBF1Pd").first)
+        except PlaywrightTimeoutError:
+            title = None
+
+        return link or title or f"card-{idx}"
+
+    @staticmethod
+    def _safe_text(locator) -> Optional[str]:
+        try:
+            text = locator.inner_text(timeout=2000)
+        except PlaywrightTimeoutError:
+            return None
+
+        text = text.strip()
+        return text or None
+
+    @staticmethod
+    def _parse_float(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+
+        match = re.search(r"\d+[.,]?\d*", value)
+        if not match:
+            return None
+
+        try:
+            return float(match.group(0).replace(",", "."))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_int(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+
+        digits = re.sub(r"[^\d]", "", value)
+        if not digits:
+            return None
+
+        try:
+            return int(digits)
+        except ValueError:
+            return None
