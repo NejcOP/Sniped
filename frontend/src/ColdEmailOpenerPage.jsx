@@ -150,7 +150,7 @@ export default function ColdEmailOpenerPage() {
         })
         localStorage.removeItem('lf_pending_signup')
         toast.success('Onboarding complete. Redirecting to app...')
-        navigate('/app')
+        window.location.assign('/app')
         return
       }
 
