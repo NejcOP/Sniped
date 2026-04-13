@@ -254,6 +254,14 @@ class ColdOutreachRequest(BaseModel):
     config_path: Optional[str] = None
 
 
+class DeepOutreachIntelRequest(BaseModel):
+    raw_content: str = Field(..., min_length=20, max_length=100000)
+    user_niche: Optional[str] = Field(default=None, max_length=120)
+    company_name: Optional[str] = Field(default=None, max_length=200)
+    location: Optional[str] = Field(default=None, max_length=200)
+    token: Optional[str] = ""
+
+
 class PhoneExtractRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=500)
     country_hint: Optional[str] = Field(default=None, max_length=5)
@@ -12008,6 +12016,107 @@ def create_app() -> FastAPI:
             "credits_balance": int(billing.get("credits_balance") or 0),
             "credits_limit": int(billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
         }
+
+    @app.post("/api/intelligence/outreach-plan")
+    def generate_deep_outreach_plan(payload: DeepOutreachIntelRequest, request: Request) -> dict:
+        """Deep analysis + outreach plan from raw HTML/text content."""
+        payload_data = payload.model_dump()
+        session_token, _billing, access = resolve_plan_access_context(
+            request,
+            fallback_token=payload_data.get("token"),
+            feature_key="deep_analysis",
+        )
+        user_id = resolve_user_id_from_session_token(session_token)
+        reserve_ai_credits_or_raise(user_id, feature_key="mail_preview", db_path=DEFAULT_DB_PATH)
+        consume_ai_usage_or_raise(session_token, units=1)
+
+        client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
+        if client is None:
+            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+
+        raw_content = str(payload.raw_content or "").strip()
+        detected_phones = sorted(
+            {
+                phone.strip()
+                for phone in re.findall(r"(?:\+386\s?\d[\d\s\-/]{6,}\d)", raw_content)
+                if phone and str(phone).strip()
+            }
+        )
+        detected_emails = sorted(
+            {
+                email.strip().lower()
+                for email in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw_content)
+                if email and str(email).strip()
+            }
+        )
+
+        generic_prefixes = {"info", "office", "hello", "support", "kontakt", "contact", "admin", "sales"}
+        personal_emails = [
+            email
+            for email in detected_emails
+            if str(email).split("@", 1)[0].lower() not in generic_prefixes
+        ]
+        prioritized_emails = personal_emails if personal_emails else detected_emails
+
+        inferred_niche = str(payload.user_niche or "").strip() or resolve_user_niche_from_session_token(session_token)
+        factory = PromptFactory()
+        system_prompt = factory.get_deep_outreach_system_prompt(inferred_niche)
+        user_prompt = factory.get_deep_outreach_user_prompt(
+            raw_content=raw_content,
+            user_niche=inferred_niche,
+            company_name=payload.company_name,
+            location=payload.location,
+        )
+
+        try:
+            response = client.chat.completions.create(
+                model=str(access.get("ai_model") or model_name or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=700,
+                temperature=0.35,
+            )
+            raw_text = str(response.choices[0].message.content or "").strip()
+            json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            parsed = json.loads(json_match.group() if json_match else raw_text)
+        except Exception as exc:
+            logging.exception("Deep outreach analysis failed")
+            raise HTTPException(status_code=502, detail=f"Deep outreach analysis failed: {exc}")
+
+        contact_info = parsed.get("contact_info") if isinstance(parsed, dict) else {}
+        if not isinstance(contact_info, dict):
+            contact_info = {}
+        ai_phones = contact_info.get("phones") if isinstance(contact_info.get("phones"), list) else []
+        ai_emails = contact_info.get("emails") if isinstance(contact_info.get("emails"), list) else []
+
+        merged_phones = sorted(
+            {
+                str(v).strip()
+                for v in [*detected_phones, *ai_phones]
+                if v and str(v).strip()
+            }
+        )
+        merged_emails = sorted(
+            {
+                str(v).strip().lower()
+                for v in [*prioritized_emails, *ai_emails]
+                if v and str(v).strip()
+            }
+        )
+
+        final_output = {
+            "contact_info": {
+                "phones": merged_phones,
+                "emails": merged_emails,
+                "decision_maker": str(contact_info.get("decision_maker") or "").strip(),
+            },
+            "identified_gap": str(parsed.get("identified_gap") or "").strip(),
+            "email_draft": str(parsed.get("email_draft") or "").strip(),
+            "cold_call_script": str(parsed.get("cold_call_script") or "").strip(),
+        }
+        return final_output
 
     @app.post("/api/phone/extract")
     def extract_phone(payload: PhoneExtractRequest) -> dict:

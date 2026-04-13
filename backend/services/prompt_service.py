@@ -884,6 +884,65 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
         prompt += "\nApply Sniped Intelligence Unit scoring criteria and return JSON only."
         return prompt.strip()
 
+    @staticmethod
+    def get_deep_outreach_system_prompt(user_niche: Optional[str]) -> str:
+        """
+        System prompt for deep company analysis and outreach planning.
+
+        Output is strict JSON for contact extraction, gap diagnosis, email draft,
+        and a short cold-call opener.
+        """
+        niche = PromptFactory._validate_niche(user_niche)
+        return (
+            "You are Sniped Intelligence Unit. "
+            f"Your task is deep company analysis for outreach in niche: {niche}.\n\n"
+            "OBJECTIVE:\n"
+            "- Extract critical contact and business signals from provided HTML/text.\n"
+            "- Identify the most monetizable technical or marketing gap.\n"
+            "- Produce a high-conversion outreach plan (email + cold call).\n\n"
+            "EXTRACTION RULES:\n"
+            "1) PHONE: return all phone numbers in +386... format where possible.\n"
+            "2) EMAIL: prefer personal emails over generic addresses (info@, office@, hello@, support@).\n"
+            "3) DECISION MAKER: infer name/role only if evidence exists in text.\n"
+            "4) GAP ANALYSIS: evaluate SSL status, mobile speed, Meta Pixel presence, Google rating and any major conversion leaks relevant to niche.\n\n"
+            "OUTREACH RULES:\n"
+            "- Email subject must be shocking but professional, max 4 words.\n"
+            "- Email body must follow: Observation -> Gap -> Solution.\n"
+            "- Cold call script must be a natural 20-second opener, low-friction, curiosity-first.\n"
+            "- Use concrete language, no fluff, no generic AI wording.\n\n"
+            "OUTPUT MUST BE VALID JSON ONLY (no markdown, no code fences):\n"
+            "{\n"
+            "  \"contact_info\": {\n"
+            "    \"phones\": [\"+386...\"],\n"
+            "    \"emails\": [\"name@domain.com\"],\n"
+            "    \"decision_maker\": \"Name/Role if detected, otherwise empty string\"\n"
+            "  },\n"
+            "  \"identified_gap\": \"Exact technical or marketing error.\",\n"
+            "  \"email_draft\": \"Subject: ...\\n\\nBody: ...\",\n"
+            "  \"cold_call_script\": \"Zivijo [Ime], klicem ker sem na vasi strani opazil [Napaka]. To vas stane priblizno [Znesek] mesecno. Bi imeli 2 minuti, da vam razlozim, kako to zapreti?\"\n"
+            "}"
+        ).strip()
+
+    @staticmethod
+    def get_deep_outreach_user_prompt(
+        raw_content: str,
+        user_niche: Optional[str] = None,
+        company_name: Optional[str] = None,
+        location: Optional[str] = None,
+    ) -> str:
+        """Build user prompt payload for deep outreach analysis."""
+        niche = PromptFactory._validate_niche(user_niche)
+        safe_content = str(raw_content or "").strip()
+        if len(safe_content) > 18000:
+            safe_content = safe_content[:18000]
+        return (
+            f"User niche: {niche}\n"
+            f"Company name: {str(company_name or '').strip()}\n"
+            f"Location: {str(location or '').strip()}\n\n"
+            "Analyze the following raw HTML/text and return JSON only:\n\n"
+            f"{safe_content}"
+        ).strip()
+
 
 # ── CONVENIENCE FUNCTIONS ──
 # Quick access for common operations
