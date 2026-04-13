@@ -43,6 +43,11 @@ import { useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import Footer from './Footer'
 import { getStoredValue } from './authStorage'
+// ── Performance modules ────────────────────────────────────────────────────
+import { useDebounce } from './hooks/useDebounce'
+import { invalidateLeadsCache } from './hooks/useLeadsCache'
+import { LeadCardSkeletonList, StatCardSkeletonList } from './components/SkeletonLoaders'
+import { ScrapeProgressBar, ScrapeProgressBadge } from './components/ScrapeProgressBar'
 
 const MRR_GOAL_EUR = 16000
 const SETUP_MILESTONE_EUR = 6500
@@ -1715,7 +1720,8 @@ function App({ initialTab = 'leads' }) {
   const [digestCountdown, setDigestCountdown] = useState(() => fmtDigestCountdown())
   // (job queue removed — direct execution)
   const [leadSearch, setLeadSearch] = useState('')
-  const [debouncedLeadSearch, setDebouncedLeadSearch] = useState('')
+  // useDebounce replaces the manual setTimeout useEffect — avoids CPU spikes on every keystroke
+  const debouncedLeadSearch = useDebounce(leadSearch, 300)
   const [leadPage, setLeadPage] = useState(0)
   const [leadStatusFilter, setLeadStatusFilter] = useState('all')
   const [leadQuickFilter, setLeadQuickFilter] = useState('all')
@@ -2544,12 +2550,6 @@ function App({ initialTab = 'leads' }) {
   }, [contactedHotLeadCount, hotOpportunityCount])
   const remainingHotLeadCount = Math.max(0, hotOpportunityCount - contactedHotLeadCount)
 
-  // Debounce leadSearch by 300 ms to avoid filtering on every keystroke
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedLeadSearch(leadSearch), 300)
-    return () => clearTimeout(timer)
-  }, [leadSearch])
-
   // Reset to page 0 whenever the filter set changes
   useEffect(() => { setLeadPage(0) }, [debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted, advancedLeadFilters])
 
@@ -2922,6 +2922,7 @@ function App({ initialTab = 'leads' }) {
           setLastResult(JSON.stringify(cur.result, null, 2))
         }
         void Promise.allSettled([refreshLeads(), refreshStats(), refreshConfigHealth()])
+        invalidateLeadsCache() // clear SWR cache so next open shows fresh leads
       }
       if (wasRunning && sameTask && isFailed) {
         toast.error(`${taskLabels[taskType]} failed`)
@@ -6491,6 +6492,8 @@ function App({ initialTab = 'leads' }) {
                     Loading page…
                   </span>
                 ) : null}
+                {/* Real-time scrape/enrich progress — GPU-composited, no layout shift */}
+                <ScrapeProgressBadge />
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -6716,16 +6719,14 @@ function App({ initialTab = 'leads' }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/[0.04]">
-                      {loadingLeads ? Array.from({ length: 6 }).map((_, idx) => (
-                        <tr key={`lead-skeleton-${idx}`} className="td-row animate-pulse">
-                          <td className="td-cell" colSpan={11}>
-                            <div className="space-y-2">
-                              <div className="h-4 w-40 rounded bg-slate-700/60" />
-                              <div className="h-3 w-full max-w-[460px] rounded bg-slate-800/70" />
-                            </div>
+                      {loadingLeads ? (
+                        <tr key="lead-skeleton-row">
+                          <td colSpan={11} className="td-cell">
+                            {/* Fixed-height skeletons — CLS = 0, shimmer animation via CSS only */}
+                            <LeadCardSkeletonList count={6} />
                           </td>
                         </tr>
-                      )) : pagedLeads.length ? pagedLeads.map((lead) => {
+                      ) : pagedLeads.length ? pagedLeads.map((lead) => {
                         const isProcessing = String(lead.enrichment_status || lead.status || '').toLowerCase() === 'processing'
                         const intentSignals = normalizeLeadInsightList(lead.intent_signals, 2)
                         const techStack = normalizeLeadInsightList(lead.tech_stack, 1)
@@ -6974,14 +6975,10 @@ function App({ initialTab = 'leads' }) {
               </div>
 
                   <div className="space-y-3 lg:hidden">
-                    {loadingLeads ? Array.from({ length: 4 }).map((_, idx) => (
-                      <div key={`lead-card-skeleton-${idx}`} className="rounded-[22px] border border-slate-700/50 bg-slate-900/70 p-4 animate-pulse">
-                        <div className="h-4 w-32 rounded bg-slate-700/60" />
-                        <div className="mt-2 h-3 w-full rounded bg-slate-800/70" />
-                        <div className="mt-2 h-3 w-4/5 rounded bg-slate-800/70" />
-                        <div className="mt-4 h-10 w-full rounded-xl bg-slate-700/60" />
-                      </div>
-                    )) : pagedLeads.length ? pagedLeads.map((lead) => {
+                    {loadingLeads ? (
+                      /* Fixed-height mobile skeletons — CLS = 0 */
+                      <LeadCardSkeletonList count={4} />
+                    ) : pagedLeads.length ? pagedLeads.map((lead) => {
                       const bestLeadScore = resolveBestLeadScore(lead)
                       const pipelineStage = resolvePipelineStage(lead)
                       const techStack = normalizeLeadInsightList(lead.tech_stack, 2)
