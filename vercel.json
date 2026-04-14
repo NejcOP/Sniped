@@ -7,6 +7,9 @@
     "functions": {
         "api/[...path].js": {
             "maxDuration": 30
+        },
+        "api/auth/register.js": {
+            "maxDuration": 15
         }
     },
     "rewrites": [
