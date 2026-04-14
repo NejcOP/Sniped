@@ -5074,12 +5074,7 @@ function App({ initialTab = 'leads' }) {
       toast('Scrape started', { icon: '⏳' })
       void Promise.allSettled([fetchTaskState(), refreshStats()])
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown API error'
-      if (error?.status === 503 || msg.toLowerCase().includes('not available') || msg.toLowerCase().includes('not configured')) {
-        toast.error('Scraping requires the backend. Please run the local server or contact support.')
-      } else {
-        setLastError(msg)
-      }
+      setLastError(error instanceof Error ? error.message : 'Unknown API error')
     } finally {
       setPendingRequest('')
     }

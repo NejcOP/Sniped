@@ -8565,6 +8565,25 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_tasks() -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+        # ── Env-var check ─────────────────────────────────────────────────────
+        _required_env = {
+            "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
+            "SUPABASE_SERVICE_ROLE_KEY": "Supabase service-role key (required for auth & DB)",
+            "OPENAI_API_KEY": "OpenAI key (required for enrichment & mail)",
+        }
+        _optional_env = {
+            "BACKEND_URL": "Public URL of this server (used by Vercel proxy)",
+            "STRIPE_SECRET_KEY": "Stripe secret key (required for billing)",
+            "SMTP_HOST": "Default SMTP host (optional, can be set per-user)",
+        }
+        for var, desc in _required_env.items():
+            if not os.environ.get(var):
+                print(f"[startup] ERROR: Missing required env var {var} — {desc}")
+                logging.error("[startup] Missing required env var %s — %s", var, desc)
+        for var, desc in _optional_env.items():
+            if not os.environ.get(var):
+                print(f"[startup] WARNING: Optional env var {var} not set — {desc}")
+        # ── DB init ───────────────────────────────────────────────────────────
         print("[startup] Initialising database tables...")
         try:
             ensure_system_tables(DEFAULT_DB_PATH)

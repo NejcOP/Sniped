@@ -213,10 +213,6 @@ module.exports = async (req, res) => {
     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured' })
     return handleBlacklist(req, res, supabaseUrl, supabaseKey)
   }
-  // scrape — requires Python backend, return clear error instead of 503
-  if (nativePath === 'scrape') {
-    return res.status(503).json({ detail: 'Scraping is not available in the hosted version. Please configure the backend.' })
-  }
 
   // In non-production environments fall back to local Python backend so dev works without env vars.
   const isDev = process.env.VERCEL_ENV !== 'production'
