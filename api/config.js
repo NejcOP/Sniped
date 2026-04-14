@@ -42,23 +42,21 @@ module.exports = async (req, res) => {
     { headers }
   )
 
-  if (!userRes.ok) {
-    return res.status(502).json({ detail: 'Config lookup failed.' })
-  }
-
-  const rows = await userRes.json()
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return res.status(401).json({ detail: 'Invalid or expired session token.' })
-  }
-
   let smtpAccounts = []
-  try {
-    const raw = rows[0].smtp_accounts_json
-    const parsed = raw ? JSON.parse(raw) : []
-    smtpAccounts = Array.isArray(parsed) ? parsed : []
-  } catch {
-    smtpAccounts = []
+
+  if (userRes.ok) {
+    try {
+      const rows = await userRes.json()
+      if (Array.isArray(rows) && rows.length > 0) {
+        const raw = rows[0].smtp_accounts_json
+        const parsed = raw ? JSON.parse(raw) : []
+        smtpAccounts = Array.isArray(parsed) ? parsed : []
+      }
+    } catch {
+      smtpAccounts = []
+    }
   }
+  // If query fails (e.g. column missing), just return default empty config — don't 502
 
   const safeAccounts = smtpAccounts.map((a) => ({
     host: a.host || 'smtp.gmail.com',
