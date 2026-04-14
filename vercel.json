@@ -16,6 +16,9 @@
         },
         "api/auth/profile.js": {
             "maxDuration": 15
+        },
+        "api/config.js": {
+            "maxDuration": 15
         }
     },
     "rewrites": [
