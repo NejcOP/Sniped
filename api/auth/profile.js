@@ -8,6 +8,10 @@ function getSupabaseKey() {
   return process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 }
 
+function hashPassword(password, salt) {
+  return crypto.pbkdf2Sync(password, salt, 260000, 32, 'sha256').toString('hex')
+}
+
 const FREE_QUOTA = 50
 
 const PLAN_DISPLAY_NAMES = {
@@ -112,12 +116,60 @@ async function handleProfileUpdate(req, res) {
   const supabaseKey = getSupabaseKey()
   if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured.' })
 
-  const headers = {
+  const dbHeaders = {
     apikey: supabaseKey,
     Authorization: `Bearer ${supabaseKey}`,
     'Content-Type': 'application/json',
   }
 
+  // Password change flow
+  if (body.current_password && body.new_password) {
+    if (String(body.new_password).length < 8) {
+      return res.status(400).json({ detail: 'New password must be at least 8 characters.' })
+    }
+
+    // Fetch current hash+salt
+    const userRes = await fetch(
+      `${supabaseUrl}/rest/v1/users?token=eq.${encodeURIComponent(token)}&select=id,password_hash,salt&limit=1`,
+      { headers: dbHeaders }
+    )
+    if (!userRes.ok) return res.status(502).json({ detail: 'Password verification failed.' })
+    const rows = await userRes.json()
+    if (!Array.isArray(rows) || rows.length === 0) return res.status(401).json({ detail: 'Invalid or expired session token.' })
+
+    const row = rows[0]
+    const expected = hashPassword(String(body.current_password), String(row.salt || ''))
+    const actual = String(row.password_hash || '')
+
+    // Constant-time compare
+    const expBuf = Buffer.from(expected, 'hex')
+    const actBuf = Buffer.from(actual, 'hex')
+    const match = expBuf.length === actBuf.length && crypto.timingSafeEqual(expBuf, actBuf)
+
+    if (!match) {
+      return res.status(401).json({ detail: 'Current password is incorrect.' })
+    }
+
+    const newSalt = crypto.randomBytes(32).toString('hex')
+    const newHash = hashPassword(String(body.new_password), newSalt)
+
+    const patchRes = await fetch(
+      `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(row.id)}`,
+      {
+        method: 'PATCH',
+        headers: { ...dbHeaders, Prefer: 'return=minimal' },
+        body: JSON.stringify({ password_hash: newHash, salt: newSalt }),
+      }
+    )
+    if (!patchRes.ok) {
+      const err = await patchRes.text()
+      return res.status(502).json({ detail: `Password update failed: ${err}` })
+    }
+
+    return res.status(200).json({ ok: true })
+  }
+
+  // Profile fields update
   const updates = {}
   if (body.display_name !== undefined) updates.display_name = String(body.display_name || '').trim()
   if (body.niche !== undefined) updates.niche = String(body.niche || '').trim()
@@ -132,7 +184,7 @@ async function handleProfileUpdate(req, res) {
     `${supabaseUrl}/rest/v1/users?token=eq.${encodeURIComponent(token)}`,
     {
       method: 'PATCH',
-      headers: { ...headers, Prefer: 'return=representation' },
+      headers: { ...dbHeaders, Prefer: 'return=representation' },
       body: JSON.stringify(updates),
     }
   )
@@ -142,14 +194,14 @@ async function handleProfileUpdate(req, res) {
     return res.status(502).json({ detail: `Profile update failed: ${err}` })
   }
 
-  const rows = await patchRes.json()
-  const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : {}
+  const updated = await patchRes.json()
+  const r = Array.isArray(updated) && updated.length > 0 ? updated[0] : {}
 
   return res.status(200).json({
-    email: row.email || '',
-    niche: row.niche || updates.niche || '',
-    display_name: row.display_name || updates.display_name || '',
-    account_type: row.account_type || updates.account_type || 'entrepreneur',
-    average_deal_value: Number(row.average_deal_value || updates.average_deal_value || 1000),
+    email: r.email || '',
+    niche: r.niche || updates.niche || '',
+    display_name: r.display_name || updates.display_name || '',
+    account_type: r.account_type || updates.account_type || 'entrepreneur',
+    average_deal_value: Number(r.average_deal_value || updates.average_deal_value || 1000),
   })
 }

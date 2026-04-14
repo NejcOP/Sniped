@@ -816,6 +816,10 @@ export default function SettingsPage() {
       toast.error('New password and confirmation do not match.')
       return
     }
+    if (profileForm.new_password.length < 8) {
+      toast.error('New password must be at least 8 characters.')
+      return
+    }
 
     setProfileSaving(true)
     try {
