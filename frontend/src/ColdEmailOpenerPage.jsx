@@ -98,22 +98,73 @@ export default function ColdEmailOpenerPage() {
     setCopiedSentenceIndex(null)
     try {
       const isOnboarding = !token && !!pendingSignup
-      const endpoint = isOnboarding ? '/api/onboarding/complete' : '/api/cold-email-opener'
-      const payload = isOnboarding
-        ? {
-            ...pendingSignup,
-            prospect_data: prospectData.trim(),
+
+      if (isOnboarding) {
+        // Step 1: register account
+        const regRes = await fetch(`${API_BASE}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: pendingSignup.email,
+            password: pendingSignup.password,
+            niche: pendingSignup.niche,
+            account_type: pendingSignup.account_type,
+            display_name: pendingSignup.display_name,
+            contact_name: pendingSignup.contact_name,
+          }),
+        })
+        const regRaw = await regRes.text()
+        let regData = {}
+        try { regData = regRaw ? JSON.parse(regRaw) : {} } catch { regData = { detail: regRaw || 'Unknown error.' } }
+
+        if (!regRes.ok) {
+          if (regRes.status === 409) {
+            toast.error('This email already exists. Please sign in.')
+            navigate('/login')
+            return
           }
-        : {
-            token,
+          toast.error(regData.detail || 'Registration failed.')
+          return
+        }
+
+        // Step 2: store session
+        setAuthSession({
+          lf_token: regData.token,
+          lf_niche: regData.niche,
+          lf_email: regData.email,
+          lf_display_name: regData.display_name || '',
+        })
+        localStorage.removeItem('lf_pending_signup')
+
+        // Step 3: generate opener with new token
+        const openerRes = await fetch(`${API_BASE}/api/cold-email-opener`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: regData.token,
             prospect_data: prospectData.trim(),
             pack_mode: packMode,
-          }
+          }),
+        })
+        const openerRaw = await openerRes.text()
+        let openerData = {}
+        try { openerData = openerRaw ? JSON.parse(openerRaw) : {} } catch { openerData = {} }
 
-      const res = await fetch(`${API_BASE}${endpoint}`, {
+        // Redirect to /app regardless of opener result
+        toast.success('Account created! Redirecting to app...')
+        window.location.assign('/app')
+        return
+      }
+
+      // Logged-in flow
+      const res = await fetch(`${API_BASE}/api/cold-email-opener`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          token,
+          prospect_data: prospectData.trim(),
+          pack_mode: packMode,
+        }),
       })
       const raw = await res.text()
       let data = {}
@@ -124,19 +175,9 @@ export default function ColdEmailOpenerPage() {
       }
       if (!res.ok) {
         const detail = data.detail || 'Generation failed.'
-        if (res.status === 409) {
-          toast.error('This email already exists. Please sign in.')
-          navigate('/login')
-          return
-        }
         if (res.status === 401) {
           toast.error('Session expired. Please log in again.')
           handleLogout()
-          return
-        }
-        if (isOnboarding && res.status === 404) {
-          localStorage.removeItem('lf_pending_signup')
-          window.location.assign('/app')
           return
         }
         const friendly = getFriendlyAiError(res.status, detail)
@@ -146,19 +187,6 @@ export default function ColdEmailOpenerPage() {
             void generateOpener({ retried: true })
           }, 5000)
         }
-        return
-      }
-
-      if (isOnboarding) {
-        setAuthSession({
-          lf_token: data.token,
-          lf_niche: data.niche,
-          lf_email: data.email,
-          lf_display_name: data.display_name || '',
-        })
-        localStorage.removeItem('lf_pending_signup')
-        toast.success('Onboarding complete. Redirecting to app...')
-        window.location.assign('/app')
         return
       }
 
