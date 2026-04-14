@@ -10,6 +10,12 @@
         },
         "api/auth/register.js": {
             "maxDuration": 15
+        },
+        "api/auth/login.js": {
+            "maxDuration": 15
+        },
+        "api/auth/profile.js": {
+            "maxDuration": 15
         }
     },
     "rewrites": [
