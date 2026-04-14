@@ -22,6 +22,10 @@ const PLAN_DISPLAY_NAMES = {
 module.exports = async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
 
+  if (req.method === 'PUT') {
+    return handleProfileUpdate(req, res)
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ detail: 'Method not allowed' })
   }
@@ -93,5 +97,59 @@ module.exports = async (req, res) => {
     subscription_cancel_at: row.subscription_cancel_at || null,
     subscription_cancel_at_period_end: Boolean(row.subscription_cancel_at_period_end),
     plan_key: planKey,
+  })
+}
+
+async function handleProfileUpdate(req, res) {
+  const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {})
+
+  let token = body.token || ''
+  const authHeader = String(req.headers.authorization || '')
+  if (!token && authHeader.startsWith('Bearer ')) token = authHeader.slice(7).trim()
+  if (!token) return res.status(401).json({ detail: 'Invalid or expired session token.' })
+
+  const supabaseUrl = getSupabaseUrl()
+  const supabaseKey = getSupabaseKey()
+  if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured.' })
+
+  const headers = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    'Content-Type': 'application/json',
+  }
+
+  const updates = {}
+  if (body.display_name !== undefined) updates.display_name = String(body.display_name || '').trim()
+  if (body.niche !== undefined) updates.niche = String(body.niche || '').trim()
+  if (body.account_type !== undefined) updates.account_type = String(body.account_type || 'entrepreneur').toLowerCase()
+  if (body.average_deal_value !== undefined) updates.average_deal_value = Number(body.average_deal_value || 1000)
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ detail: 'No fields to update.' })
+  }
+
+  const patchRes = await fetch(
+    `${supabaseUrl}/rest/v1/users?token=eq.${encodeURIComponent(token)}`,
+    {
+      method: 'PATCH',
+      headers: { ...headers, Prefer: 'return=representation' },
+      body: JSON.stringify(updates),
+    }
+  )
+
+  if (!patchRes.ok) {
+    const err = await patchRes.text()
+    return res.status(502).json({ detail: `Profile update failed: ${err}` })
+  }
+
+  const rows = await patchRes.json()
+  const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : {}
+
+  return res.status(200).json({
+    email: row.email || '',
+    niche: row.niche || updates.niche || '',
+    display_name: row.display_name || updates.display_name || '',
+    account_type: row.account_type || updates.account_type || 'entrepreneur',
+    average_deal_value: Number(row.average_deal_value || updates.average_deal_value || 1000),
   })
 }
