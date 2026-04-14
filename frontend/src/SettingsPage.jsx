@@ -185,21 +185,124 @@ function ProfileTab({ profileForm, onProfileChange, onSave, saving, loading }) {
   )
 }
 
+function SmtpSetupModal({ onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-[#0D1117] p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-bold text-white">How to setup SMTP?</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">✕</button>
+        </div>
+
+        {/* Why */}
+        <div className="mb-5 rounded-xl bg-yellow-500/10 border border-yellow-500/20 p-3 text-sm text-yellow-300">
+          SMTP lets Sniped send emails from <strong>your</strong> inbox so they land in primary — not spam.
+        </div>
+
+        {/* Supported providers */}
+        <h3 className="text-sm font-semibold text-white mb-2">Supported Providers</h3>
+        <div className="grid grid-cols-2 gap-2 mb-5">
+          {['Gmail', 'Outlook', 'Zoho Mail', 'Custom SMTP'].map((p) => (
+            <div key={p} className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-300">{p}</div>
+          ))}
+        </div>
+
+        {/* Host/Port table */}
+        <h3 className="text-sm font-semibold text-white mb-2">Host &amp; Port Reference</h3>
+        <div className="rounded-xl border border-slate-700 overflow-hidden mb-5 text-sm">
+          <table className="w-full">
+            <thead className="bg-slate-800">
+              <tr>
+                <th className="px-3 py-2 text-left text-slate-400 font-medium">Provider</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-medium">Host</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-medium">Port</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {[
+                ['Gmail', 'smtp.gmail.com', '587'],
+                ['Outlook', 'smtp-mail.outlook.com', '587'],
+                ['Zoho', 'smtp.zoho.com', '587'],
+                ['Yahoo', 'smtp.mail.yahoo.com', '587'],
+              ].map(([name, host, port]) => (
+                <tr key={name} className="bg-[#111827]">
+                  <td className="px-3 py-2 text-slate-300">{name}</td>
+                  <td className="px-3 py-2 text-yellow-400 font-mono text-xs">{host}</td>
+                  <td className="px-3 py-2 text-slate-300">{port}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Gmail guide */}
+        <h3 className="text-sm font-semibold text-white mb-3">Gmail Step-by-Step</h3>
+        <ol className="space-y-3 mb-5">
+          {[
+            { step: '1', title: 'Enable 2-Factor Authentication', desc: 'Go to myaccount.google.com → Security → 2-Step Verification and turn it on.' },
+            { step: '2', title: 'Create an App Password', desc: 'Go to myaccount.google.com → Security → App Passwords. Select "Mail" + "Other" and generate.' },
+            { step: '3', title: 'Use the App Password here', desc: 'Paste the 16-character app password in the Password field above — NOT your regular Gmail password.' },
+          ].map(({ step, title, desc }) => (
+            <li key={step} className="flex gap-3">
+              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-yellow-500 text-slate-900 text-xs font-bold flex items-center justify-center">{step}</span>
+              <div>
+                <p className="text-sm font-medium text-white">{title}</p>
+                <p className="text-xs text-slate-400 mt-0.5">{desc}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        <div className="flex gap-3">
+          <a
+            href="https://myaccount.google.com/apppasswords"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex-1 text-center rounded-xl bg-yellow-500 text-slate-900 text-sm font-bold py-2.5 hover:bg-yellow-400 transition-colors"
+          >
+            Open Google App Passwords ↗
+          </a>
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-xl border border-slate-700 text-slate-300 text-sm py-2.5 hover:bg-slate-800 transition-colors"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, loading }) {
+  const [showSetupModal, setShowSetupModal] = useState(false)
   return (
     <form onSubmit={onSave} className="rounded-xl border border-slate-800 bg-[#0D1117] p-5">
+      {showSetupModal && <SmtpSetupModal onClose={() => setShowSetupModal(false)} />}
       <div className="mb-5 flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-white">Emails / SMTP</h2>
           <p className="mt-1 text-sm text-slate-400">Connected sending accounts for outreach delivery.</p>
         </div>
-        <button
-          type="button"
-          onClick={onAdd}
-          className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-3 py-2 text-xs font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
-        >
-          <Plus className="h-3.5 w-3.5" /> Add SMTP Account
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowSetupModal(true)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:border-slate-500 transition-colors"
+          >
+            How to setup?
+          </button>
+          <button
+            type="button"
+            onClick={onAdd}
+            className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-3 py-2 text-xs font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
+          >
+            <Plus className="h-3.5 w-3.5" /> Add SMTP Account
+          </button>
+        </div>
       </div>
 
       <div className="space-y-4">
