@@ -4648,8 +4648,10 @@ function App({ initialTab = 'leads' }) {
       if (!silent) toast.success('Campaign stats refreshed')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not load campaign stats'
-      setLastError(message)
-      if (!silent) toast.error(message)
+      if (!message.toLowerCase().includes('backend is not configured')) {
+        setLastError(message)
+        if (!silent) toast.error(message)
+      }
     } finally {
       setCampaignLoading(false)
     }

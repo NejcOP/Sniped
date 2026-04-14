@@ -40,6 +40,15 @@
         },
         "api/leads.js": {
             "maxDuration": 20
+        },
+        "api/mailer/campaign-stats.js": {
+            "maxDuration": 15
+        },
+        "api/mailer/sequences.js": {
+            "maxDuration": 15
+        },
+        "api/mailer/templates.js": {
+            "maxDuration": 15
         }
     },
     "rewrites": [
