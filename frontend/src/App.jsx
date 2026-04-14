@@ -6103,7 +6103,7 @@ function App({ initialTab = 'leads' }) {
               <WorkflowCard
                 icon={<Send className="h-5 w-5" />}
                 step="03"
-                title={<span className="flex items-center gap-2">Launch Mailer {!canDripCampaigns ? <PremiumBadge label="Automation: Growth+" /> : null}</span>}
+                title={<span className="flex items-center gap-2">Launch Mailer</span>}
                 summary={`${livePendingMailCount} leads waiting for outreach`}
                 status={mailerProgress.status === 'stopping' ? 'Stopping' : mailerTask.running ? 'Sending' : mailerProgress.status === 'stopped' ? 'Stopped' : 'Ready'}
                 accent="blue"
@@ -6152,8 +6152,8 @@ function App({ initialTab = 'leads' }) {
                   Pending: {livePendingMailCount}
                 </span>
               </div>
-              {!canDripCampaigns ? (
-                <p className="mt-2 text-xs text-amber-300">Manual sending is available on every plan. Drip campaigns and bulk outreach unlock on The Growth, The Scale, and The Empire.</p>
+              {!configForm.smtp_accounts?.[0]?.email ? (
+                <p className="mt-2 text-xs text-amber-300">Pred pošiljanjem nastavi SMTP račun v razdelku <button type="button" className="underline hover:text-amber-200" onClick={() => setActiveTab('config')}>Mail → Nastavitve</button>.</p>
               ) : null}
               {mailerProgress.isVisible ? (
                 <div style={{ marginTop: '1.5rem' }}>
