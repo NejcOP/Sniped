@@ -134,6 +134,11 @@ export default function ColdEmailOpenerPage() {
           handleLogout()
           return
         }
+        if (isOnboarding && res.status === 404) {
+          localStorage.removeItem('lf_pending_signup')
+          window.location.assign('/app')
+          return
+        }
         const friendly = getFriendlyAiError(res.status, detail)
         toast.error(friendly)
         if (!retried && (res.status === 429 || res.status >= 500)) {
