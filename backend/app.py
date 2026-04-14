@@ -8565,10 +8565,22 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_tasks() -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-        ensure_system_tables(DEFAULT_DB_PATH)
-        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
-            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+        print("[startup] Initialising database tables...")
+        try:
+            ensure_system_tables(DEFAULT_DB_PATH)
+            print("[startup] SQLite system tables OK")
+        except Exception as exc:
+            logging.error("[startup] SQLite table init failed (non-fatal): %s", exc)
+            print(f"[startup] WARNING: SQLite table init failed: {exc}")
+        try:
+            if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+                ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+                print("[startup] Supabase users table OK")
+        except Exception as exc:
+            logging.error("[startup] Supabase table init failed (non-fatal): %s", exc)
+            print(f"[startup] WARNING: Supabase table init failed: {exc}")
         start_scheduler(app)
+        print("[startup] Scheduler started — app ready")
 
     @app.on_event("shutdown")
     def shutdown_tasks() -> None:
@@ -10974,10 +10986,16 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scrape")
     def run_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
+        print(f"[scrape] POST /api/scrape — keyword={payload.keyword!r} results={payload.results}")
         _, billing, access = resolve_plan_access_context(request, feature_key="basic_search")
         user_id = require_current_user_id(request)
+        print(f"[scrape] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
-        ensure_system_tables(db_path)
+        try:
+            ensure_system_tables(db_path)
+        except Exception as _db_exc:
+            print(f"[scrape] DB init error: {_db_exc}")
+            raise HTTPException(status_code=500, detail="Database offline")
 
         available_credits = max(0, int(billing.get("credits_balance") or 0))
         if available_credits <= 0:
@@ -11919,8 +11937,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/enrich")
     def run_enrichment(payload: EnrichRequest, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
+        print(f"[enrich] POST /api/enrich — limit={payload.limit}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
-        ensure_system_tables(db_path)
+        try:
+            ensure_system_tables(db_path)
+        except Exception as _db_exc:
+            print(f"[enrich] DB init error: {_db_exc}")
+            raise HTTPException(status_code=500, detail="Database offline")
 
         payload_data = payload.model_dump()
         session_token, billing, access = resolve_plan_access_context(
@@ -11989,10 +12012,16 @@ def create_app() -> FastAPI:
 
     @app.post("/api/mailer/send")
     def run_mailer(payload: MailerRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
+        print(f"[mailer] POST /api/mailer/send — limit={payload.limit}")
         _session_token, billing, access = resolve_plan_access_context(request)
         user_id = require_current_user_id(request)
+        print(f"[mailer] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
-        ensure_system_tables(db_path)
+        try:
+            ensure_system_tables(db_path)
+        except Exception as _db_exc:
+            print(f"[mailer] DB init error: {_db_exc}")
+            raise HTTPException(status_code=500, detail="Database offline")
 
         if payload.delay_min > payload.delay_max:
             raise HTTPException(status_code=400, detail="delay_min must be <= delay_max")
@@ -12262,6 +12291,7 @@ def create_app() -> FastAPI:
     @app.post("/api/mailer/stop")
     def stop_mailer(request: Request) -> dict:
         """Signal the running mailer to stop, or clear an orphaned task immediately."""
+        print("[mailer] POST /api/mailer/stop")
         user_id = require_current_user_id(request)
         reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
         latest_task = fetch_latest_task(DEFAULT_DB_PATH, "mailer", user_id=user_id)
