@@ -6390,7 +6390,7 @@ function App({ initialTab = 'leads' }) {
             </div>
           </div>
 
-          {lastError ? <pre className="mb-4 overflow-auto rounded-2xl bg-rose-950/60 px-4 py-4 text-sm text-rose-300 ring-1 ring-rose-500/20">{lastError}</pre> : null}
+          {lastError && !lastError.toLowerCase().includes('backend_url') && !lastError.toLowerCase().includes('backend is not configured') ? <pre className="mb-4 overflow-auto rounded-2xl bg-rose-950/60 px-4 py-4 text-sm text-rose-300 ring-1 ring-rose-500/20">{lastError}</pre> : null}
           {scrapeSummary ? (
             <div className="mb-4">
               <div className="scrape-summary-card scrape-summary-card-wide">

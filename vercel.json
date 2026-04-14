@@ -37,6 +37,9 @@
         },
         "api/recommend-niche.js": {
             "maxDuration": 20
+        },
+        "api/leads.js": {
+            "maxDuration": 20
         }
     },
     "rewrites": [
