@@ -2968,7 +2968,7 @@ function App({ initialTab = 'leads' }) {
   }
 
   async function refreshConfigHealth() {
-    try { setConfigHealth(await fetchJson('/api/config-health')) }
+    try { setConfigHealth(await fetchJson('/api/health')) }
     catch (error) { setConfigHealth({ ok: false, openai_ok: false, smtp_ok: false, error: error instanceof Error ? error.message : 'Unknown error' }) }
   }
 

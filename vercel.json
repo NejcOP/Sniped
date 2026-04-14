@@ -23,9 +23,6 @@
         "api/health.js": {
             "maxDuration": 10
         },
-        "api/config-health.js": {
-            "maxDuration": 10
-        },
         "api/stats.js": {
             "maxDuration": 15
         },
@@ -41,13 +38,7 @@
         "api/leads.js": {
             "maxDuration": 20
         },
-        "api/mailer/campaign-stats.js": {
-            "maxDuration": 15
-        },
-        "api/mailer/sequences.js": {
-            "maxDuration": 15
-        },
-        "api/mailer/templates.js": {
+        "api/mailer/[...path].js": {
             "maxDuration": 15
         }
     },
