@@ -425,7 +425,7 @@ function getDefaultFeatureAccess(rawPlanKey = 'free') {
     plan_type: SUBSCRIPTION_PLAN_DETAILS[planKey]?.displayName || 'The Starter',
     basic_search: true,
     mailer_send: true,
-    deep_analysis: false,
+    deep_analysis: true,
     bulk_export: false,
     drip_campaigns: false,
     ai_lead_scoring: false,
@@ -5083,10 +5083,6 @@ function App({ initialTab = 'leads' }) {
       toast.error('Out of credits. Please upgrade or buy more credits.')
       return
     }
-    if (!canDeepAnalysis) {
-      toast('AI Enrichment unlocks on The Growth and above.', { icon: '🔒' })
-      return
-    }
     void startTask('enrich', '/api/enrich', {
       limit: Number(enrichForm.limit),
       headless: Boolean(enrichForm.headless),
@@ -6028,7 +6024,7 @@ function App({ initialTab = 'leads' }) {
             <WorkflowCard
               icon={<Sparkles className="h-5 w-5" />}
               step="02"
-              title={<span className="flex items-center gap-2">AI Enrichment {!canDeepAnalysis ? <PremiumBadge label="Growth+" /> : null}</span>}
+              title={<span className="flex items-center gap-2">AI Enrichment</span>}
               summary={`${workflowStats.scraped} raw leads need scoring and email discovery`}
               status={String(enrichTask.status || '').toLowerCase() === 'queued' ? 'Queued' : enrichTask.running ? 'Running' : 'Ready'}
               accent="teal"
@@ -6052,7 +6048,7 @@ function App({ initialTab = 'leads' }) {
                   Heavy traffic! We are processing other leads. Retry in <strong>{enrichRetrySeconds}s</strong>.
                 </div>
               ) : null}
-              <button className="workflow-btn" type="button" disabled={!canDeepAnalysis || pendingRequest === 'enrich' || enrichTask.running || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || enrichTask.running || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
                 {pendingRequest === 'enrich' || enrichTask.running ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" /> AI is analyzing...
@@ -6061,19 +6057,12 @@ function App({ initialTab = 'leads' }) {
                   <>
                     <RefreshCw className="h-4 w-4" /> Retry in {enrichRetrySeconds}s
                   </>
-                ) : !canDeepAnalysis ? (
-                  <>
-                    <Lock className="h-4 w-4" /> Unlock on Growth+
-                  </>
                 ) : (
                   <>
                     <Sparkles className="h-4 w-4" /> {submitLabel('enrich', enrichTask.running, pendingRequest === 'enrich').replace('Start', 'Run')}
                   </>
                 )}
               </button>
-              {!canDeepAnalysis ? (
-                <p className="mt-2 text-xs text-amber-300">Deep analysis is available on The Growth, The Scale, and The Empire plans.</p>
-              ) : null}
               {enrichProgress.isVisible ? (
                 <div style={{ marginTop: '1.5rem' }}>
                   <div
