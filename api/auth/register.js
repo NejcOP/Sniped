@@ -1,24 +1,11 @@
 const crypto = require('crypto')
-const fs = require('fs')
-const path = require('path')
-
-let _config = null
-function getConfig() {
-  if (_config) return _config
-  try {
-    _config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'config.json'), 'utf8'))
-  } catch {
-    _config = {}
-  }
-  return _config
-}
 
 function getSupabaseUrl() {
-  return process.env.SUPABASE_URL || getConfig()?.supabase?.url || ''
+  return process.env.SUPABASE_URL || ''
 }
 
 function getSupabaseKey() {
-  return process.env.SUPABASE_SERVICE_ROLE_KEY || getConfig()?.supabase?.service_role_key || ''
+  return process.env.SUPABASE_SERVICE_ROLE_KEY || ''
 }
 
 function hashPassword(password, salt) {
@@ -58,7 +45,9 @@ module.exports = async (req, res) => {
   const supabaseKey = getSupabaseKey()
 
   if (!supabaseUrl || !supabaseKey) {
-    return res.status(503).json({ detail: 'Database not configured.' })
+    return res.status(503).json({
+      detail: 'Database not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel Dashboard > Settings > Environment Variables.',
+    })
   }
 
   const headers = {
