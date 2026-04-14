@@ -148,5 +148,40 @@ module.exports = async (req, res) => {
     }
   }
 
-  return res.status(404).json({ detail: `Unknown mailer endpoint: ${subPath}` })
+  // Fallback: proxy remaining paths (send, stop, preview, cold-outreach, etc.) to Python backend
+  const isDev = process.env.VERCEL_ENV !== 'production'
+  const backendBase = String(process.env.BACKEND_URL || process.env.VITE_API_URL || (isDev ? 'http://localhost:8000' : '')).trim().replace(/\/$/, '')
+  if (!backendBase) {
+    return res.status(503).json({ detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.' })
+  }
+
+  const HOP_BY_HOP = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailers','transfer-encoding','upgrade','host'])
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (k === 'path') continue
+    if (Array.isArray(v)) v.forEach(i => qs.append(k, i))
+    else if (v != null) qs.append(k, String(v))
+  }
+  const qStr = qs.toString() ? `?${qs.toString()}` : ''
+  const targetUrl = `${backendBase}/api/mailer/${subPath}${qStr}`
+
+  const headers = {}
+  for (const [k, v] of Object.entries(req.headers || {})) {
+    if (!HOP_BY_HOP.has(String(k).toLowerCase()) && v != null) {
+      headers[k] = Array.isArray(v) ? v.join(', ') : String(v)
+    }
+  }
+
+  try {
+    let body
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      body = req.body == null ? undefined : (Buffer.isBuffer(req.body) ? req.body : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body)))
+    }
+    const upstream = await fetch(targetUrl, { method: req.method, headers, body, redirect: 'manual' })
+    res.status(upstream.status)
+    upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) res.setHeader(k, v) })
+    return res.send(Buffer.from(await upstream.arrayBuffer()))
+  } catch (err) {
+    return res.status(502).json({ detail: `Backend request failed: ${err instanceof Error ? err.message : 'Unknown error'}` })
+  }
 }
