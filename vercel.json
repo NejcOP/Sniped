@@ -19,6 +19,21 @@
         },
         "api/config.js": {
             "maxDuration": 15
+        },
+        "api/health.js": {
+            "maxDuration": 10
+        },
+        "api/config-health.js": {
+            "maxDuration": 10
+        },
+        "api/stats.js": {
+            "maxDuration": 15
+        },
+        "api/tasks.js": {
+            "maxDuration": 10
+        },
+        "api/auth/personal-goal.js": {
+            "maxDuration": 10
         }
     },
     "rewrites": [
