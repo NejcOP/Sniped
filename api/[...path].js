@@ -45,7 +45,10 @@ async function readRawBody(req) {
 }
 
 module.exports = async (req, res) => {
-  const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL)
+  // In non-production environments fall back to local Python backend so dev works without env vars.
+  const isDev = process.env.VERCEL_ENV !== 'production'
+  const devFallback = isDev ? 'http://localhost:8000' : ''
+  const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || devFallback)
   if (!backendBase) {
     return res.status(503).json({
       detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.',

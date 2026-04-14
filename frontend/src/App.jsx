@@ -1939,6 +1939,8 @@ function App({ initialTab = 'leads' }) {
   const workflowRef = useRef(null)
   const mainPanelRef = useRef(null)
   const pendingDeletesRef = useRef({})
+  const taskFetchFailCountRef = useRef(0)
+  const taskFetchBackoffUntilRef = useRef(0)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -3982,11 +3984,20 @@ function App({ initialTab = 'leads' }) {
   }
 
   async function fetchTaskState() {
+    // Exponential backoff — skip if we are in a cooldown period
+    if (Date.now() < taskFetchBackoffUntilRef.current) return
     try {
       const data = await fetchJson('/api/tasks')
+      taskFetchFailCountRef.current = 0
+      taskFetchBackoffUntilRef.current = 0
       setTasks(data.tasks || {})
       setTaskHistory(Array.isArray(data.history) ? data.history : [])
     } catch (error) {
+      const fails = taskFetchFailCountRef.current + 1
+      taskFetchFailCountRef.current = fails
+      // Cap delay at 5 minutes; 3s * 2^n
+      const delayMs = Math.min(3000 * Math.pow(2, fails - 1), 5 * 60 * 1000)
+      taskFetchBackoffUntilRef.current = Date.now() + delayMs
       setLastError(error instanceof Error ? error.message : 'Unknown error while loading tasks')
     }
   }
@@ -5805,8 +5816,27 @@ function App({ initialTab = 'leads' }) {
                 </button>
               </div>
 
-              {nicheAdvice.error ? (
-                <p className="mt-3 text-sm text-rose-300">{nicheAdvice.error}</p>
+              {nicheAdvice.loading && !nicheAdvice.data ? (
+                <div className="mt-4 flex items-center gap-2 text-sm text-slate-400">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  <span>Analyzing market signals…</span>
+                </div>
+              ) : nicheAdvice.error ? (
+                <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+                  <p className="text-sm font-semibold text-amber-300">AI Signal unavailable</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {nicheAdvice.error.toLowerCase().includes('backend') || nicheAdvice.error.toLowerCase().includes('503')
+                      ? 'The AI signal service is temporarily offline. Showing heuristic fallback data when available.'
+                      : nicheAdvice.error}
+                  </p>
+                  <button
+                    className="mt-2 text-xs text-cyan-400 hover:text-cyan-300 underline"
+                    type="button"
+                    onClick={() => void fetchNicheAdvice({ silent: false, forceRefresh: true })}
+                  >
+                    Try again
+                  </button>
+                </div>
               ) : (
                 <>
                   <div className="mt-3 grid gap-3 sm:grid-cols-3">

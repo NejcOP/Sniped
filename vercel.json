@@ -34,6 +34,9 @@
         },
         "api/auth/personal-goal.js": {
             "maxDuration": 10
+        },
+        "api/recommend-niche.js": {
+            "maxDuration": 20
         }
     },
     "rewrites": [
