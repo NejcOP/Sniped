@@ -2,9 +2,18 @@ import { useState } from 'react'
 import { getStoredValue } from './authStorage.js'
 import { FEATURE_PAGES } from './featurePagesData'
 
+const DEV_LINKS = [
+  { label: 'Blog', href: '/blog' },
+  { label: 'Help Center', href: '/help' },
+  { label: 'API Docs', href: '/docs' },
+  { label: 'AppSumo Redemption', href: '/redeem' },
+  { label: 'System Status', href: '/status' },
+]
+
 export default function MarketingNavbar() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [featuresMenuOpen, setFeaturesMenuOpen] = useState(false)
+  const [devMenuOpen, setDevMenuOpen] = useState(false)
   const isLoggedIn = Boolean(getStoredValue('lf_token'))
 
   return (
@@ -53,6 +62,34 @@ export default function MarketingNavbar() {
           </div>
           <a href="/?stay=1#pricing" className="text-sm text-slate-300 hover:text-white transition-colors">Pricing</a>
           <a href="/faq" className="text-sm text-slate-300 hover:text-white transition-colors">FAQ</a>
+          <div
+            className="relative"
+            onMouseEnter={() => setDevMenuOpen(true)}
+            onMouseLeave={() => setDevMenuOpen(false)}
+          >
+            <button
+              className="text-sm text-slate-300 hover:text-white transition-colors flex items-center gap-1"
+              onClick={() => setDevMenuOpen((v) => !v)}
+            >
+              Developers
+              <svg className="w-3.5 h-3.5 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+            </button>
+            {devMenuOpen && (
+              <div className="absolute left-0 top-full w-52 pt-2">
+                <div className="rounded-xl border border-white/10 bg-slate-950 p-2 shadow-[0_20px_60px_rgba(0,0,0,0.45)]">
+                  {DEV_LINKS.map((item) => (
+                    <a
+                      key={item.href}
+                      href={item.href}
+                      className="block rounded-lg px-3 py-2 text-sm text-slate-300 hover:bg-white/5 hover:text-yellow-300 transition-colors"
+                    >
+                      {item.label}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="hidden md:flex items-center gap-3">
@@ -94,6 +131,19 @@ export default function MarketingNavbar() {
           </div>
           <a href="/?stay=1#pricing" onClick={() => setMenuOpen(false)} className="text-sm text-slate-300 hover:text-white">Pricing</a>
           <a href="/faq" onClick={() => setMenuOpen(false)} className="text-sm text-slate-300 hover:text-white">FAQ</a>
+          <div className="text-sm text-slate-400 font-medium uppercase tracking-wide text-xs mt-1">Developers</div>
+          <div className="ml-3 flex flex-col gap-2 border-l border-white/10 pl-3">
+            {DEV_LINKS.map((item) => (
+              <a
+                key={item.href}
+                href={item.href}
+                onClick={() => setMenuOpen(false)}
+                className="text-sm text-slate-400 hover:text-yellow-300"
+              >
+                {item.label}
+              </a>
+            ))}
+          </div>
           {isLoggedIn ? (
             <a href="/app" onClick={() => setMenuOpen(false)} className="mt-2 block w-full py-3 rounded-xl bg-yellow-500 text-slate-900 font-bold text-sm text-center">
               Start Now
