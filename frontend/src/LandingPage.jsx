@@ -251,6 +251,11 @@ export default function LandingPage() {
       })
       const checkoutUrl = String(data?.url || '').trim()
       if (checkoutUrl) {
+        try {
+          window.localStorage.setItem('lf_pending_checkout_plan', normalizedPlanId)
+        } catch {
+          // Ignore storage failures.
+        }
         window.location.assign(checkoutUrl)
         return
       }

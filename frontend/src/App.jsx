@@ -3259,54 +3259,84 @@ function App({ initialTab = 'leads' }) {
     const checkoutStatus = String(searchParams.get('checkout') || '').trim().toLowerCase()
     const topupStatus = String(searchParams.get('topup') || '').trim().toLowerCase()
     const topupCreditsParam = Number(searchParams.get('topup_credits') || 0)
-    const checkoutPlanKey = String(searchParams.get('plan') || '').trim().toLowerCase()
+    const storedCheckoutPlanKey = (() => {
+      try {
+        return String(window.localStorage.getItem('lf_pending_checkout_plan') || '').trim().toLowerCase()
+      } catch {
+        return ''
+      }
+    })()
+    const checkoutPlanKey = String(searchParams.get('plan') || storedCheckoutPlanKey || '').trim().toLowerCase()
     if (!checkoutStatus && !topupStatus) return
 
-    if (checkoutStatus === 'success') {
-      const nextPlanName = SUBSCRIPTION_PLAN_DETAILS[checkoutPlanKey]?.displayName || 'your subscription'
-      toast.success(`Payment successful — ${nextPlanName} is now active`)
-      void syncBillingStateAfterCheckout(checkoutPlanKey)
-    } else if (checkoutStatus === 'cancel') {
-      toast('Subscription checkout cancelled', { icon: 'ℹ️' })
-    }
-
-    if (topupStatus === 'success') {
-      if (Number.isFinite(topupCreditsParam) && topupCreditsParam > 0) {
-        setUser((prev) => {
-          const currentBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
-          const currentTopup = Number(prev?.topup_credits_balance ?? 0)
-          const nextBalance = currentBalance + topupCreditsParam
-          const nextTopup = currentTopup + topupCreditsParam
-          localStorage.setItem('lf_credits', String(nextBalance))
-          localStorage.setItem('lf_credits_balance', String(nextBalance))
-          return {
-            ...prev,
-            credits: nextBalance,
-            credits_balance: nextBalance,
-            topup_credits_balance: nextTopup,
-          }
-        })
+    let cancelled = false
+    const finalizeCheckoutRedirect = () => {
+      if (cancelled) return
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('checkout')
+      nextParams.delete('topup')
+      nextParams.delete('topup_package')
+      nextParams.delete('topup_credits')
+      nextParams.delete('plan')
+      nextParams.delete('session_id')
+      setSearchParams(nextParams, { replace: true })
+      try {
+        window.localStorage.removeItem('lf_pending_checkout_plan')
+      } catch {
+        // Ignore storage failures.
       }
-      toast.success('Top-up payment received')
-      const optimisticTopupDelta = Number.isFinite(topupCreditsParam) ? Math.max(0, topupCreditsParam) : 0
-      const currentBalance = Number(user?.credits_balance ?? user?.credits ?? 0)
-      const currentTopup = Number(user?.topup_credits_balance ?? 0)
-      void syncBillingStateAfterCheckout('', {
-        preserveCreditsBalance: currentBalance + optimisticTopupDelta,
-        preserveTopupBalance: currentTopup + optimisticTopupDelta,
-      })
-    } else if (topupStatus === 'cancel') {
-      toast('Top-up checkout cancelled', { icon: 'ℹ️' })
     }
 
-    const nextParams = new URLSearchParams(searchParams)
-    nextParams.delete('checkout')
-    nextParams.delete('topup')
-    nextParams.delete('topup_package')
-    nextParams.delete('topup_credits')
-    nextParams.delete('plan')
-    setSearchParams(nextParams, { replace: true })
+    const runCheckoutRedirectSync = async () => {
+      if (checkoutStatus === 'success') {
+        if (checkoutPlanKey) {
+          applyOptimisticSubscriptionState(checkoutPlanKey)
+        }
+        const nextPlanName = SUBSCRIPTION_PLAN_DETAILS[checkoutPlanKey]?.displayName || 'your subscription'
+        toast.success(`Payment successful — ${nextPlanName} is now active`)
+        await syncBillingStateAfterCheckout(checkoutPlanKey)
+      } else if (checkoutStatus === 'cancel') {
+        toast('Subscription checkout cancelled', { icon: 'ℹ️' })
+      }
+
+      if (topupStatus === 'success') {
+        if (Number.isFinite(topupCreditsParam) && topupCreditsParam > 0) {
+          setUser((prev) => {
+            const currentBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
+            const currentTopup = Number(prev?.topup_credits_balance ?? 0)
+            const nextBalance = currentBalance + topupCreditsParam
+            const nextTopup = currentTopup + topupCreditsParam
+            localStorage.setItem('lf_credits', String(nextBalance))
+            localStorage.setItem('lf_credits_balance', String(nextBalance))
+            return {
+              ...prev,
+              credits: nextBalance,
+              credits_balance: nextBalance,
+              topup_credits_balance: nextTopup,
+            }
+          })
+        }
+        toast.success('Top-up payment received')
+        const optimisticTopupDelta = Number.isFinite(topupCreditsParam) ? Math.max(0, topupCreditsParam) : 0
+        const currentBalance = Number(user?.credits_balance ?? user?.credits ?? 0)
+        const currentTopup = Number(user?.topup_credits_balance ?? 0)
+        await syncBillingStateAfterCheckout('', {
+          preserveCreditsBalance: currentBalance + optimisticTopupDelta,
+          preserveTopupBalance: currentTopup + optimisticTopupDelta,
+        })
+      } else if (topupStatus === 'cancel') {
+        toast('Top-up checkout cancelled', { icon: 'ℹ️' })
+      }
+
+      finalizeCheckoutRedirect()
+    }
+
+    void runCheckoutRedirectSync()
+    return () => {
+      cancelled = true
+    }
   }, [
+    applyOptimisticSubscriptionState,
     searchParams,
     setSearchParams,
     syncBillingStateAfterCheckout,

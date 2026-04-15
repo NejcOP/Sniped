@@ -3284,6 +3284,30 @@ def get_dashboard_base_url(config_path: Path = DEFAULT_CONFIG_PATH, request: Opt
     return "http://localhost:5173"
 
 
+def get_stripe_checkout_app_base_url(config_path: Path = DEFAULT_CONFIG_PATH, request: Optional[Request] = None) -> str:
+    configured = str(
+        os.environ.get("STRIPE_CHECKOUT_APP_URL")
+        or os.environ.get("SNIPED_DASHBOARD_URL")
+        or os.environ.get("LEADFLOW_DASHBOARD_URL")
+        or os.environ.get("FRONTEND_URL")
+        or _read_json_config(config_path).get("dashboard_url", "")
+        or ""
+    ).strip().rstrip("/")
+    if configured:
+        return configured
+
+    if request is not None:
+        request_base = str(request.base_url).strip().rstrip("/")
+        parsed = urlparse(request_base)
+        host = str(parsed.hostname or "").strip().lower()
+        port = parsed.port
+        scheme = str(parsed.scheme or "http").strip() or "http"
+        if host in {"localhost", "127.0.0.1"} and port == 8000:
+            return f"{scheme}://{host}:5173"
+
+    return "https://sniped-one.vercel.app"
+
+
 def _stripe_api_get_json(api_path: str, *, params: Optional[dict[str, Any]] = None, config_path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     secret_key = get_stripe_secret_key(config_path)
     if not secret_key:
@@ -13194,13 +13218,13 @@ def create_app() -> FastAPI:
         if not plan:
             raise HTTPException(status_code=400, detail="Invalid subscription plan.")
 
-        dashboard_base_url = get_dashboard_base_url(DEFAULT_CONFIG_PATH, request=request)
+        checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
         success_url = str(os.environ.get("STRIPE_SUBSCRIPTION_SUCCESS_URL") or "").strip()
         cancel_url = str(os.environ.get("STRIPE_SUBSCRIPTION_CANCEL_URL") or "").strip()
         if not success_url:
-            success_url = f"{dashboard_base_url}/app?checkout=success&plan={plan_key}"
+            success_url = f"{checkout_app_base_url}/app?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
         if not cancel_url:
-            cancel_url = f"{dashboard_base_url}/pricing?checkout=cancel&plan={plan_key}"
+            cancel_url = f"{checkout_app_base_url}/pricing?checkout=cancel"
 
         checkout_url = create_stripe_subscription_checkout_session(
             user_id=user_id,
@@ -13236,13 +13260,13 @@ def create_app() -> FastAPI:
         package = STRIPE_TOP_UP_PACKAGES.get(package_key, {})
         package_credits = max(0, int(package.get("credits") or 0))
 
-        dashboard_base_url = get_dashboard_base_url(DEFAULT_CONFIG_PATH, request=request)
+        checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
         success_url = str(os.environ.get("STRIPE_TOPUP_SUCCESS_URL") or "").strip()
         cancel_url = str(os.environ.get("STRIPE_TOPUP_CANCEL_URL") or "").strip()
         if not success_url:
-            success_url = f"{dashboard_base_url}/app?topup=success&topup_package={quote_plus(package_key)}&topup_credits={package_credits}"
+            success_url = f"{checkout_app_base_url}/app?topup=success&topup_package={quote_plus(package_key)}&topup_credits={package_credits}"
         if not cancel_url:
-            cancel_url = f"{dashboard_base_url}/app?topup=cancel"
+            cancel_url = f"{checkout_app_base_url}/app?topup=cancel"
 
         checkout_url = create_stripe_topup_checkout_session(
             user_id=user_id,

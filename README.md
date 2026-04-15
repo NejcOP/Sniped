@@ -95,6 +95,44 @@ Write operations in the API now trigger automatic sync attempts when Supabase is
 When `supabase.primary_mode` is true, key dashboard APIs read/write directly against Supabase tables.
 Task tracking and scheduler runtime keys also use Supabase when `system_tasks` and `system_runtime` tables are present.
 
+## Stripe Production Webhook
+
+If the backend is deployed on Railway, configure Stripe to call the hosted webhook endpoint instead of a local CLI tunnel.
+
+Production webhook URL:
+
+- `https://sniped-production.up.railway.app/api/stripe/webhook`
+
+Railway environment variables:
+
+- `STRIPE_SECRET_KEY` = your live Stripe secret key
+- `STRIPE_WEBHOOK_SECRET` = the webhook signing secret from Stripe Dashboard (`whsec_...`)
+
+Recommended Stripe events for this app:
+
+- `checkout.session.completed`
+- `invoice.payment_succeeded`
+- `invoice.paid`
+- `invoice.payment_failed`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+
+Stripe Dashboard setup:
+
+1. Open Stripe Dashboard -> Developers -> Webhooks.
+2. Click Add endpoint.
+3. Enter `https://sniped-production.up.railway.app/api/stripe/webhook`.
+4. Select the events listed above.
+5. Save the endpoint and copy the Signing secret.
+6. Add that value to Railway as `STRIPE_WEBHOOK_SECRET`.
+7. Redeploy Railway after saving the env var.
+
+Notes:
+
+- The webhook route verifies the `Stripe-Signature` header using `STRIPE_WEBHOOK_SECRET`.
+- If `STRIPE_WEBHOOK_SECRET` is missing, the endpoint still accepts payloads, but production should always use signature verification.
+- Checkout and billing flows also require the matching live `STRIPE_SECRET_KEY` and live price IDs.
+
 ## Notes
 
 - Existing data in leads.db is reused by default.
