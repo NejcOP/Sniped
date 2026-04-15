@@ -3836,6 +3836,18 @@ def get_primary_user_smtp_account(*, session_token: Optional[str] = None, user_i
     return account
 
 
+def ensure_user_mailer_smtp_ready(*, session_token: Optional[str] = None, user_id: Optional[str] = None, db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
+    try:
+        return get_primary_user_smtp_account(session_token=session_token, user_id=user_id, db_path=db_path)
+    except HTTPException as exc:
+        detail = str(exc.detail or "")
+        if exc.status_code == 503 and (
+            "SMTP is not configured" in detail or "SMTP is not fully configured" in detail
+        ):
+            raise HTTPException(status_code=400, detail="Prosim, dodaj svoj SMTP račun v nastavitvah.")
+        raise
+
+
 def send_auth_email(account: dict, recipient: str, subject: str, text_body: str, html_body: Optional[str] = None) -> None:
     host = str(account.get("host", "") or "").strip()
     port = int(account.get("port", 587) or 587)
@@ -12063,7 +12075,7 @@ def create_app() -> FastAPI:
     @app.post("/api/mailer/send")
     def run_mailer(payload: MailerRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
         print(f"[mailer] POST /api/mailer/send — limit={payload.limit}")
-        _session_token, billing, access = resolve_plan_access_context(request)
+        session_token, billing, access = resolve_plan_access_context(request)
         user_id = require_current_user_id(request)
         print(f"[mailer] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
@@ -12079,6 +12091,8 @@ def create_app() -> FastAPI:
         available_credits = max(0, int(billing.get("credits_balance") or 0))
         if available_credits <= 0:
             raise HTTPException(status_code=403, detail="Out of credits. Please upgrade.")
+
+        ensure_user_mailer_smtp_ready(session_token=session_token, user_id=user_id, db_path=db_path)
 
         payload_data = payload.model_dump()
         requested_limit = max(1, int(payload_data.get("limit") or 10))
@@ -12099,6 +12113,7 @@ def create_app() -> FastAPI:
         consume_ai_usage_or_raise(session_token, units=1)
         ensure_system_tables(db_path)
         config_path = resolve_path(payload.config_path, DEFAULT_CONFIG_PATH)
+        ensure_user_mailer_smtp_ready(session_token=session_token, user_id=user_id, db_path=db_path)
 
         try:
             mailer = AIMailer(
@@ -12192,6 +12207,7 @@ def create_app() -> FastAPI:
         reserve_ai_credits_or_raise(user_id, feature_key="cold_outreach", db_path=DEFAULT_DB_PATH)
         consume_ai_usage_or_raise(session_token, units=1)
         config_path = resolve_path(payload.config_path, DEFAULT_CONFIG_PATH)
+        ensure_user_mailer_smtp_ready(session_token=session_token, user_id=user_id, db_path=DEFAULT_DB_PATH)
         try:
             mailer = AIMailer(
                 db_path=str(DEFAULT_DB_PATH),

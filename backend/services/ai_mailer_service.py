@@ -240,12 +240,13 @@ class AIMailer:
         self._ensure_mailer_columns()
 
         self.config = self._load_config()
+        self.smtp_accounts_override = list(smtp_accounts_override) if smtp_accounts_override is not None else None
         if smtp_accounts_override is not None:
             self.config["smtp_accounts"] = list(smtp_accounts_override)
         self.model_name = str(model_name_override or FORCED_AI_MODEL).strip() or FORCED_AI_MODEL
         api_key = os.environ.get("OPENAI_API_KEY") or self.config.get("openai", {}).get("api_key", "")
         if not api_key or api_key == "YOUR_OPENAI_API_KEY":
-            raise ValueError("Set a valid OpenAI API key in config.json under openai.api_key.")
+            raise ValueError("Set a valid OPENAI_API_KEY environment variable.")
 
         self.client = OpenAI(api_key=api_key)
         self.accounts = self._load_accounts()
@@ -938,7 +939,7 @@ class AIMailer:
         lead_id: Optional[int] = None,
     ) -> str:
         if not self.accounts:
-            raise ValueError("No SMTP accounts configured in config.json.")
+            raise ValueError("Prosim, dodaj svoj SMTP račun v nastavitvah.")
 
         prepared_subject = subject
         prepared_body = self.ensure_signature(body, self.mail_signature)
@@ -1004,13 +1005,18 @@ class AIMailer:
 
     def _load_config(self) -> dict:
         if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+            return {}
 
-        with self.config_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with self.config_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                return loaded if isinstance(loaded, dict) else {}
+        except Exception as exc:
+            logging.warning("Could not read AIMailer config %s: %s", self.config_path, exc)
+            return {}
 
     def _load_accounts(self) -> list[SMTPAccount]:
-        raw_accounts = self.config.get("smtp_accounts", [])
+        raw_accounts = self.smtp_accounts_override if self.smtp_accounts_override is not None else self.config.get("smtp_accounts", [])
         accounts = []
         for item in raw_accounts:
             if not str(item.get("password") or "").strip():
@@ -1583,7 +1589,7 @@ class AIMailer:
 
     def peek_next_account(self) -> SMTPAccount:
         if not self.accounts:
-            raise ValueError("No SMTP accounts configured in config.json.")
+            raise ValueError("Prosim, dodaj svoj SMTP račun v nastavitvah.")
         if self.sending_strategy == "random":
             return random.choice(self.accounts)
         return self.accounts[self._next_account_index % len(self.accounts)]
