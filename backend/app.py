@@ -10106,7 +10106,7 @@ def create_app() -> FastAPI:
     def get_saved_segments(request: Request) -> dict:
         try:
             user_id = require_current_user_id(request)
-            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "SavedSegments"):
                 client = get_supabase_client(DEFAULT_CONFIG_PATH)
                 if client is None:
                     raise HTTPException(status_code=500, detail="Supabase not configured")
@@ -10132,7 +10132,7 @@ def create_app() -> FastAPI:
     def save_segment_route(payload: SavedSegmentRequest, request: Request) -> dict:
         try:
             user_id = require_current_user_id(request)
-            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "SavedSegments"):
                 client = get_supabase_client(DEFAULT_CONFIG_PATH)
                 if client is None:
                     raise HTTPException(status_code=500, detail="Supabase not configured")
@@ -10167,7 +10167,7 @@ def create_app() -> FastAPI:
     def delete_saved_segment_route(segment_id: int, request: Request) -> dict:
         try:
             user_id = require_current_user_id(request)
-            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "SavedSegments"):
                 client = get_supabase_client(DEFAULT_CONFIG_PATH)
                 if client is None:
                     raise HTTPException(status_code=500, detail="Supabase not configured")
