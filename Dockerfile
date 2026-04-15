@@ -40,8 +40,7 @@ RUN pip install -r /app/backend/requirements.txt
 RUN python -m playwright install chromium
 
 COPY backend /app/backend
-COPY config.json /app/config.json
-COPY profiles /app/profiles
+RUN mkdir -p /app/profiles/maps_profile && printf '{}' > /app/config.json
 
 EXPOSE 8000
 
