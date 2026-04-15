@@ -18,32 +18,32 @@ import { getStoredValue } from './authStorage'
 const categories = [
   {
     name: 'Getting Started',
-    description: 'Postavi svoj prvi workflow v 2 minutah.',
+    description: 'Set up your first workflow in 2 minutes.',
     icon: Rocket,
   },
   {
     name: 'Lead Enrichment',
-    description: 'Kako deluje AI audit glede na tvojo nišo?',
+    description: 'How does the AI audit work for your niche?',
     icon: Sparkles,
   },
   {
     name: 'AppSumo FAQ',
-    description: 'Redemption kode, tieri in limiti.',
+    description: 'Redemption codes, tiers, and limits.',
     icon: Ticket,
   },
   {
     name: 'Integrations',
-    description: 'Povezava z HubSpot, Zapier in tvojim CRM-jem.',
+    description: 'Connect HubSpot, Zapier, and your CRM.',
     icon: Plug,
   },
   {
     name: 'Billing & Subscription',
-    description: 'Upravljanje s Stripe portalom in računi.',
+    description: 'Manage your Stripe portal and billing.',
     icon: CreditCard,
   },
   {
     name: 'API & Developers',
-    description: 'Dokumentacija za napredno uporabo.',
+    description: 'Documentation for advanced usage.',
     icon: Code2,
   },
 ]

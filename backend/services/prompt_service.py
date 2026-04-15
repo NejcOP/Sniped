@@ -919,7 +919,7 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
             "  },\n"
             "  \"identified_gap\": \"Exact technical or marketing error.\",\n"
             "  \"email_draft\": \"Subject: ...\\n\\nBody: ...\",\n"
-            "  \"cold_call_script\": \"Zivijo [Ime], klicem ker sem na vasi strani opazil [Napaka]. To vas stane priblizno [Znesek] mesecno. Bi imeli 2 minuti, da vam razlozim, kako to zapreti?\"\n"
+            "  \"cold_call_script\": \"Hi [Name], I'm calling because I noticed [Issue] on your website. That is likely costing you around [Amount] per month. Do you have 2 minutes so I can explain how to fix it?\"\n"
             "}"
         ).strip()
 

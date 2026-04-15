@@ -623,14 +623,14 @@ class AIMailer:
         except Exception as exc:
             logging.warning("Cold outreach generation failed: %s", exc)
             # Safe deterministic fallback
-            fallback_subject = f"vprašanje glede {business_name}"[:60]
+            fallback_subject = f"question about {business_name}"[:60]
             fallback_body = (
                 f"Hi,\n\n"
-                f"Opazil sem, da vas ljudje v {city} iščejo za {niche_str}, "
-                f"a vas na Googlu prehitita {competitor_str}.\n\n"
-                f"Zaradi tega vsak mesec izgubite ocenjenih {loss_str} v poslih.\n\n"
-                f"Pripravil sem kratek 2-minutni video in hiter plan, kako bi to popravili. Bi bilo v redu, če vam pošljem?\n\n"
-                f"Lp"
+                f"I noticed people in {city} are searching for {niche_str}, "
+                f"but {competitor_str} are outranking you on Google.\n\n"
+                f"That likely means you're losing an estimated {loss_str} in business every month.\n\n"
+                f"I've prepared a short 2-minute video and a quick plan for how to fix it. Would you be open to me sending it?\n\n"
+                f"Best"
             )
             return fallback_subject, fallback_body
 
@@ -939,7 +939,7 @@ class AIMailer:
         lead_id: Optional[int] = None,
     ) -> str:
         if not self.accounts:
-            raise ValueError("Prosim, dodaj svoj SMTP račun v nastavitvah.")
+            raise ValueError("Please add your SMTP account in Settings.")
 
         prepared_subject = subject
         prepared_body = self.ensure_signature(body, self.mail_signature)
@@ -1589,7 +1589,7 @@ class AIMailer:
 
     def peek_next_account(self) -> SMTPAccount:
         if not self.accounts:
-            raise ValueError("Prosim, dodaj svoj SMTP račun v nastavitvah.")
+            raise ValueError("Please add your SMTP account in Settings.")
         if self.sending_strategy == "random":
             return random.choice(self.accounts)
         return self.accounts[self._next_account_index % len(self.accounts)]

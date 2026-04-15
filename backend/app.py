@@ -3839,7 +3839,7 @@ def ensure_user_mailer_smtp_ready(*, session_token: Optional[str] = None, user_i
         if exc.status_code == 503 and (
             "SMTP is not configured" in detail or "SMTP is not fully configured" in detail
         ):
-            raise HTTPException(status_code=400, detail="Prosim, dodaj svoj SMTP račun v nastavitvah.")
+            raise HTTPException(status_code=400, detail="Please add your SMTP account in Settings.")
         raise
 
 
@@ -5283,7 +5283,7 @@ def default_market_recommendations(country_code: str = "US") -> list[dict]:
         ],
         "SI": [
             {
-                "keyword": "Toplotne črpalke v Ljubljani, SI",
+                "keyword": "Heat pumps in Ljubljana, SI",
                 "location": "Ljubljana, SI",
                 "country_code": "SI",
                 "reason": "High-ticket home-efficiency projects and local trust-based buying make this a strong signal niche.",
@@ -5391,35 +5391,34 @@ def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str
         "Always return valid JSON only."
     )
     user_prompt = f"""
-Glede na današnji datum (april 2026), trenutne ekonomske trende in dejstvo,
-da uporabnik prodaja Google Ads / SEO storitve, predlagaj 3 najbolj donosne niše
-SAMO za izbrano državo: {selected_country_label} ({selected_country}).
+Based on today's date (April 2026), current economic trends, and the fact that the user sells Google Ads / SEO services, suggest the 3 most profitable niches
+ONLY for the selected country: {selected_country_label} ({selected_country}).
 
-Obvezno upoštevaj našo zgodovino reply-ratov po ključnih besedah:
+You must take our keyword-level reply-rate history into account:
 {perf_lines}
 
-Primeri, ki se ujemajo z izbrano državo:
+Examples that match the selected country:
 {country_examples}
 
-Vrni JSON objekt s točno strukturo:
+Return a JSON object with this exact structure:
 {{
-  "recommendations": [
-    {{
-      "keyword": "Roofers in Miami, FL",
-      "location": "Miami, FL",
-      "country_code": "US",
-      "reason": "Kratek razlog (sezonskost / marža / povpraševanje)",
-      "expected_reply_rate": 6.2
-    }}
-  ],
-  "top_pick_index": 0
+    "recommendations": [
+        {{
+            "keyword": "Roofers in Miami, FL",
+            "location": "Miami, FL",
+            "country_code": "US",
+            "reason": "Short reason (seasonality / margin / demand)",
+            "expected_reply_rate": 6.2
+        }}
+    ],
+    "top_pick_index": 0
 }}
 
-Pravila:
-- recommendations mora imeti točno 3 elemente.
-- Vse 3 lokacije morajo biti v državi {selected_country}.
-- country_code mora biti vedno '{selected_country}'.
-- expected_reply_rate naj bo realna številka med 1.0 in 15.0.
+Rules:
+- recommendations must contain exactly 3 items.
+- All 3 locations must be in country {selected_country}.
+- country_code must always be '{selected_country}'.
+- expected_reply_rate must be a realistic number between 1.0 and 15.0.
 """.strip()
 
     try:
@@ -7795,8 +7794,8 @@ def run_daily_digest(_app: FastAPI) -> None:
         f"Total leads:     {total_leads}\n"
         f"Emails sent:     {emails_sent}\n"
         f"Golden Leads:    {golden_count} found in last 24h"
-        f"\nDanašnja priložnost: {niche_keyword}. Pričakovan Reply Rate: {expected_reply:.1f}%. "
-        f"Kliknite tukaj, da zaženete kampanjo: {campaign_link}"
+        f"\nToday's opportunity: {niche_keyword}. Expected reply rate: {expected_reply:.1f}%. "
+        f"Click here to launch the campaign: {campaign_link}"
         f"{alert_lines}\n\n"
         f"{'=' * 50}\n"
         f"Keep pushing. You're {100 - mrr_progress}% from the finish line.\n"

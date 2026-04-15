@@ -24,7 +24,7 @@ function normalizeBaseUrl(value) {
 function buildQueryString(query) {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query || {})) {
-    if (key === 'path') continue
+    if (key === 'path' || key === '_path') continue
     if (Array.isArray(value)) {
       for (const item of value) params.append(key, String(item))
     } else if (value !== undefined && value !== null) {
@@ -205,8 +205,6 @@ async function handleBlacklist(req, res, supabaseUrl, supabaseKey) {
 
 // ── Main handler ─────────────────────────────────────────────────────────────
 module.exports = async (req, res) => {
-  res.setHeader('Content-Type', 'application/json')
-
   const pathParts = resolveCatchAllPathParts(req)
   const nativePath = pathParts.join('/')
 
@@ -234,6 +232,7 @@ module.exports = async (req, res) => {
   const devFallback = isDev ? 'http://localhost:8000' : ''
   const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || devFallback)
   if (!backendBase) {
+    res.setHeader('Content-Type', 'application/json')
     return res.status(503).json({
       detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.',
     })
@@ -270,6 +269,7 @@ module.exports = async (req, res) => {
     const arrayBuffer = await upstream.arrayBuffer()
     return res.send(Buffer.from(arrayBuffer))
   } catch (error) {
+    res.setHeader('Content-Type', 'application/json')
     return res.status(502).json({
       detail: `Backend request failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
     })

@@ -1598,7 +1598,7 @@ function TaskManagerCard({
               <input
                 className="glass-input mt-1 text-xs"
                 value={item.note || ''}
-                placeholder="Rekel je, naj pokličem po 15. uri"
+                placeholder="He said to call after 3 PM"
                 onChange={(e) => {
                   if (isCustom) onNoteChange(item, e.target.value)
                 }}
@@ -6409,7 +6409,7 @@ function App({ initialTab = 'leads' }) {
           {lastError
             && !lastError.toLowerCase().includes('backend_url')
             && !lastError.toLowerCase().includes('backend is not configured')
-            && !lastError.toLowerCase().includes('prosim, dodaj svoj smtp račun v nastavitvah.')
+            && !lastError.toLowerCase().includes('please add your smtp account in settings.')
             ? <pre className="mb-4 overflow-auto rounded-2xl bg-rose-950/60 px-4 py-4 text-sm text-rose-300 ring-1 ring-rose-500/20">{lastError}</pre>
             : null}
           {scrapeSummary ? (
@@ -7448,7 +7448,7 @@ function App({ initialTab = 'leads' }) {
                       <input
                         className="glass-input"
                         type="text"
-                        placeholder="Pokliči direktorja Solar d.o.o."
+                        placeholder="Call the director at Solar d.o.o."
                         value={customTaskDraft.title}
                         onChange={(e) => setCustomTaskDraft((prev) => ({ ...prev, title: e.target.value }))}
                         required
@@ -7485,7 +7485,7 @@ function App({ initialTab = 'leads' }) {
                       <input
                         className="glass-input"
                         type="text"
-                        placeholder="Rekel je, naj pokličem po 15. uri"
+                        placeholder="He said to call after 3 PM"
                         value={customTaskDraft.note}
                         onChange={(e) => setCustomTaskDraft((prev) => ({ ...prev, note: e.target.value }))}
                       />
