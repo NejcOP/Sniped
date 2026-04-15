@@ -1,0 +1,38 @@
+[variables]
+PYTHONUNBUFFERED = "1"
+NIXPACKS_PYTHON_VERSION = "3.11"
+
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+aptPkgs = [
+  "ca-certificates",
+  "fonts-liberation",
+  "libasound2",
+  "libatk-bridge2.0-0",
+  "libatk1.0-0",
+  "libatspi2.0-0",
+  "libcairo2",
+  "libcups2",
+  "libdbus-1-3",
+  "libdrm2",
+  "libgbm1",
+  "libgtk-3-0",
+  "libnss3",
+  "libpango-1.0-0",
+  "libx11-xcb1",
+  "libxcomposite1",
+  "libxdamage1",
+  "libxfixes3",
+  "libxkbcommon0",
+  "libxrandr2",
+  "libxshmfence1"
+]
+
+[phases.install]
+cmds = [
+  "pip install -r backend/requirements.txt",
+  "python -m playwright install chromium"
+]
+
+[start]
+cmd = "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000}"
