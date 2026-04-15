@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+venv
+node_modules
+frontend/node_modules
+frontend/dist
+logs
+runtime
+__pycache__
+*.pyc
+*.pyo
+*.db
+*.db.backup
+.pytest_cache
+.mypy_cache
+.vscode
