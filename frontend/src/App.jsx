@@ -962,6 +962,13 @@ async function fetchJson(path, options) {
   return data
 }
 
+function buildApiUrl(path) {
+  const apiBaseRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+  const apiBase = apiBaseRaw ? apiBaseRaw.replace(/\/$/, '') : ''
+  if (/^https?:\/\//i.test(String(path || ''))) return String(path)
+  return apiBase && String(path || '').startsWith('/api') ? `${apiBase}${path}` : String(path || '')
+}
+
 function isAiEndpoint(path) {
   const endpoint = String(path || '').toLowerCase()
   return endpoint.includes('/api/enrich')
@@ -3591,7 +3598,7 @@ function App({ initialTab = 'leads' }) {
   async function downloadCsvExport(kind, fallbackFilename) {
     const token = getStoredValue('lf_token')
     const headers = token ? { Authorization: `Bearer ${token}` } : {}
-    const response = await fetch(`/api/export-leads?kind=${encodeURIComponent(kind)}`, { headers })
+    const response = await fetch(buildApiUrl(`/api/export-leads?kind=${encodeURIComponent(kind)}`), { headers })
 
     if (!response.ok) {
       const contentType = response.headers.get('content-type') || ''
@@ -3745,7 +3752,7 @@ function App({ initialTab = 'leads' }) {
     try {
       const token = getStoredValue('lf_token')
       const headers = token ? { Authorization: `Bearer ${token}` } : {}
-      const response = await fetch('/api/reporting/monthly-summary.pdf', { headers })
+      const response = await fetch(buildApiUrl('/api/reporting/monthly-summary.pdf'), { headers })
       if (!response.ok) {
         const message = await response.text().catch(() => '')
         throw new Error(message || `Request failed (${response.status})`)

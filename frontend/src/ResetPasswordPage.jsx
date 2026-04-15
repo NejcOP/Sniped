@@ -4,7 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import { getStoredValue } from './authStorage'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 export default function ResetPasswordPage() {
   const navigate = useNavigate()

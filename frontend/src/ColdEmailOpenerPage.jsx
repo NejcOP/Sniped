@@ -5,7 +5,7 @@ import { Zap, Copy, RefreshCw, LogOut, Sparkles, Info, Check } from 'lucide-reac
 import { clearAuthSession, getStoredValue, setAuthSession } from './authStorage'
 import { NICHE_HINTS } from './constants'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 function getFriendlyAiError(status, detail) {
   const normalized = String(detail || '').toLowerCase()
@@ -146,9 +146,7 @@ export default function ColdEmailOpenerPage() {
             pack_mode: packMode,
           }),
         })
-        const openerRaw = await openerRes.text()
-        let openerData = {}
-        try { openerData = openerRaw ? JSON.parse(openerRaw) : {} } catch { openerData = {} }
+        await openerRes.text()
 
         // Redirect to /app regardless of opener result
         toast.success('Account created! Redirecting to app...')

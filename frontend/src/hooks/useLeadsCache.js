@@ -15,6 +15,7 @@ import { getStoredValue } from '../authStorage'
 const _cache = new Map()   // key → { data, ts }
 const _inflight = new Map() // key → AbortController
 const CACHE_TTL_MS = 60_000  // 60 seconds
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
 
 function buildCacheKey(params) {
   return JSON.stringify(params)
@@ -32,7 +33,8 @@ async function _fetchLeads(params, signal) {
   if (params.quickFilter && params.quickFilter !== 'all') qp.set('quick_filter', params.quickFilter)
   if (params.search && params.search.trim()) qp.set('search', params.search.trim())
 
-  const res = await fetch(`/api/leads?${qp.toString()}`, {
+  const requestUrl = API_BASE ? `${API_BASE}/api/leads?${qp.toString()}` : `/api/leads?${qp.toString()}`
+  const res = await fetch(requestUrl, {
     signal,
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })

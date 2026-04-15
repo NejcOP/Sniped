@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import { getRememberedEmail, getStoredValue } from './authStorage'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState(() => getRememberedEmail())

@@ -4,6 +4,8 @@ import Footer from './Footer'
 import MarketingNavbar from './MarketingNavbar'
 import { getStoredValue } from './authStorage'
 
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+
 export default function AppSumoRedemptionPage() {
   const [coupon, setCoupon] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -28,7 +30,7 @@ export default function AppSumoRedemptionPage() {
 
     setIsSubmitting(true)
     try {
-      const response = await fetch('/api/redeem/appsumo', {
+      const response = await fetch(API_BASE ? `${API_BASE}/api/redeem/appsumo` : '/api/redeem/appsumo', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

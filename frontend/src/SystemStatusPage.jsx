@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import Footer from './Footer'
 import MarketingNavbar from './MarketingNavbar'
 
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+
 const fallbackServices = [
   { key: 'lead_search_api', label: 'Lead Search API', status: 'Operational', operational: true },
   { key: 'enrichment_engine', label: 'Enrichment Engine', status: 'Operational', operational: true },
@@ -20,7 +22,7 @@ export default function SystemStatusPage() {
     async function loadStatus() {
       setIsRefreshing(true)
       try {
-        const response = await fetch('/api/system-status')
+        const response = await fetch(API_BASE ? `${API_BASE}/api/system-status` : '/api/system-status')
         const data = await response.json().catch(() => ({}))
         if (!response.ok) throw new Error('Status API failed')
         if (!isMounted) return

@@ -79,6 +79,18 @@ ORPHAN_TASK_GRACE_SECONDS = 15
 SMTP_TEST_RECIPIENT = "opnjc06@gmail.com"
 TRACKING_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
 
+
+def get_allowed_cors_origins() -> list[str]:
+    configured = str(os.environ.get("CORS_ALLOWED_ORIGINS", "") or "").strip()
+    if configured:
+        return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+    return [
+        "https://sniped-one.vercel.app",
+        "https://sniped-production.up.railway.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
 AUTOPILOT_ENRICH_LIMIT = 150
 HIGH_AI_SCORE_THRESHOLD = 7.0
 DRIP_MINUTES_MIN = 10
@@ -8541,6 +8553,7 @@ def create_app() -> FastAPI:
     from concurrent.futures import ThreadPoolExecutor as _TPE
     # Concurrency limit: max 10 worker threads for AI/scrape calls
     _thread_pool = _TPE(max_workers=10, thread_name_prefix="lf-worker")
+    allowed_cors_origins = get_allowed_cors_origins()
 
     app = FastAPI(title="LeadGen Full Stack API", version="1.1.0")
     app.state.task_lock = Lock()
@@ -8556,15 +8569,16 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     @app.on_event("startup")
     def startup_tasks() -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+        print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         # ── Env-var check ─────────────────────────────────────────────────────
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",

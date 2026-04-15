@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Zap, Mail, Lock, LogIn, Eye, EyeOff } from 'lucide-react'
 import { getRememberPreference, getRememberedEmail, getStoredValue, setAuthSession, setRememberedEmail } from './authStorage'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? ''
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 export default function LoginPage() {
   const navigate = useNavigate()
