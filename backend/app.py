@@ -12126,7 +12126,6 @@ def create_app() -> FastAPI:
         consume_ai_usage_or_raise(session_token, units=1)
         ensure_system_tables(db_path)
         config_path = resolve_path(payload.config_path, DEFAULT_CONFIG_PATH)
-        ensure_user_mailer_smtp_ready(session_token=session_token, user_id=user_id, db_path=db_path)
 
         try:
             mailer = AIMailer(
