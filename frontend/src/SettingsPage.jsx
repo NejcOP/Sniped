@@ -19,7 +19,7 @@ import { clearAuthSession, getRememberPreference, getStoredValue, setAuthSession
 import { ALLOWED_NICHES, ACCOUNT_TYPE_OPTIONS } from './constants'
 import Footer from './Footer'
 
-const API_BASE = ''
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
 const NICHE_OPTIONS = ALLOWED_NICHES
 const SETTINGS_TABS = [
   { id: 'profile', label: 'Profile', icon: UserCircle2 },

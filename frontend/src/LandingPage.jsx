@@ -192,13 +192,19 @@ const PRICING_PLANS = [
 ]
 
 async function fetchJson(path, options) {
+  const apiBase = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
   const token = getStoredValue('lf_token')
   const headers = {
     ...(options?.headers || {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
 
-  const response = await fetch(`${API_BASE}${path}`, { ...(options || {}), headers })
+  const requestUrl = /^https?:\/\//i.test(String(path || ''))
+    ? String(path)
+    : apiBase && String(path || '').startsWith('/api')
+      ? `${apiBase}${path}`
+      : `${API_BASE}${path}`
+  const response = await fetch(requestUrl, { ...(options || {}), headers })
   const text = await response.text()
   let data = null
 

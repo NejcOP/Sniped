@@ -12,10 +12,12 @@ import { getStoredValue } from '../authStorage'
 
 const POLL_INTERVAL_MS = 1_500   // poll every 1.5s while running
 const BACKOFF_MAX_MS = 10_000    // max backoff after failures
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
 
 async function fetchTaskState(signal) {
   const token = getStoredValue('lf_token')
-  const res = await fetch('/api/task', {
+  const requestUrl = API_BASE ? `${API_BASE}/api/task` : '/api/task'
+  const res = await fetch(requestUrl, {
     signal,
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })

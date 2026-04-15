@@ -938,18 +938,25 @@ function normalizeLeadStatus(status) {
 }
 
 async function fetchJson(path, options) {
+  const apiBaseRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+  const apiBase = apiBaseRaw ? apiBaseRaw.replace(/\/$/, '') : ''
+  const requestUrl = /^https?:\/\//i.test(String(path || ''))
+    ? String(path)
+    : apiBase && String(path || '').startsWith('/api')
+      ? `${apiBase}${path}`
+      : path
   const token = getStoredValue('lf_token')
   const headers = {
     ...(options?.headers || {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
-  const response = await fetch(path, { ...(options || {}), headers })
+  const response = await fetch(requestUrl, { ...(options || {}), headers })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
     const detail = typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`
     const error = new Error(detail)
     error.status = response.status
-    error.path = path
+    error.path = requestUrl
     throw error
   }
   return data

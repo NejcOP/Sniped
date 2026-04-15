@@ -9265,6 +9265,23 @@ def create_app() -> FastAPI:
             },
         }
 
+    @app.get("/api/task")
+    def task_alias(request: Request, task_type: str = Query("scrape")) -> dict:
+        user_id = require_current_user_id(request)
+        reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
+        normalized_task_type = str(task_type or "scrape")
+        latest_task = fetch_latest_task(DEFAULT_DB_PATH, normalized_task_type, user_id=user_id)
+        if not latest_task:
+            return {"running": False, "task_type": normalized_task_type, "result": {}, "status": "idle"}
+        status = str(latest_task.get("status") or "").lower()
+        return {
+            **latest_task,
+            "running": status in ACTIVE_TASK_STATUSES,
+            "task_type": latest_task.get("task_type") or normalized_task_type,
+            "result": latest_task.get("result") if isinstance(latest_task.get("result"), dict) else {},
+            "status": latest_task.get("status") or "idle",
+        }
+
     @app.post("/api/tasks/reorder")
     def reorder_tasks(payload: TaskReorderRequest, request: Request) -> dict:
         user_id = require_current_user_id(request)

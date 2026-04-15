@@ -11,6 +11,33 @@ function getTokenFromReq(req) {
   return String(req.query?.token || '').trim()
 }
 
+function normalizeBaseUrl(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const withScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(raw)
+    ? raw
+    : /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/.test(raw)
+      ? `http://${raw}`
+      : `https://${raw}`
+  return withScheme.replace(/\/$/, '')
+}
+
+function extractPathParts(pathValue) {
+  if (Array.isArray(pathValue)) return pathValue.map((part) => String(part).replace(/^\/+|\/+$/g, '')).filter(Boolean)
+  const single = String(pathValue || '').replace(/^\/+|\/+$/g, '')
+  return single ? [single] : []
+}
+
+function resolveCatchAllPathParts(req) {
+  const direct = extractPathParts(req.query?.path || req.query?._path)
+  if (direct.length) return direct
+
+  const rawUrl = String(req.url || '')
+  const pathname = rawUrl.split('?')[0] || ''
+  const match = pathname.match(/^\/api\/mailer\/(.+)$/)
+  return extractPathParts(match ? match[1] : '')
+}
+
 async function getUserId(supabaseUrl, supabaseKey, token) {
   const h = { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` }
   const res = await fetch(
@@ -99,7 +126,7 @@ module.exports = async (req, res) => {
   const token = getTokenFromReq(req)
 
   // Determine sub-path
-  const pathParts = Array.isArray(req.query?.path) ? req.query.path : [String(req.query?.path || '')]
+  const pathParts = resolveCatchAllPathParts(req)
   const subPath = pathParts.join('/')
 
   if (!token || !supabaseUrl || !supabaseKey) {
@@ -150,7 +177,7 @@ module.exports = async (req, res) => {
 
   // Fallback: proxy remaining paths (send, stop, preview, cold-outreach, etc.) to Python backend
   const isDev = process.env.VERCEL_ENV !== 'production'
-  const backendBase = String(process.env.BACKEND_URL || process.env.VITE_API_URL || (isDev ? 'http://localhost:8000' : '')).trim().replace(/\/$/, '')
+  const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || (isDev ? 'http://localhost:8000' : ''))
   if (!backendBase) {
     return res.status(503).json({ detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.' })
   }
@@ -158,7 +185,7 @@ module.exports = async (req, res) => {
   const HOP_BY_HOP = new Set(['connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailers','transfer-encoding','upgrade','host'])
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(req.query || {})) {
-    if (k === 'path') continue
+    if (k === 'path' || k === '_path') continue
     if (Array.isArray(v)) v.forEach(i => qs.append(k, i))
     else if (v != null) qs.append(k, String(v))
   }
