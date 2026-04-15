@@ -6169,7 +6169,7 @@ function App({ initialTab = 'leads' }) {
                 </span>
               </div>
               {!configForm.smtp_accounts?.[0]?.email ? (
-                <p className="mt-2 text-xs text-amber-300">Pred pošiljanjem nastavi SMTP račun v razdelku Mail → Nastavitve.</p>
+                <p className="mt-2 text-xs text-amber-300">Before sending, set up your SMTP account in Mail -&gt; Settings.</p>
               ) : null}
               {mailerProgress.isVisible ? (
                 <div style={{ marginTop: '1.5rem' }}>
