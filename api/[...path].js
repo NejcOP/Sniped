@@ -41,6 +41,16 @@ function extractPathParts(pathValue) {
   return single ? [single] : []
 }
 
+function resolveCatchAllPathParts(req) {
+  const direct = extractPathParts(req.query?.path || req.query?._path)
+  if (direct.length) return direct
+
+  const rawUrl = String(req.url || '')
+  const pathname = rawUrl.split('?')[0] || ''
+  const match = pathname.match(/^\/api\/(.+)$/)
+  return extractPathParts(match ? match[1] : '')
+}
+
 async function readRawBody(req) {
   if (req.body === undefined || req.body === null) return null
   if (Buffer.isBuffer(req.body)) return req.body
@@ -197,7 +207,7 @@ async function handleBlacklist(req, res, supabaseUrl, supabaseKey) {
 module.exports = async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
 
-  const pathParts = extractPathParts(req.query?.path)
+  const pathParts = resolveCatchAllPathParts(req)
   const nativePath = pathParts.join('/')
 
   const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '')
