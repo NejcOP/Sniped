@@ -84,12 +84,7 @@ def get_allowed_cors_origins() -> list[str]:
     configured = str(os.environ.get("CORS_ALLOWED_ORIGINS", "") or "").strip()
     if configured:
         return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
-    return [
-        "https://sniped-one.vercel.app",
-        "https://sniped-production.up.railway.app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
+    return ["https://sniped-one.vercel.app"]
 
 AUTOPILOT_ENRICH_LIMIT = 150
 HIGH_AI_SCORE_THRESHOLD = 7.0
@@ -10109,67 +10104,85 @@ def create_app() -> FastAPI:
 
     @app.get("/api/saved-segments")
     def get_saved_segments(request: Request) -> dict:
-        user_id = require_current_user_id(request)
-        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
-            if client is None:
-                raise HTTPException(status_code=500, detail="Supabase not configured")
-            rows = supabase_select_rows(
-                client,
-                "SavedSegments",
-                columns="id,user_id,name,filters_json,created_at,updated_at",
-                filters={"user_id": user_id},
-                order_by="updated_at",
-                desc=True,
-                limit=100,
-            )
-            return {"items": [_normalize_saved_segment_row(row) for row in rows]}
+        try:
+            user_id = require_current_user_id(request)
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+                client = get_supabase_client(DEFAULT_CONFIG_PATH)
+                if client is None:
+                    raise HTTPException(status_code=500, detail="Supabase not configured")
+                rows = supabase_select_rows(
+                    client,
+                    "SavedSegments",
+                    columns="id,user_id,name,filters_json,created_at,updated_at",
+                    filters={"user_id": user_id},
+                    order_by="updated_at",
+                    desc=True,
+                    limit=100,
+                )
+                return {"items": [_normalize_saved_segment_row(row) for row in rows]}
 
-        return {"items": list_saved_segments(DEFAULT_DB_PATH, user_id)}
+            return {"items": list_saved_segments(DEFAULT_DB_PATH, user_id)}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.exception("Failed to load saved segments")
+            raise HTTPException(status_code=500, detail=f"Saved segments error: {exc}")
 
     @app.post("/api/saved-segments")
     def save_segment_route(payload: SavedSegmentRequest, request: Request) -> dict:
-        user_id = require_current_user_id(request)
-        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
-            if client is None:
-                raise HTTPException(status_code=500, detail="Supabase not configured")
-            now_iso = utc_now_iso()
-            name = payload.name.strip()
-            filters_json = json.dumps(payload.filters or {}, ensure_ascii=False)
-            existing_rows = client.table("SavedSegments").select("id").eq("user_id", user_id).eq("name", name).limit(1).execute().data or []
-            if existing_rows:
-                segment_id = int(existing_rows[0].get("id"))
-                client.table("SavedSegments").update({"filters_json": filters_json, "updated_at": now_iso}).eq("id", segment_id).eq("user_id", user_id).execute()
-                saved_rows = client.table("SavedSegments").select("id,user_id,name,filters_json,created_at,updated_at").eq("id", segment_id).limit(1).execute().data or []
-            else:
-                saved_rows = client.table("SavedSegments").insert({
-                    "user_id": user_id,
-                    "name": name,
-                    "filters_json": filters_json,
-                    "created_at": now_iso,
-                    "updated_at": now_iso,
-                }).execute().data or []
-            if not saved_rows:
-                raise HTTPException(status_code=500, detail="Could not save segment")
-            return _normalize_saved_segment_row(saved_rows[0])
+        try:
+            user_id = require_current_user_id(request)
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+                client = get_supabase_client(DEFAULT_CONFIG_PATH)
+                if client is None:
+                    raise HTTPException(status_code=500, detail="Supabase not configured")
+                now_iso = utc_now_iso()
+                name = payload.name.strip()
+                filters_json = json.dumps(payload.filters or {}, ensure_ascii=False)
+                existing_rows = client.table("SavedSegments").select("id").eq("user_id", user_id).eq("name", name).limit(1).execute().data or []
+                if existing_rows:
+                    segment_id = int(existing_rows[0].get("id"))
+                    client.table("SavedSegments").update({"filters_json": filters_json, "updated_at": now_iso}).eq("id", segment_id).eq("user_id", user_id).execute()
+                    saved_rows = client.table("SavedSegments").select("id,user_id,name,filters_json,created_at,updated_at").eq("id", segment_id).limit(1).execute().data or []
+                else:
+                    saved_rows = client.table("SavedSegments").insert({
+                        "user_id": user_id,
+                        "name": name,
+                        "filters_json": filters_json,
+                        "created_at": now_iso,
+                        "updated_at": now_iso,
+                    }).execute().data or []
+                if not saved_rows:
+                    raise HTTPException(status_code=500, detail="Could not save segment")
+                return _normalize_saved_segment_row(saved_rows[0])
 
-        return create_saved_segment(DEFAULT_DB_PATH, user_id, payload.model_dump())
+            return create_saved_segment(DEFAULT_DB_PATH, user_id, payload.model_dump())
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.exception("Failed to save segment")
+            raise HTTPException(status_code=500, detail=f"Saved segments error: {exc}")
 
     @app.delete("/api/saved-segments/{segment_id}")
     def delete_saved_segment_route(segment_id: int, request: Request) -> dict:
-        user_id = require_current_user_id(request)
-        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
-            if client is None:
-                raise HTTPException(status_code=500, detail="Supabase not configured")
-            existing_rows = client.table("SavedSegments").select("id").eq("id", int(segment_id)).eq("user_id", user_id).limit(1).execute().data or []
-            if not existing_rows:
-                raise HTTPException(status_code=404, detail="Saved segment not found")
-            client.table("SavedSegments").delete().eq("id", int(segment_id)).eq("user_id", user_id).execute()
-            return {"status": "deleted", "id": int(segment_id)}
+        try:
+            user_id = require_current_user_id(request)
+            if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+                client = get_supabase_client(DEFAULT_CONFIG_PATH)
+                if client is None:
+                    raise HTTPException(status_code=500, detail="Supabase not configured")
+                existing_rows = client.table("SavedSegments").select("id").eq("id", int(segment_id)).eq("user_id", user_id).limit(1).execute().data or []
+                if not existing_rows:
+                    raise HTTPException(status_code=404, detail="Saved segment not found")
+                client.table("SavedSegments").delete().eq("id", int(segment_id)).eq("user_id", user_id).execute()
+                return {"status": "deleted", "id": int(segment_id)}
 
-        return delete_saved_segment(DEFAULT_DB_PATH, user_id, segment_id)
+            return delete_saved_segment(DEFAULT_DB_PATH, user_id, segment_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.exception("Failed to delete saved segment")
+            raise HTTPException(status_code=500, detail=f"Saved segments error: {exc}")
 
     @app.get("/api/client-folders")
     def get_client_folders(request: Request) -> dict:
