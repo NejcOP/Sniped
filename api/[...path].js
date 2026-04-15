@@ -13,7 +13,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 function normalizeBaseUrl(value) {
   const raw = String(value || '').trim()
   if (!raw) return ''
-  return raw.replace(/\/$/, '')
+  const withScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(raw)
+    ? raw
+    : /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/.test(raw)
+      ? `http://${raw}`
+      : `https://${raw}`
+  return withScheme.replace(/\/$/, '')
 }
 
 function buildQueryString(query) {
