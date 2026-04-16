@@ -113,10 +113,10 @@ def clear_runtime(report: ResetReport, execute: bool) -> None:
 
 
 def remove_backups(report: ResetReport, execute: bool) -> None:
-    for backup in ROOT.glob("leads.db.backup*"):
+    for backup in ROOT.glob("*.db.backup*"):
         if execute:
             backup.unlink(missing_ok=True)
-        report.add(f"Removed backup DB file: {backup.name}")
+        report.add(f"Removed legacy backup file: {backup.name}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--delete-backups",
         action="store_true",
-        help="Also delete old leads.db.backup* files if any still exist.",
+        help="Also delete old *.db.backup* files if any still exist.",
     )
     return parser.parse_args()
 

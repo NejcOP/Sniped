@@ -67,7 +67,7 @@ from backend.services.prompt_service import PromptFactory
 from backend.stripe_webhook import extract_payment_refresh_payload
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = ROOT_DIR / "leads.db"
+DEFAULT_DB_PATH = ROOT_DIR / "runtime-db"
 DEFAULT_CONFIG_PATH = ROOT_DIR / "environment settings"
 DEFAULT_PROFILE_DIR = ROOT_DIR / "profiles" / "maps_profile"
 DEFAULT_TARGET_EXPORT = ROOT_DIR / "target_leads.csv"
@@ -11203,7 +11203,7 @@ def create_app() -> FastAPI:
             job_id = inserted[0].get("id")
             return {"job_id": job_id, "status": "pending"}
 
-        # legacy store fallback â€” jobs table in leads.db
+        # legacy store fallback via the compatibility DB wrapper
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
         ensure_jobs_queue_table(db_path)

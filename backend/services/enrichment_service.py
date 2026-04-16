@@ -58,7 +58,7 @@ def _clean_for_ai(text: str) -> str:
 class LeadEnricher:
     def __init__(
         self,
-        db_path: str = "leads.db",
+        db_path: str = "runtime-db",
         headless: bool = True,
         max_google_links: int = 3,
         config_path: str = "env",

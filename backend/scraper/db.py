@@ -158,11 +158,11 @@ def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
             setattr(record, field_name, value)
 
 
-def init_db(db_path: str = "leads.db") -> None:
+def init_db(db_path: str = "runtime-db") -> None:
     Base.metadata.create_all(get_engine(db_path))
 
 
-def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "leads.db") -> dict[str, Any]:
+def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "runtime-db") -> dict[str, Any]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -181,7 +181,7 @@ def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "leads.db") 
         return _lead_record_to_dict(record)
 
 
-def get_lead(lead_id: int, db_path: str = "leads.db") -> Optional[dict[str, Any]]:
+def get_lead(lead_id: int, db_path: str = "runtime-db") -> Optional[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -189,7 +189,7 @@ def get_lead(lead_id: int, db_path: str = "leads.db") -> Optional[dict[str, Any]
         return _lead_record_to_dict(record) if record is not None else None
 
 
-def update_lead(lead_id: int, updates: dict[str, Any], db_path: str = "leads.db") -> Optional[dict[str, Any]]:
+def update_lead(lead_id: int, updates: dict[str, Any], db_path: str = "runtime-db") -> Optional[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -203,7 +203,7 @@ def update_lead(lead_id: int, updates: dict[str, Any], db_path: str = "leads.db"
         return _lead_record_to_dict(record)
 
 
-def delete_lead(lead_id: int, db_path: str = "leads.db") -> bool:
+def delete_lead(lead_id: int, db_path: str = "runtime-db") -> bool:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -215,7 +215,7 @@ def delete_lead(lead_id: int, db_path: str = "leads.db") -> bool:
         return True
 
 
-def upsert_lead(lead: Lead, db_path: str = "leads.db", user_id: str = "legacy") -> bool:
+def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy") -> bool:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -232,7 +232,7 @@ def upsert_lead(lead: Lead, db_path: str = "leads.db", user_id: str = "legacy") 
         return True
 
 
-def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "leads.db", user_id: str = "legacy") -> int:
+def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_id: str = "legacy") -> int:
     if not leads:
         return 0
 
@@ -254,7 +254,7 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "leads.db", user_id
         return inserted
 
 
-def fetch_target_leads(db_path: str = "leads.db", min_score: float = 7.0, user_id: Optional[str] = None) -> list[dict[str, Any]]:
+def fetch_target_leads(db_path: str = "runtime-db", min_score: float = 7.0, user_id: Optional[str] = None) -> list[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:

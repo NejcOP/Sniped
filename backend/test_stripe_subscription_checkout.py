@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import io
 import json
-import sqlite3
+import pgdb
 import tempfile
 import time
 import unittest
@@ -47,7 +47,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -146,7 +146,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -216,7 +216,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -299,7 +299,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -395,7 +395,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -490,7 +490,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -564,7 +564,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -635,8 +635,8 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                         )
 
                 self.assertEqual(response.status_code, 200, response.text)
-                with sqlite3.connect(db_path) as conn:
-                    conn.row_factory = sqlite3.Row
+                with pgdb.connect(db_path) as conn:
+                    conn.row_factory = pgdb.Row
                     row = conn.execute(
                         "SELECT credits_balance, topup_credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = 1"
                     ).fetchone()
@@ -669,7 +669,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
@@ -743,8 +743,8 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                         )
 
                 self.assertEqual(response.status_code, 200, response.text)
-                with sqlite3.connect(db_path) as conn:
-                    conn.row_factory = sqlite3.Row
+                with pgdb.connect(db_path) as conn:
+                    conn.row_factory = pgdb.Row
                     row = conn.execute(
                         "SELECT credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = 1"
                     ).fetchone()
