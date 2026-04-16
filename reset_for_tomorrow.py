@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""Reset project data while keeping configuration files.
+"""Reset project data while keeping source files.
 
 Usage:
   python reset_for_tomorrow.py --execute
 
 What it clears:
-- All rows in local SQLite user tables (keeps schema)
+- All rows in application Postgres tables (keeps schema)
 - CSV exports used by pipeline
 - Runtime temporary files
 - Log files (truncates .log files)
 
 What it keeps:
-- config.json
 - source code and project structure
 """
 
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from sqlalchemy import text
+
+from backend.scraper.db import get_engine
+
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "leads.db"
 LOGS_DIR = ROOT / "logs"
 RUNTIME_DIR = ROOT / "runtime"
 EXPORT_FILES = [
@@ -46,35 +47,39 @@ class ResetReport:
         self.warnings.append(message)
 
 
-def clear_sqlite_data(report: ResetReport, execute: bool) -> None:
-    if not DB_PATH.exists():
-        report.warn("SQLite file leads.db not found, skipping DB reset.")
-        return
+def clear_database_data(report: ResetReport, execute: bool) -> None:
+    protected_tables = {"users", "stripe_webhook_events", "alembic_version"}
+    engine = get_engine()
+    with engine.begin() as conn:
+        tables = [
+            row["table_name"]
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    ORDER BY table_name ASC
+                    """
+                )
+            ).mappings()
+        ]
 
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
-        tables = [row[0] for row in cur.fetchall()]
-
-        if not tables:
-            report.add("No user tables found in leads.db.")
+        user_tables = [table for table in tables if table not in protected_tables]
+        if not user_tables:
+            report.add("No application tables found in Postgres.")
             return
 
-        for table in tables:
-            if execute:
-                cur.execute(f"DELETE FROM {table}")
-            report.add(f"Cleared table: {table}")
-
         if execute:
-            cur.execute("DELETE FROM sqlite_sequence")
-            conn.commit()
-            cur.execute("VACUUM")
-        report.add("Reset SQLite autoincrement and vacuumed database.")
-    finally:
-        conn.close()
+            conn.execute(text("SET session_replication_role = replica"))
+        try:
+            for table in user_tables:
+                if execute:
+                    conn.execute(text(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE'))
+                report.add(f"Cleared table: {table}")
+        finally:
+            if execute:
+                conn.execute(text("SET session_replication_role = DEFAULT"))
 
 
 def remove_exports(report: ResetReport, execute: bool) -> None:
@@ -116,7 +121,7 @@ def remove_backups(report: ResetReport, execute: bool) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Clear project data for a fresh start while keeping config files."
+        description="Clear project data for a fresh start while keeping source files."
     )
     parser.add_argument(
         "--execute",
@@ -126,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--delete-backups",
         action="store_true",
-        help="Also delete leads.db.backup* files.",
+        help="Also delete old leads.db.backup* files if any still exist.",
     )
     return parser.parse_args()
 
@@ -137,7 +142,7 @@ def main() -> int:
 
     report = ResetReport()
 
-    clear_sqlite_data(report, execute)
+    clear_database_data(report, execute)
     remove_exports(report, execute)
     clear_logs(report, execute)
     clear_runtime(report, execute)

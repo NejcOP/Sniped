@@ -4,9 +4,7 @@ Ustvari Supabase tabele za sistem.
 Zaženi z: python setup_supabase_tables.py
 """
 
-import json
 import sys
-from pathlib import Path
 
 try:
     from supabase import create_client
@@ -16,7 +14,9 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "supabase"])
     from supabase import create_client
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+sys.path.insert(0, "backend")
+
+from backend.app import DEFAULT_CONFIG_PATH, get_supabase_client, load_supabase_settings
 
 SQL_SCRIPT = """
 CREATE TABLE IF NOT EXISTS public.leads (
@@ -169,25 +169,18 @@ CREATE INDEX IF NOT EXISTS idx_users_reset_token
 
 def main():
     print("📋 Nalagam Supabase podatke...")
-    
-    if not CONFIG_PATH.exists():
-        print(f"❌ Datoteka ne obstaja: {CONFIG_PATH}")
-        sys.exit(1)
-    
-    with open(CONFIG_PATH) as f:
-        config = json.load(f)
-    
-    url = config.get("supabase", {}).get("url")
-    service_role_key = config.get("supabase", {}).get("service_role_key")
-    
-    if not url or not service_role_key:
-        print("❌ Manjkajo Supabase ključi v config.json")
+    settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+    url = settings.get("url")
+    if not url:
+        print("❌ Manjkajo Supabase env nastavitve")
         sys.exit(1)
     
     print(f"📍 Povezujem se na: {url}")
     
     try:
-        client = create_client(url, service_role_key)
+        client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if client is None:
+            raise RuntimeError("Supabase client not available")
         print("✅ Povezava uspostavljena")
     except Exception as e:
         print(f"❌ Napaka pri povezavi: {e}")

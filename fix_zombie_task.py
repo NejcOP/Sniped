@@ -1,23 +1,37 @@
-import sys, sqlite3, datetime
+import datetime
+import sys
+
+from sqlalchemy import text
+
 sys.path.insert(0, "backend")
-from app import DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH, get_supabase_client
 
-db = str(DEFAULT_DB_PATH)
-with sqlite3.connect(db) as conn:
-    conn.execute(
-        "UPDATE system_tasks SET status=?, error=?, finished_at=? WHERE task_type=? AND status=?",
-        ("failed", "Backend restarted - task orphaned", datetime.datetime.utcnow().isoformat(), "mailer", "running")
-    )
-    conn.commit()
-    row = conn.execute("SELECT id, status, error FROM system_tasks WHERE task_type=? ORDER BY id DESC LIMIT 1", ("mailer",)).fetchone()
-    print("SQLite mailer task:", row)
+from scraper.db import get_engine
 
-sb = get_supabase_client(DEFAULT_CONFIG_PATH)
-if sb:
-    sb.table("system_tasks").update({
-        "status": "failed",
-        "error": "Backend restarted - task orphaned"
-    }).eq("task_type", "mailer").eq("status", "running").execute()
-    print("Supabase updated OK")
-else:
-    print("No Supabase client")
+def main() -> int:
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE system_tasks
+                SET status = :status,
+                    error = :error,
+                    finished_at = :finished_at
+                WHERE task_type = :task_type AND status = :running_status
+                """
+            ),
+            {
+                "status": "failed",
+                "error": "Backend restarted - task orphaned",
+                "finished_at": datetime.datetime.utcnow().isoformat(),
+                "task_type": "mailer",
+                "running_status": "running",
+            },
+        )
+        row = conn.execute(text("SELECT id, status, error FROM system_tasks WHERE task_type = :task_type ORDER BY id DESC LIMIT 1"), {"task_type": "mailer"}).mappings().first()
+        print("Postgres mailer task:", dict(row) if row else None)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

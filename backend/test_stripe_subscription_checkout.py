@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import io
 import json
 import sqlite3
 import tempfile
@@ -8,6 +9,7 @@ import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs
 
 from fastapi.testclient import TestClient
@@ -105,8 +107,88 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     encoded.get("cancel_url", [""])[0],
-                    "http://localhost:5173/pricing?checkout=cancel&plan=growth",
+                    "http://localhost:5173/app?checkout=cancel&plan=growth",
                 )
+        finally:
+            try:
+                if db_path.exists():
+                    db_path.unlink()
+            except Exception:
+                pass
+            try:
+                if temp_dir.exists():
+                    temp_dir.rmdir()
+            except Exception:
+                pass
+
+    def test_create_subscription_session_surfaces_stripe_http_error_details(self) -> None:
+        temp_dir = Path(tempfile.gettempdir()) / f"sniped_stripe_checkout_error_{uuid.uuid4().hex}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        db_path = temp_dir / "stripe_checkout_error.db"
+
+        def _fake_urlopen(_req, timeout=0):
+            raise HTTPError(
+                url="https://api.stripe.com/v1/checkout/sessions",
+                code=400,
+                msg="Bad Request",
+                hdrs=None,
+                fp=io.BytesIO(
+                    json.dumps({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "No such price: 'price_invalid_123'",
+                            "param": "line_items[0][price]",
+                        }
+                    }).encode("utf-8")
+                ),
+            )
+
+        try:
+            with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
+                app_module.ensure_users_table(db_path)
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO users (
+                            email, password_hash, salt, niche, token,
+                            credits_balance, monthly_quota, monthly_limit, credits_limit,
+                            plan_key, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "growth@example.com",
+                            "hash",
+                            "salt",
+                            "Web Design & Dev",
+                            "token-growth-error",
+                            50,
+                            50,
+                            50,
+                            50,
+                            "free",
+                            app_module.utc_now_iso(),
+                        ),
+                    )
+                    conn.commit()
+
+                with (
+                    patch.object(app_module, "DEFAULT_DB_PATH", db_path),
+                    patch.object(app_module, "start_scheduler", lambda *_args, **_kwargs: None),
+                    patch.object(app_module, "stop_scheduler", lambda *_args, **_kwargs: None),
+                    patch("urllib.request.urlopen", _fake_urlopen),
+                    patch.dict(app_module.os.environ, {"STRIPE_SECRET_KEY": "sk_test_123"}, clear=False),
+                ):
+                    app = app_module.create_app()
+                    with TestClient(app, base_url="http://localhost:8000") as client:
+                        response = client.post(
+                            "/api/stripe/create-subscription-session",
+                            headers={"Authorization": "Bearer token-growth-error"},
+                            json={"plan_id": "growth"},
+                        )
+
+                self.assertEqual(response.status_code, 502, response.text)
+                self.assertIn("Could not create Stripe subscription checkout session.", response.text)
+                self.assertIn("No such price: 'price_invalid_123'", response.text)
         finally:
             try:
                 if db_path.exists():

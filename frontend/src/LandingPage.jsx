@@ -191,6 +191,12 @@ const PRICING_PLANS = [
   },
 ]
 
+const VALID_PAID_PLAN_IDS = new Set(
+  PRICING_PLANS
+    .map((plan) => String(plan?.planId || '').trim().toLowerCase())
+    .filter((planId) => planId && planId !== 'free'),
+)
+
 async function fetchJson(path, options) {
   const apiBase = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
   const token = getStoredValue('lf_token')
@@ -234,6 +240,11 @@ export default function LandingPage() {
 
     if (!normalizedPlanId || normalizedPlanId === 'free') {
       window.location.assign(token ? '/app' : '/get-started')
+      return
+    }
+
+    if (!VALID_PAID_PLAN_IDS.has(normalizedPlanId)) {
+      window.alert('Invalid subscription plan selected.')
       return
     }
 

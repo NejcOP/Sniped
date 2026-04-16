@@ -5,12 +5,13 @@ Run this process alongside the FastAPI server:
 
     python worker.py
 
-It polls the `jobs` table (Supabase first, SQLite fallback) for pending
-jobs, processes up to MAX_CONCURRENT tasks simultaneously using
-asyncio.Semaphore, and writes back status + results when finished.
+It polls the `system_tasks` table in Postgres, atomically claims queued
+rows with `FOR UPDATE SKIP LOCKED`, processes up to MAX_CONCURRENT tasks
+simultaneously using asyncio.Semaphore, and lets the shared backend task
+executors write status + results back to the same table.
 
-Environment / config.json keys read:
-  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (or config.json supabase.*)
+Environment keys read:
+    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
   WORKER_CONCURRENCY  (default 5, max 10)
   WORKER_POLL_INTERVAL  (seconds between polls, default 2)
   WORKER_ID  (optional label, auto-generated if not set)
@@ -19,19 +20,18 @@ Environment / config.json keys read:
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import os
-import random
 import socket
-import sqlite3
 import sys
 import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from sqlalchemy import bindparam, text
 
 # ---------------------------------------------------------------------------
 # Bootstrap – ensure repo root is on sys.path so backend.* imports work
@@ -43,13 +43,12 @@ if str(ROOT_DIR) not in sys.path:
 from backend.app import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_DB_PATH,
-    get_supabase_client,
+    app as backend_app,
+    finish_task_record,
+    get_task_executor,
     is_supabase_primary_enabled,
-    load_supabase_settings,
-    GoogleMapsScraper,
-    LeadEnricher,
 )
-from backend.scraper.db import batch_upsert_leads, init_db
+from backend.scraper.db import get_engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,302 +64,237 @@ POLL_INTERVAL: float = float(os.environ.get("WORKER_POLL_INTERVAL", "2"))
 WORKER_ID: str = os.environ.get("WORKER_ID", f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}")
 BACKOFF_BASE: float = 1.5        # exponential backoff base (seconds)
 BACKOFF_MAX: float = 60.0        # max sleep after repeating errors
+SUPPORTED_TASK_TYPES: tuple[str, ...] = ("scrape", "enrich", "mailer")
+WORKER_STARTED_AT = datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
-# Supabase / SQLite helpers
+# Postgres task/runtime helpers
 # ---------------------------------------------------------------------------
 
 def _use_supabase() -> bool:
     return is_supabase_primary_enabled(DEFAULT_CONFIG_PATH)
 
 
-def _get_client():
-    return get_supabase_client(DEFAULT_CONFIG_PATH)
+def _pg_enabled() -> bool:
+    if not _use_supabase():
+        return False
+    try:
+        get_engine()
+    except Exception:
+        return False
+    return True
 
 
-def _ensure_sqlite_jobs_table() -> None:
-    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL DEFAULT 'default',
-                type TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                payload TEXT NOT NULL DEFAULT '{}',
-                result TEXT,
-                error TEXT,
-                worker_id TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                started_at TEXT,
-                completed_at TEXT
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status, created_at ASC)"
-        )
-        conn.commit()
-
-
-def _claim_next_jobs_supabase(batch: int = MAX_CONCURRENT) -> list[dict]:
-    """
-    Atomically claim up to `batch` pending jobs via Supabase RPC / update trick.
-    Uses UPDATE … RETURNING pattern via the supabase-py client.
-    """
-    client = _get_client()
-    if client is None:
-        return []
-
-    # Grab a batch of pending job IDs
-    pending = (
-        client.table("jobs")
-        .select("id")
-        .eq("status", "pending")
-        .order("created_at", desc=False)
-        .limit(batch)
-        .execute()
-        .data or []
-    )
-    if not pending:
-        return []
-
-    ids = [row["id"] for row in pending]
-
-    # Atomically flip them to 'processing' (only rows still 'pending' will match)
-    now_iso = datetime.now(timezone.utc).isoformat()
-    updated = (
-        client.table("jobs")
-        .update({"status": "processing", "worker_id": WORKER_ID, "started_at": now_iso})
-        .in_("id", ids)
-        .eq("status", "pending")          # guard: only claim still-pending rows
-        .execute()
-        .data or []
-    )
-    if not updated:
-        return []
-
-    # Fetch full payload for claimed jobs
-    claimed_ids = [row["id"] for row in updated]
-    full = (
-        client.table("jobs")
-        .select("id,user_id,type,payload")
-        .in_("id", claimed_ids)
-        .execute()
-        .data or []
-    )
-    return full
-
-
-def _claim_next_jobs_sqlite(batch: int = MAX_CONCURRENT) -> list[dict]:
-    _ensure_sqlite_jobs_table()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, user_id, type, payload FROM jobs WHERE status='pending' ORDER BY created_at ASC LIMIT ?",
-            (batch,),
-        ).fetchall()
-        if not rows:
-            return []
-        ids = [r["id"] for r in rows]
-        placeholders = ",".join("?" * len(ids))
-        conn.execute(
-            f"UPDATE jobs SET status='processing', worker_id=?, started_at=? WHERE id IN ({placeholders}) AND status='pending'",
-            [WORKER_ID, now_iso, *ids],
-        )
-        conn.commit()
-    return [dict(r) for r in rows]
-
-
-def _mark_job_supabase(job_id: Any, status: str, result: Any = None, error: str | None = None) -> None:
-    client = _get_client()
-    if client is None:
+def _runtime_upsert(key: str, value: str) -> None:
+    if not _pg_enabled():
         return
-    now_iso = datetime.now(timezone.utc).isoformat()
-    update: dict = {"status": status, "updated_at": now_iso}
-    if status in {"completed", "failed"}:
-        update["completed_at"] = now_iso
-    if result is not None:
-        update["result"] = result if isinstance(result, dict) else {"value": result}
-    if error is not None:
-        update["error"] = error[:2000]
-    client.table("jobs").update(update).eq("id", job_id).execute()
-
-
-def _mark_job_sqlite(job_id: Any, status: str, result: Any = None, error: str | None = None) -> None:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    result_json = json.dumps(result) if result is not None else None
-    with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+    with get_engine().begin() as conn:
         conn.execute(
-            "UPDATE jobs SET status=?, result=?, error=?, completed_at=? WHERE id=?",
-            (status, result_json, error[:2000] if error else None, now_iso if status in {"completed", "failed"} else None, job_id),
+            text(
+                """
+                INSERT INTO system_runtime (key, value, updated_at)
+                VALUES (:key, :value, :updated_at)
+                ON CONFLICT(key)
+                DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "key": key,
+                "value": value,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
-        conn.commit()
 
 
-def mark_job(job_id: Any, status: str, result: Any = None, error: str | None = None) -> None:
-    if _use_supabase():
-        _mark_job_supabase(job_id, status, result, error)
-    else:
-        _mark_job_sqlite(job_id, status, result, error)
-
-
-# ---------------------------------------------------------------------------
-# Job executors
-# ---------------------------------------------------------------------------
-
-async def execute_scrape(payload: dict, job_id=None) -> dict:
-    """Run Google Maps scraper and upsert leads."""
-    loop = asyncio.get_running_loop()
-
-    def _run() -> dict:
-        keyword = str(payload.get("keyword") or "")
-        results = int(payload.get("results") or 25)
-        country = str(payload.get("country") or "US")
-        headless = bool(payload.get("headless", True))
-
-        # Live progress: write partial result to jobs table on every lead found
-        def _on_progress(current_found: int, total_to_find: int, scanned_count: int, _lead) -> None:
-            if job_id is not None:
-                mark_job(job_id, "processing", result={
-                    "current_found": current_found,
-                    "total_to_find": total_to_find or results,
-                    "scanned_count": scanned_count,
-                    "keyword": keyword,
-                })
-
-        # Resolve user data dir (same logic as the main API)
-        from pathlib import Path as _Path
-        user_data_dir = _Path(f"{ROOT_DIR}/profiles/maps_profile_{country.lower()}")
-
-        init_db(str(DEFAULT_DB_PATH))
-        with GoogleMapsScraper(
-            headless=headless,
-            country=country,
-            user_data_dir=str(user_data_dir),
-        ) as scraper:
-            leads = scraper.scrape(
-                keyword=keyword,
-                max_results=results,
-                progress_callback=_on_progress,
-            )
-
-        inserted = batch_upsert_leads(leads, db_path=str(DEFAULT_DB_PATH))
-        return {
-            "keyword": keyword,
-            "scraped": len(leads),
-            "inserted": inserted,
-            "current_found": len(leads),
-            "total_to_find": results,
-            "country": country,
-        }
-
-    # Run blocking scraper in a thread pool so we don't block the event loop
-    return await loop.run_in_executor(None, _run)
-
-
-async def execute_enrich(payload: dict, job_id=None) -> dict:
-    loop = asyncio.get_running_loop()
-    limit = int(payload.get("limit") or 50)
-    headless = bool(payload.get("headless", True))
-
-    def _progress(processed: int, total: int, with_email: int, _name) -> None:
-        if job_id is not None:
-            mark_job(job_id, "processing", result={
-                "processed": processed,
-                "total": total,
-                "with_email": with_email,
-            })
-
-    def _run() -> dict:
-        enricher = LeadEnricher(
-            db_path=str(DEFAULT_DB_PATH),
-            headless=headless,
-            config_path=str(DEFAULT_CONFIG_PATH),
+def _runtime_increment(key: str, delta: int = 1) -> None:
+    if not _pg_enabled():
+        return []
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO system_runtime (key, value, updated_at)
+                VALUES (:key, :delta_text, :updated_at)
+                ON CONFLICT(key)
+                DO UPDATE SET
+                    value = (
+                        CASE
+                            WHEN system_runtime.value ~ '^-?[0-9]+$' THEN (system_runtime.value::bigint + :delta)::text
+                            ELSE :delta_text
+                        END
+                    ),
+                    updated_at = excluded.updated_at
+                """
+            ),
+            {
+                "key": key,
+                "delta": int(delta),
+                "delta_text": str(int(delta)),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
-        enriched, with_email = enricher.run(limit=limit, progress_callback=_progress)
-        return {"enriched": enriched, "with_email": with_email, "processed": enriched, "total": limit}
-
-    return await loop.run_in_executor(None, _run)
 
 
-async def execute_mailer(payload: dict, job_id=None) -> dict:
-    """Mailer is handled by the main process via /api/mailer/send; worker logs a skip."""
-    log.info("Mailer job %s delegated to main API process", payload)
-    return {"note": "Mailer jobs are executed via the main FastAPI process (POST /api/mailer/send). Job logged."}
+def _update_worker_heartbeat() -> None:
+    now = datetime.now(timezone.utc)
+    uptime_seconds = int((now - WORKER_STARTED_AT).total_seconds())
+    _runtime_upsert(f"worker:{WORKER_ID}:started_at", WORKER_STARTED_AT.isoformat())
+    _runtime_upsert(f"worker:{WORKER_ID}:last_heartbeat_at", now.isoformat())
+    _runtime_upsert(f"worker:{WORKER_ID}:uptime_seconds", str(uptime_seconds))
 
 
-JOB_EXECUTORS = {
-    "scrape": execute_scrape,
-    "enrich": execute_enrich,
-    "mailer": execute_mailer,
-}
+def _record_task_outcome(task_id: int, task_type: str) -> None:
+    if not _pg_enabled():
+        return
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            text("SELECT status FROM system_tasks WHERE id = :task_id LIMIT 1"),
+            {"task_id": int(task_id)},
+        ).fetchone()
+    status = str(row[0] if row else "").strip().lower()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _runtime_increment("tasks_processed_total", 1)
+    _runtime_upsert(f"worker:{WORKER_ID}:last_task_finished_at", now_iso)
+    _runtime_upsert(f"worker:{WORKER_ID}:last_task_type", task_type)
+    if status == "completed":
+        _runtime_increment("tasks_success_total", 1)
+        _runtime_upsert(f"worker:{WORKER_ID}:last_task_success_at", now_iso)
+    elif status in {"failed", "stopped"}:
+        _runtime_increment("tasks_failed_total", 1)
+        _runtime_upsert(f"worker:{WORKER_ID}:last_task_failure_at", now_iso)
 
-# ---------------------------------------------------------------------------
-# Core worker loop
-# ---------------------------------------------------------------------------
 
-async def process_job(job: dict, semaphore: asyncio.Semaphore) -> None:
-    job_id = job.get("id")
-    job_type = str(job.get("type") or "")
-    raw_payload = job.get("payload") or {}
+def _claim_next_tasks_postgres(batch: int = MAX_CONCURRENT) -> list[dict[str, Any]]:
+    if not _pg_enabled():
+        return []
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    claim_statement = text(
+        """
+        WITH next_tasks AS (
+            SELECT id
+            FROM system_tasks
+            WHERE status = 'queued'
+              AND task_type IN :task_types
+            ORDER BY created_at ASC, id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT :batch
+        )
+        UPDATE system_tasks AS task
+        SET
+            status = 'running',
+            started_at = COALESCE(task.started_at, :now_iso),
+            worker_id = :worker_id,
+            updated_at = :now_iso
+        FROM next_tasks
+        WHERE task.id = next_tasks.id
+        RETURNING task.id, task.user_id, task.task_type, task.request_payload
+        """
+    ).bindparams(bindparam("task_types", expanding=True))
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            claim_statement,
+            {
+                "task_types": list(SUPPORTED_TASK_TYPES),
+                "batch": max(1, int(batch)),
+                "now_iso": now_iso,
+                "worker_id": WORKER_ID,
+            },
+        ).mappings().all()
+    if rows:
+        _runtime_upsert(f"worker:{WORKER_ID}:last_claimed_task_at", now_iso)
+    return [dict(row) for row in rows]
+
+
+def _deserialize_payload(raw_payload: Any) -> dict[str, Any]:
+    if isinstance(raw_payload, dict):
+        return dict(raw_payload)
     if isinstance(raw_payload, str):
         try:
-            raw_payload = json.loads(raw_payload)
+            parsed = json.loads(raw_payload)
+            return dict(parsed) if isinstance(parsed, dict) else {}
         except Exception:
-            raw_payload = {}
+            return {}
+    return {}
 
-    log.info("Processing job %s type=%s", job_id, job_type)
+
+# ---------------------------------------------------------------------------
+# Task execution
+# ---------------------------------------------------------------------------
+async def process_task(task: dict[str, Any], semaphore: asyncio.Semaphore) -> None:
+    task_id = int(task.get("id") or 0)
+    task_type = str(task.get("task_type") or "").strip().lower()
+    payload_data = _deserialize_payload(task.get("request_payload"))
+    payload_data["task_id"] = task_id
+    payload_data["task_type"] = task_type
+    payload_data["user_id"] = str(task.get("user_id") or payload_data.get("user_id") or "legacy")
+    payload_data.setdefault("db_path", str(DEFAULT_DB_PATH))
+    payload_data.setdefault("config_path", str(DEFAULT_CONFIG_PATH))
+
+    log.info("Processing system task %s type=%s", task_id, task_type)
+    _runtime_upsert(f"worker:{WORKER_ID}:last_task_started_at", datetime.now(timezone.utc).isoformat())
 
     async with semaphore:
-        executor = JOB_EXECUTORS.get(job_type)
-        if executor is None:
-            mark_job(job_id, "failed", error=f"Unknown job type: {job_type}")
-            log.warning("Job %s: unknown type '%s'", job_id, job_type)
+        try:
+            executor = get_task_executor(task_type)
+        except Exception:
+            finish_task_record(DEFAULT_DB_PATH, task_id, status="failed", error=f"Unsupported task type: {task_type}")
+            _record_task_outcome(task_id, task_type)
             return
 
         try:
-            result = await executor(raw_payload, job_id=job_id)
-            mark_job(job_id, "completed", result=result)
-            log.info("Job %s completed: %s", job_id, result)
-        except Exception as exc:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, executor, backend_app, payload_data)
+        except Exception:
             err_msg = traceback.format_exc()
-            mark_job(job_id, "failed", error=err_msg)
-            log.error("Job %s failed: %s", job_id, exc)
+            finish_task_record(DEFAULT_DB_PATH, task_id, status="failed", error=err_msg)
+            log.error("System task %s crashed in worker", task_id, exc_info=True)
+        finally:
+            _record_task_outcome(task_id, task_type)
 
 
 async def poll_loop() -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     consecutive_empty = 0
     log.info(
-        "Worker %s started | concurrency=%d | poll_interval=%.1fs | Supabase=%s",
+        "Worker %s started | concurrency=%d | poll_interval=%.1fs | primary_mode=%s",
         WORKER_ID, MAX_CONCURRENT, POLL_INTERVAL, _use_supabase(),
     )
+    _runtime_upsert(f"worker:{WORKER_ID}:status", "online")
 
     while True:
         try:
-            claim_fn = _claim_next_jobs_supabase if _use_supabase() else _claim_next_jobs_sqlite
+            if not _pg_enabled():
+                log.warning("Worker %s is waiting for SUPABASE_DATABASE_URL + primary mode.", WORKER_ID)
+                await asyncio.sleep(BACKOFF_BASE)
+                continue
+
+            _update_worker_heartbeat()
             # Only claim as many slots as are currently free
             free_slots = MAX_CONCURRENT - (MAX_CONCURRENT - semaphore._value)  # noqa: SLF001
-            jobs = claim_fn(batch=max(1, free_slots)) if semaphore._value > 0 else []  # noqa: SLF001
+            tasks = _claim_next_tasks_postgres(batch=max(1, free_slots)) if semaphore._value > 0 else []  # noqa: SLF001
 
-            if jobs:
+            if tasks:
                 consecutive_empty = 0
-                for job in jobs:
-                    asyncio.create_task(process_job(job, semaphore))
+                _runtime_upsert(f"worker:{WORKER_ID}:status", "busy")
+                for task in tasks:
+                    asyncio.create_task(process_task(task, semaphore))
             else:
                 consecutive_empty += 1
+                _runtime_upsert(f"worker:{WORKER_ID}:status", "idle")
 
             # Exponential backoff when queue is consistently empty (up to BACKOFF_MAX)
             sleep_time = min(POLL_INTERVAL * (BACKOFF_BASE ** min(consecutive_empty, 8)), BACKOFF_MAX) if consecutive_empty > 3 else POLL_INTERVAL
             await asyncio.sleep(sleep_time)
 
         except KeyboardInterrupt:
+            _runtime_upsert(f"worker:{WORKER_ID}:status", "stopped")
             log.info("Worker %s shutting down.", WORKER_ID)
             break
         except Exception as exc:
             log.error("Poll loop error: %s", exc, exc_info=True)
+            _runtime_upsert(f"worker:{WORKER_ID}:status", "error")
             await asyncio.sleep(POLL_INTERVAL * 2)
 
 

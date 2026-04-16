@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import hmac
 import inspect
 import csv
@@ -13,7 +13,8 @@ import random
 import re
 import secrets
 import smtplib
-import sqlite3
+import pgdb
+import urllib.error
 import urllib.request
 import uuid
 import base64
@@ -35,6 +36,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
+from sqlalchemy import text
 
 try:
     _supabase_module = importlib.import_module("supabase")
@@ -45,7 +47,7 @@ except Exception:
     _HAS_SUPABASE = False
 
 from backend.check_access import get_plan_feature_access, normalize_plan_key, require_feature_access
-from backend.scraper.db import init_db, upsert_lead, batch_upsert_leads
+from backend.scraper.db import batch_upsert_leads, get_engine as pg_get_engine, init_db, upsert_lead
 from backend.scraper.exporter import export_target_leads
 from backend.scraper.google_maps import GoogleMapsScraper
 from backend.scraper.phone_extractor import PhoneExtractor
@@ -66,7 +68,7 @@ from backend.stripe_webhook import extract_payment_refresh_payload
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = ROOT_DIR / "leads.db"
-DEFAULT_CONFIG_PATH = ROOT_DIR / "config.json"
+DEFAULT_CONFIG_PATH = ROOT_DIR / "environment settings"
 DEFAULT_PROFILE_DIR = ROOT_DIR / "profiles" / "maps_profile"
 DEFAULT_TARGET_EXPORT = ROOT_DIR / "target_leads.csv"
 DEFAULT_AI_EXPORT = ROOT_DIR / "ai_mailer_ready.csv"
@@ -111,7 +113,7 @@ SUPABASE_SYNC_TABLES = (
 )
 
 # Optional hardcoded proxy pool fallback.
-# If config.json does not provide proxy_urls/proxy_url, scraper will use this list.
+# If environment settings does not provide proxy_urls/proxy_url, scraper will use this list.
 # Add one full URL per item, e.g. "http://user:pass@host:port".
 HARDCODED_PROXY_URLS: List[str] = []
 
@@ -605,7 +607,7 @@ def generate_cold_email_opener_for_niche(
     Args:
         niche: User's selected niche
         prospect_data: Prospect description from the user
-        pack_mode: Optional tone modifier — "local_first" or "aggressive"
+        pack_mode: Optional tone modifier â€” "local_first" or "aggressive"
     """
     client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
     if client is None:
@@ -795,7 +797,7 @@ def row_to_task_dict(row: Optional[Any], task_type: str) -> dict:
             "source": None,
         }
 
-    # Compatible with both sqlite3.Row and Supabase dict
+    # Compatible with both DB row mappings and Supabase dicts
     status = str(row.get("status") if isinstance(row, dict) else row["status"] or "idle").lower()
     return {
         "id": int(row.get("id") if isinstance(row, dict) else row["id"]),
@@ -812,7 +814,7 @@ def row_to_task_dict(row: Optional[Any], task_type: str) -> dict:
     }
 
 
-def parse_task_row(row: sqlite3.Row) -> dict:
+def parse_task_row(row: pgdb.Row) -> dict:
     return row_to_task_dict(row, row["task_type"])
 
 
@@ -863,7 +865,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "created_at": "ALTER TABLE leads ADD COLUMN created_at TEXT",
     }
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
         for column_name, statement in optional_columns.items():
             if column_name not in columns:
@@ -897,7 +899,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
 
 
 def ensure_blacklist_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS lead_blacklist (
@@ -917,7 +919,7 @@ def ensure_blacklist_table(db_path: Path) -> None:
 
 def fetch_blacklist_sets(db_path: Path) -> tuple[set[str], set[str]]:
     ensure_blacklist_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         rows = conn.execute("SELECT kind, value FROM lead_blacklist").fetchall()
 
     emails: set[str] = set()
@@ -942,8 +944,8 @@ def sync_blacklisted_leads(db_path: Path) -> int:
     if not emails and not domains:
         return 0
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT id, email, website_url, status
@@ -987,8 +989,8 @@ def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manua
         return blacklist_lead_and_matches_supabase(lead_id, reason, DEFAULT_CONFIG_PATH)
 
     ensure_system_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         row = conn.execute(
             "SELECT id, business_name, email, website_url FROM leads WHERE id = ?",
             (lead_id,),
@@ -1040,7 +1042,7 @@ def add_blacklist_entry(db_path: Path, *, kind: str, value: str, reason: str = "
     clean_reason = str(reason or "Manual blacklist").strip() or "Manual blacklist"
     ensure_blacklist_table(db_path)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO lead_blacklist (kind, value, reason, created_at)
@@ -1096,8 +1098,8 @@ def restore_released_blacklisted_leads(db_path: Path, removed_entries: list[tupl
         return 0
 
     emails, domains = fetch_blacklist_sets(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT id, email, website_url, status
@@ -1137,7 +1139,7 @@ def remove_blacklist_entry(db_path: Path, *, kind: str, value: str) -> dict:
     normalized_kind, normalized_value = normalize_blacklist_entry(kind, value)
     ensure_blacklist_table(db_path)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         cursor = conn.execute(
             "DELETE FROM lead_blacklist WHERE kind = ? AND value = ?",
             (normalized_kind, normalized_value),
@@ -1159,8 +1161,8 @@ def remove_blacklist_entry(db_path: Path, *, kind: str, value: str) -> dict:
 
 def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int) -> dict:
     ensure_system_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         row = conn.execute(
             "SELECT id, business_name, email, website_url FROM leads WHERE id = ?",
             (lead_id,),
@@ -1200,7 +1202,7 @@ def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int) -> dict:
 
 
 def ensure_revenue_log_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS revenue_log (
@@ -1221,7 +1223,7 @@ def ensure_revenue_log_table(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_revenue_log_user_id ON revenue_log(user_id)")
         try:
             first_user_row = conn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
-        except sqlite3.OperationalError:
+        except pgdb.OperationalError:
             first_user_row = None
         if first_user_row is not None:
             conn.execute(
@@ -1231,8 +1233,8 @@ def ensure_revenue_log_table(db_path: Path) -> None:
         conn.commit()
 
 
-def _ensure_jobs_table_sqlite(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+def ensure_jobs_queue_table(db_path: Path) -> None:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -1255,7 +1257,7 @@ def _ensure_jobs_table_sqlite(db_path: Path) -> None:
 
 
 def ensure_workers_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS workers (
@@ -1283,7 +1285,7 @@ def ensure_workers_table(db_path: Path) -> None:
 
 
 def ensure_worker_audit_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS worker_audit_log (
@@ -1304,7 +1306,7 @@ def ensure_worker_audit_table(db_path: Path) -> None:
 
 
 def ensure_delivery_tasks_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS delivery_tasks (
@@ -1365,7 +1367,7 @@ def add_worker_audit(
         return
 
     ensure_worker_audit_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, created_at)
@@ -1392,8 +1394,8 @@ def auto_assign_worker_to_paid_lead(db_path: Path, lead_id: int) -> dict:
     ensure_workers_table(db_path)
     ensure_dashboard_columns(db_path)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         lead = conn.execute(
             """
             SELECT id, business_name, status, client_tier, worker_id, user_id
@@ -1509,8 +1511,8 @@ def ensure_delivery_task_for_paid_lead(db_path: Path, lead_id: int) -> dict:
         "standard": "Website Setup",
     }
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         lead = conn.execute(
             """
             SELECT id, business_name, status, client_tier, worker_id, user_id
@@ -1589,8 +1591,8 @@ def get_workers_snapshot(db_path: Path, user_id: Optional[str] = None) -> dict:
     ensure_delivery_tasks_table(db_path)
     ensure_dashboard_columns(db_path)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if user_id:
             workers = conn.execute(
                 """
@@ -1762,7 +1764,7 @@ def get_workers_snapshot(db_path: Path, user_id: Optional[str] = None) -> dict:
 
 
 def ensure_system_task_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS system_tasks (
@@ -1796,7 +1798,7 @@ def ensure_system_task_table(db_path: Path) -> None:
 
 
 def ensure_runtime_table(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS system_runtime (
@@ -1812,7 +1814,7 @@ def ensure_runtime_table(db_path: Path) -> None:
 def ensure_users_table(db_path: Path) -> None:
     ensure_dashboard_columns(db_path)
     ensure_blacklist_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -1948,7 +1950,7 @@ def ensure_system_tables(db_path: Path) -> None:
 
 
 def ensure_client_success_tables(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS client_folders (
@@ -1992,7 +1994,7 @@ def ensure_client_success_tables(db_path: Path) -> None:
 
 
 def ensure_mailer_campaign_tables(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
         optional_columns = {
             "campaign_sequence_id": "ALTER TABLE leads ADD COLUMN campaign_sequence_id INTEGER",
@@ -2074,7 +2076,7 @@ def ensure_mailer_campaign_tables(db_path: Path) -> None:
         conn.commit()
 
 
-def _normalize_campaign_sequence_row(row: sqlite3.Row | None) -> dict[str, Any]:
+def _normalize_campaign_sequence_row(row: pgdb.Row | None) -> dict[str, Any]:
     if row is None:
         return {}
     item = dict(row)
@@ -2082,13 +2084,13 @@ def _normalize_campaign_sequence_row(row: sqlite3.Row | None) -> dict[str, Any]:
     return item
 
 
-def _normalize_saved_template_row(row: sqlite3.Row | None) -> dict[str, Any]:
+def _normalize_saved_template_row(row: pgdb.Row | None) -> dict[str, Any]:
     if row is None:
         return {}
     return dict(row)
 
 
-def _normalize_campaign_event_row(row: sqlite3.Row | None) -> dict[str, Any]:
+def _normalize_campaign_event_row(row: pgdb.Row | None) -> dict[str, Any]:
     if row is None:
         return {}
     item = dict(row)
@@ -2111,8 +2113,8 @@ def create_mailer_campaign_sequence(db_path: Path, user_id: str, payload: dict[s
     ensure_mailer_campaign_tables(db_path)
     now_iso = utc_now_iso()
     is_active = bool(payload.get("active", True))
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if is_active:
             conn.execute(
                 "UPDATE CampaignSequences SET active = 0, updated_at = ? WHERE user_id = ?",
@@ -2144,6 +2146,8 @@ def create_mailer_campaign_sequence(db_path: Path, user_id: str, payload: dict[s
                 now_iso,
             ),
         )
+
+
         row = conn.execute(
             "SELECT * FROM CampaignSequences WHERE id = ? LIMIT 1",
             (cursor.lastrowid,),
@@ -2154,8 +2158,8 @@ def create_mailer_campaign_sequence(db_path: Path, user_id: str, payload: dict[s
 
 def list_mailer_campaign_sequences(db_path: Path, user_id: str, limit: int = 25) -> list[dict[str, Any]]:
     ensure_mailer_campaign_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT *
@@ -2169,11 +2173,40 @@ def list_mailer_campaign_sequences(db_path: Path, user_id: str, limit: int = 25)
     return [_normalize_campaign_sequence_row(row) for row in rows]
 
 
+def auth_email_exists(email: str, *, config_path: Path = DEFAULT_CONFIG_PATH, db_path: Path = DEFAULT_DB_PATH) -> bool:
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
+        return False
+
+    if is_supabase_auth_enabled(config_path):
+        if not ensure_supabase_users_table(config_path):
+            raise HTTPException(
+                status_code=503,
+                detail="Supabase users table is missing. Run supabase_schema.sql in Supabase SQL Editor.",
+            )
+        sb_client = get_supabase_client(config_path)
+        if sb_client is None:
+            raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+        try:
+            existing = sb_client.table("users").select("id").eq("email", normalized_email).limit(1).execute()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Supabase auth email lookup failed: {exc}")
+        return bool(list(getattr(existing, "data", None) or []))
+
+    ensure_users_table(db_path)
+    with pgdb.connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE email = ? LIMIT 1",
+            (normalized_email,),
+        ).fetchone()
+    return existing is not None
+
+
 def create_saved_mail_template(db_path: Path, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     ensure_mailer_campaign_tables(db_path)
     now_iso = utc_now_iso()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         cursor = conn.execute(
             """
             INSERT INTO SavedTemplates (
@@ -2201,8 +2234,8 @@ def create_saved_mail_template(db_path: Path, user_id: str, payload: dict[str, A
 
 def list_saved_mail_templates(db_path: Path, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
     ensure_mailer_campaign_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT *
@@ -2231,8 +2264,8 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
     if reason and not metadata.get("reason"):
         metadata = {**metadata, "reason": reason}
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         lead_row = None
         email = str(payload.get("email") or "").strip()
         if lead_id is not None:
@@ -2363,8 +2396,8 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
 
 def get_mailer_campaign_stats(db_path: Path, user_id: str) -> dict[str, Any]:
     ensure_mailer_campaign_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         sent = int(conn.execute(
             "SELECT COUNT(*) FROM leads WHERE COALESCE(NULLIF(user_id, ''), 'legacy') = ? AND sent_at IS NOT NULL",
             (user_id,),
@@ -2572,8 +2605,8 @@ def reset_due_monthly_credits(db_path: Path, config_path: Path) -> dict[str, int
         return {"scanned": scanned, "reset": reset, "downgraded": downgraded}
 
     ensure_users_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT
@@ -2711,10 +2744,10 @@ def create_task_record(
                 if rows and rows[0].get("id") is not None:
                     return int(rows[0].get("id"))
             except Exception as exc:
-                logging.warning("Supabase create_task_record fallback to SQLite: %s", exc)
+                logging.warning("Supabase create_task_record fallback to legacy store: %s", exc)
 
     ensure_system_task_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         cursor = conn.execute(
             """
             INSERT INTO system_tasks (user_id, task_type, status, source, created_at, request_payload)
@@ -2740,9 +2773,9 @@ def mark_task_running(db_path: Path, task_id: int) -> None:
                 ).eq("id", task_id).execute()
                 return
             except Exception as exc:
-                logging.warning("Supabase mark_task_running fallback to SQLite: %s", exc)
+                logging.warning("Supabase mark_task_running fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             UPDATE system_tasks
@@ -2766,9 +2799,9 @@ def update_task_progress(db_path: Path, task_id: int, result_payload: dict) -> N
                 ).eq("id", task_id).execute()
                 return
             except Exception as exc:
-                logging.warning("Supabase update_task_progress fallback to SQLite: %s", exc)
+                logging.warning("Supabase update_task_progress fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             UPDATE system_tasks
@@ -2802,9 +2835,9 @@ def finish_task_record(
                 ).eq("id", task_id).execute()
                 return
             except Exception as exc:
-                logging.warning("Supabase finish_task_record fallback to SQLite: %s", exc)
+                logging.warning("Supabase finish_task_record fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             UPDATE system_tasks
@@ -2830,11 +2863,11 @@ def fetch_latest_task(db_path: Path, task_type: str, user_id: Optional[str] = No
                 row = rows[0] if rows else None
                 return row_to_task_dict(row, task_type)
             except Exception as exc:
-                logging.warning("Supabase fetch_latest_task fallback to SQLite: %s", exc)
+                logging.warning("Supabase fetch_latest_task fallback to legacy store: %s", exc)
 
     ensure_system_task_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if user_id:
             row = conn.execute(
                 """
@@ -2897,11 +2930,11 @@ def fetch_all_latest_tasks(db_path: Path, user_id: Optional[str] = None) -> dict
                         row_map[task_type] = rows[0]
                 return {task_type: row_to_task_dict(row_map.get(task_type), task_type) for task_type in TASK_TYPES}
             except Exception as exc:
-                logging.warning("Supabase fetch_all_latest_tasks fallback to SQLite: %s", exc)
+                logging.warning("Supabase fetch_all_latest_tasks fallback to legacy store: %s", exc)
 
     ensure_system_task_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if user_id:
             rows = conn.execute(
                 """
@@ -2948,11 +2981,11 @@ def fetch_task_history(db_path: Path, limit: int = TASK_HISTORY_LIMIT, user_id: 
                 rows = query.order("id", desc=True).limit(limit).execute().data or []
                 return [parse_task_row(row) for row in rows]
             except Exception as exc:
-                logging.warning("Supabase fetch_task_history fallback to SQLite: %s", exc)
+                logging.warning("Supabase fetch_task_history fallback to legacy store: %s", exc)
 
     ensure_system_task_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if user_id:
             rows = conn.execute(
                 """
@@ -3012,11 +3045,11 @@ def fetch_task_by_id(db_path: Path, task_id: int, user_id: Optional[str] = None)
                     return None
                 return parse_task_row(rows[0])
             except Exception as exc:
-                logging.warning("Supabase fetch_task_by_id fallback to SQLite: %s", exc)
+                logging.warning("Supabase fetch_task_by_id fallback to legacy store: %s", exc)
 
     ensure_system_task_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if user_id:
             row = conn.execute(
                 """
@@ -3131,7 +3164,44 @@ def task_is_active(db_path: Path, task_type: str, user_id: Optional[str] = None)
     return False
 
 
+def _is_postgres_task_store_enabled() -> bool:
+    if not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return False
+    if not supabase_table_available(DEFAULT_CONFIG_PATH, "system_tasks"):
+        return False
+    try:
+        pg_get_engine()
+    except Exception:
+        return False
+    return True
+
+
+def _is_postgres_runtime_store_enabled() -> bool:
+    if not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return False
+    if not supabase_table_available(DEFAULT_CONFIG_PATH, "system_runtime"):
+        return False
+    try:
+        pg_get_engine()
+    except Exception:
+        return False
+    return True
+
+
 def get_runtime_value(db_path: Path, key: str) -> Optional[str]:
+    if _is_postgres_runtime_store_enabled():
+        try:
+            with pg_get_engine().begin() as conn:
+                row = conn.execute(
+                    text("SELECT value FROM system_runtime WHERE key = :key LIMIT 1"),
+                    {"key": key},
+                ).fetchone()
+            if not row:
+                return None
+            return row[0]
+        except Exception as exc:
+            logging.warning("Postgres get_runtime_value fallback to Supabase/legacy store: %s", exc)
+
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "system_runtime"):
         client = get_supabase_client(DEFAULT_CONFIG_PATH)
         if client is not None:
@@ -3141,10 +3211,10 @@ def get_runtime_value(db_path: Path, key: str) -> Optional[str]:
                     return None
                 return rows[0].get("value")
             except Exception as exc:
-                logging.warning("Supabase get_runtime_value fallback to SQLite: %s", exc)
+                logging.warning("Supabase get_runtime_value fallback to legacy store: %s", exc)
 
     ensure_runtime_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         row = conn.execute("SELECT value FROM system_runtime WHERE key = ?", (key,)).fetchone()
     if not row:
         return None
@@ -3152,6 +3222,28 @@ def get_runtime_value(db_path: Path, key: str) -> Optional[str]:
 
 
 def set_runtime_value(db_path: Path, key: str, value: str) -> None:
+    if _is_postgres_runtime_store_enabled():
+        try:
+            with pg_get_engine().begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO system_runtime (key, value, updated_at)
+                        VALUES (:key, :value, :updated_at)
+                        ON CONFLICT(key)
+                        DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                        """
+                    ),
+                    {
+                        "key": key,
+                        "value": value,
+                        "updated_at": utc_now_iso(),
+                    },
+                )
+            return
+        except Exception as exc:
+            logging.warning("Postgres set_runtime_value fallback to Supabase/legacy store: %s", exc)
+
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "system_runtime"):
         client = get_supabase_client(DEFAULT_CONFIG_PATH)
         if client is not None:
@@ -3166,10 +3258,10 @@ def set_runtime_value(db_path: Path, key: str, value: str) -> None:
                 ).execute()
                 return
             except Exception as exc:
-                logging.warning("Supabase set_runtime_value fallback to SQLite: %s", exc)
+                logging.warning("Supabase set_runtime_value fallback to legacy store: %s", exc)
 
     ensure_runtime_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO system_runtime (key, value, updated_at)
@@ -3238,8 +3330,8 @@ def get_stripe_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]
 def get_stripe_secret_key(config_path: Path = DEFAULT_CONFIG_PATH) -> str:
     stripe_cfg = get_stripe_config(config_path)
     return str(
-        os.environ.get("STRIPE_SECRET_KEY")
-        or os.environ.get("SNIPED_STRIPE_SECRET_KEY")
+        os.getenv("STRIPE_SECRET_KEY")
+        or os.getenv("SNIPED_STRIPE_SECRET_KEY")
         or stripe_cfg.get("secret_key", "")
         or stripe_cfg.get("secretKey", "")
         or stripe_cfg.get("api_key", "")
@@ -3250,8 +3342,8 @@ def get_stripe_secret_key(config_path: Path = DEFAULT_CONFIG_PATH) -> str:
 def get_stripe_webhook_secret(config_path: Path = DEFAULT_CONFIG_PATH) -> str:
     stripe_cfg = get_stripe_config(config_path)
     return str(
-        os.environ.get("STRIPE_WEBHOOK_SECRET")
-        or os.environ.get("SNIPED_STRIPE_WEBHOOK_SECRET")
+        os.getenv("STRIPE_WEBHOOK_SECRET")
+        or os.getenv("SNIPED_STRIPE_WEBHOOK_SECRET")
         or stripe_cfg.get("webhook_secret", "")
         or stripe_cfg.get("webhookSecret", "")
         or ""
@@ -3306,6 +3398,61 @@ def get_stripe_checkout_app_base_url(config_path: Path = DEFAULT_CONFIG_PATH, re
             return f"{scheme}://{host}:5173"
 
     return "https://sniped-one.vercel.app"
+
+
+def build_checkout_app_redirect_url(
+    app_base_url: str,
+    *,
+    checkout_status: Optional[str] = None,
+    topup_status: Optional[str] = None,
+    plan_key: Optional[str] = None,
+    package_key: Optional[str] = None,
+    package_credits: Optional[int] = None,
+    include_session_id: bool = False,
+) -> str:
+    normalized_base_url = str(app_base_url or "").strip().rstrip("/") or "https://sniped-one.vercel.app"
+    params: list[tuple[str, str]] = []
+    if checkout_status:
+        params.append(("checkout", str(checkout_status).strip().lower()))
+    if topup_status:
+        params.append(("topup", str(topup_status).strip().lower()))
+    if plan_key:
+        params.append(("plan", str(plan_key).strip().lower()))
+    if package_key:
+        params.append(("topup_package", str(package_key).strip().lower()))
+    if package_credits is not None:
+        params.append(("topup_credits", str(int(package_credits))))
+    if include_session_id:
+        params.append(("session_id", "{CHECKOUT_SESSION_ID}"))
+    return f"{normalized_base_url}/app?{urlencode(params)}"
+
+
+def extract_stripe_http_error_details(exc: urllib.error.HTTPError) -> tuple[str, str]:
+    raw_body = ""
+    try:
+        raw_body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        raw_body = ""
+
+    parsed_body: dict[str, Any] = {}
+    if raw_body:
+        try:
+            payload = json.loads(raw_body)
+            if isinstance(payload, dict):
+                parsed_body = payload
+        except json.JSONDecodeError:
+            parsed_body = {}
+
+    stripe_error = parsed_body.get("error") if isinstance(parsed_body.get("error"), dict) else {}
+    stripe_message = str(
+        stripe_error.get("message")
+        or raw_body
+        or exc.reason
+        or exc
+    ).strip()
+    if not stripe_message:
+        stripe_message = "Unknown Stripe error."
+    return stripe_message, raw_body
 
 
 def _stripe_api_get_json(api_path: str, *, params: Optional[dict[str, Any]] = None, config_path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
@@ -3581,7 +3728,7 @@ def load_config_health(config_path: Path) -> dict:
             "ok": False,
             "openai_ok": False,
             "smtp_ok": False,
-            "error": f"Could not read config.json: {exc}",
+            "error": f"Could not read environment settings: {exc}",
         }
 
     openai_cfg = config.get("openai", {}) if isinstance(config, dict) else {}
@@ -3681,7 +3828,7 @@ def get_primary_smtp_account(config_path: Path) -> dict:
         with config_path.open("r", encoding="utf-8") as handle:
             cfg = json.load(handle)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Could not read config.json: {exc}")
+        raise HTTPException(status_code=503, detail=f"Could not read environment settings: {exc}")
 
     smtp_accounts = cfg.get("smtp_accounts", []) if isinstance(cfg, dict) else []
     if not smtp_accounts:
@@ -3786,8 +3933,8 @@ def load_user_smtp_accounts(*, session_token: Optional[str] = None, user_id: Opt
         return _parse_smtp_accounts_json(rows[0].get("smtp_accounts_json"))
 
     ensure_users_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         if session_token:
             row = conn.execute("SELECT smtp_accounts_json FROM users WHERE token = ?", (session_token,)).fetchone()
         else:
@@ -3832,7 +3979,7 @@ def save_user_smtp_accounts(session_token: str, accounts: list[dict[str, Any]], 
             raise HTTPException(status_code=502, detail=f"SMTP save failed: {exc}")
 
     ensure_users_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         updated = conn.execute(
             "UPDATE users SET smtp_accounts_json = ?, updated_at = ? WHERE token = ?",
             (payload, utc_now_iso(), token),
@@ -3911,8 +4058,22 @@ def load_supabase_settings(config_path: Path) -> dict:
 
     supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
     url = str(os.environ.get("SUPABASE_URL") or supabase_cfg.get("url", "") or "").strip()
-    service_role_key = str(os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or supabase_cfg.get("service_role_key", "") or "").strip()
-    publishable_key = str(os.environ.get("SUPABASE_PUBLISHABLE_KEY") or supabase_cfg.get("publishable_key", "") or "").strip()
+    database_url = str(os.environ.get("DATABASE_URL") or supabase_cfg.get("database_url", "") or "").strip()
+    shared_key = str(os.environ.get("SUPABASE_KEY") or supabase_cfg.get("key", "") or "").strip()
+    service_role_key = str(
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or shared_key
+        or supabase_cfg.get("service_role_key", "")
+        or supabase_cfg.get("serviceRoleKey", "")
+        or ""
+    ).strip()
+    publishable_key = str(
+        os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+        or shared_key
+        or supabase_cfg.get("publishable_key", "")
+        or supabase_cfg.get("publishableKey", "")
+        or ""
+    ).strip()
     primary_mode_raw = os.environ.get("SUPABASE_PRIMARY_DB")
 
     if primary_mode_raw is None:
@@ -3927,10 +4088,25 @@ def load_supabase_settings(config_path: Path) -> dict:
         "enabled": bool(url and key),
         "url": url,
         "key": key,
+        "database_url": database_url,
+        "has_database_url": bool(database_url),
         "has_service_role": bool(service_role_key),
         "has_publishable": bool(publishable_key),
         "primary_mode": primary_mode,
     }
+
+
+def ensure_supabase_runtime(context: str = "backend") -> dict[str, Any]:
+    settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+    if not settings.get("enabled"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Supabase is required for {context}. Configure SUPABASE_URL plus SUPABASE_KEY "
+                f"(or SUPABASE_SERVICE_ROLE_KEY / SUPABASE_PUBLISHABLE_KEY)."
+            ),
+        )
+    return settings
 
 
 def is_supabase_primary_enabled(config_path: Path) -> bool:
@@ -4911,21 +5087,21 @@ def get_dashboard_stats_supabase(config_path: Path, user_id: Optional[str] = Non
     }
 
 
-def get_sqlite_table_rows(db_path: Path, table_name: str) -> list[dict]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+def get_table_rows_snapshot(db_path: Path, table_name: str) -> list[dict]:
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
     return [dict(row) for row in rows]
 
 
-def get_sqlite_table_columns(db_path: Path, table_name: str) -> list[str]:
-    with sqlite3.connect(db_path) as conn:
+def get_table_columns_snapshot(db_path: Path, table_name: str) -> list[str]:
+    with pgdb.connect(db_path) as conn:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return [str(row[1]) for row in rows]
 
 
-def replace_sqlite_table_rows(db_path: Path, table_name: str, rows: list[dict], columns: list[str]) -> None:
-    with sqlite3.connect(db_path) as conn:
+def replace_table_rows_snapshot(db_path: Path, table_name: str, rows: list[dict], columns: list[str]) -> None:
+    with pgdb.connect(db_path) as conn:
         conn.execute(f"DELETE FROM {table_name}")
         if rows and columns:
             cols_sql = ", ".join(columns)
@@ -4943,7 +5119,7 @@ def sync_table_from_supabase(db_path: Path, table_name: str, config_path: Path) 
         return 0, "Supabase not configured"
 
     try:
-        local_columns = get_sqlite_table_columns(db_path, table_name)
+        local_columns = get_table_columns_snapshot(db_path, table_name)
         if not local_columns:
             return 0, f"Local table '{table_name}' not found"
 
@@ -4961,7 +5137,7 @@ def sync_table_from_supabase(db_path: Path, table_name: str, config_path: Path) 
 
         write_columns = [col for col in local_columns if col in remote_keys]
         normalized_rows = [{col: row.get(col) for col in write_columns} for row in remote_rows]
-        replace_sqlite_table_rows(db_path, table_name, normalized_rows, write_columns)
+        replace_table_rows_snapshot(db_path, table_name, normalized_rows, write_columns)
         return len(remote_rows), None
     except Exception as exc:
         return 0, str(exc)
@@ -4974,7 +5150,7 @@ def sync_table_to_supabase(db_path: Path, table_name: str, config_path: Path) ->
         return 0, "Supabase not configured"
 
     try:
-        rows = get_sqlite_table_rows(db_path, table_name)
+        rows = get_table_rows_snapshot(db_path, table_name)
         if not rows:
             return 0, None
 
@@ -5189,10 +5365,10 @@ def extract_keyword_performance(db_path: Path, limit: int = 8) -> list[dict]:
                 result.sort(key=lambda x: (-x["reply_rate"], -x["sent_count"], -x["total_leads"]))
                 return result[:limit]
             except Exception as exc:
-                logging.warning("Supabase keyword performance fallback to SQLite: %s", exc)
+                logging.warning("Supabase keyword performance fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT
@@ -5562,7 +5738,7 @@ def queue_high_score_enriched_leads(
                 )
                 now_iso = utc_now_iso()
                 queued_count = 0
-                with sqlite3.connect(db_path) as conn:
+                with pgdb.connect(db_path) as conn:
                     for row in rows:
                         status_value = str(row.get("status") or "").strip().lower()
                         email_value = str(row.get("email") or "").strip()
@@ -5600,9 +5776,9 @@ def queue_high_score_enriched_leads(
                     conn.commit()
                 return queued_count
             except Exception as exc:
-                logging.warning("Supabase queue_high_score_enriched_leads fallback to SQLite: %s", exc)
+                logging.warning("Supabase queue_high_score_enriched_leads fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         cursor = conn.execute(
             """
             UPDATE leads
@@ -5635,9 +5811,9 @@ def get_scraped_lead_count(db_path: Path) -> int:
                 rows = supabase_select_rows(client, "leads", columns="status")
                 return sum(1 for row in rows if str(row.get("status") or "").strip().lower() == "scraped")
             except Exception as exc:
-                logging.warning("Supabase get_scraped_lead_count fallback to SQLite: %s", exc)
+                logging.warning("Supabase get_scraped_lead_count fallback to legacy store: %s", exc)
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM leads WHERE LOWER(COALESCE(status, '')) = 'scraped'"
         ).fetchone()
@@ -5651,7 +5827,7 @@ def get_queued_mail_count(db_path: Path, user_id: Optional[str] = None) -> int:
     uid_clause = "AND user_id = ?" if user_id else ""
     uid_params = [user_id] if user_id else []
 
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         row = conn.execute(
             f"""
             SELECT COUNT(*)
@@ -5726,11 +5902,11 @@ def _collect_lead_export_rows(
                     limit=5000,
                 )
             except Exception as exc:
-                logging.warning("Supabase lead export fallback to SQLite: %s", exc)
+                logging.warning("Supabase lead export fallback to legacy store: %s", exc)
 
     if source_rows is None:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 f"""
                 SELECT {columns}
@@ -5843,8 +6019,8 @@ def _render_csv_download(filename: str, fieldnames: list[str], rows: list[dict[s
 def create_client_folder(db_path: Path, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     ensure_client_success_tables(db_path)
     now_iso = utc_now_iso()
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         cursor = conn.execute(
             """
             INSERT INTO client_folders (user_id, name, color, notes, created_at, updated_at)
@@ -5907,8 +6083,8 @@ def _summarize_client_folders(folder_rows: list[dict[str, Any]], lead_rows: list
 
 def list_client_folders(db_path: Path, user_id: str) -> list[dict[str, Any]]:
     ensure_client_success_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         folders = [dict(row) for row in conn.execute(
             """
             SELECT id, user_id, name, color, notes, created_at, updated_at
@@ -5931,7 +6107,7 @@ def list_client_folders(db_path: Path, user_id: str) -> list[dict[str, Any]]:
     return _summarize_client_folders(folders, leads)
 
 
-def _normalize_saved_segment_row(row: sqlite3.Row | dict | None) -> dict[str, Any]:
+def _normalize_saved_segment_row(row: pgdb.Row | dict | None) -> dict[str, Any]:
     if row is None:
         return {}
     item = dict(row)
@@ -5944,8 +6120,8 @@ def create_saved_segment(db_path: Path, user_id: str, payload: dict[str, Any]) -
     now_iso = utc_now_iso()
     name = str(payload.get("name") or "").strip()
     filters_json = json.dumps(payload.get("filters") or {}, ensure_ascii=False)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         existing = conn.execute(
             "SELECT id FROM saved_segments WHERE user_id = ? AND LOWER(name) = LOWER(?) LIMIT 1",
             (str(user_id or "legacy"), name),
@@ -5971,8 +6147,8 @@ def create_saved_segment(db_path: Path, user_id: str, payload: dict[str, Any]) -
 
 def list_saved_segments(db_path: Path, user_id: str) -> list[dict[str, Any]]:
     ensure_client_success_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT id, user_id, name, filters_json, created_at, updated_at
@@ -5987,7 +6163,7 @@ def list_saved_segments(db_path: Path, user_id: str) -> list[dict[str, Any]]:
 
 def delete_saved_segment(db_path: Path, user_id: str, segment_id: int) -> dict[str, Any]:
     ensure_client_success_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         cursor = conn.execute("DELETE FROM saved_segments WHERE id = ? AND user_id = ?", (int(segment_id), user_id))
         conn.commit()
     if cursor.rowcount == 0:
@@ -5997,8 +6173,8 @@ def delete_saved_segment(db_path: Path, user_id: str, segment_id: int) -> dict[s
 
 def assign_lead_to_client_folder(db_path: Path, user_id: str, lead_id: int, client_folder_id: Optional[int]) -> dict[str, Any]:
     ensure_client_success_tables(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         lead_row = conn.execute(
             "SELECT id, user_id, business_name FROM leads WHERE id = ? LIMIT 1",
             (lead_id,),
@@ -6128,7 +6304,7 @@ def _build_simple_pdf(title: str, lines: list[str]) -> bytes:
 
 def _load_user_email_for_reports(db_path: Path, user_id: str) -> str:
     ensure_users_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         row = conn.execute("SELECT email FROM users WHERE id = ? LIMIT 1", (user_id,)).fetchone()
     return str(row[0] or "").strip() if row else ""
 
@@ -6181,7 +6357,7 @@ def _build_report_email_content(summary: dict[str, Any], *, period_key: str) -> 
     reply_rate = float(summary.get("reply_rate") or 0)
     pipeline = summary.get("pipeline") if isinstance(summary.get("pipeline"), dict) else {}
     folder_count = int(summary.get("folder_count") or len(summary.get("client_folders") or []))
-    subject = f"Sniped {'Weekly' if is_weekly else 'Monthly'} Summary — {label}"
+    subject = f"Sniped {'Weekly' if is_weekly else 'Monthly'} Summary â€” {label}"
     intro = "Here is your polished weekly lead snapshot." if is_weekly else "Here is your polished monthly lead summary."
 
     text_body = (
@@ -6211,7 +6387,7 @@ def _build_report_email_content(summary: dict[str, Any], *, period_key: str) -> 
         for title, value, accent in cards
     )
     folder_items = "".join(
-        f"<li style=\"margin:0 0 8px;\"><strong>{html_escape(str(folder.get('name') or 'Client'))}</strong> · {int(folder.get('lead_count') or 0)} leads · {int(folder.get('won_paid_count') or 0)} won</li>"
+        f"<li style=\"margin:0 0 8px;\"><strong>{html_escape(str(folder.get('name') or 'Client'))}</strong> Â· {int(folder.get('lead_count') or 0)} leads Â· {int(folder.get('won_paid_count') or 0)} won</li>"
         for folder in (summary.get("client_folders") or [])[:4]
     ) or "<li style=\"margin:0;\">No client folders yet.</li>"
 
@@ -6229,7 +6405,7 @@ def _build_report_email_content(summary: dict[str, Any], *, period_key: str) -> 
             <div style=\"font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#93c5fd;margin-bottom:10px;\">Performance</div>
             <p style=\"margin:0 0 6px;font-size:14px;color:#e5e7eb;\"><strong>Open rate:</strong> {open_rate:.1f}%</p>
             <p style=\"margin:0 0 6px;font-size:14px;color:#e5e7eb;\"><strong>Reply rate:</strong> {reply_rate:.1f}%</p>
-            <p style=\"margin:0;font-size:14px;color:#e5e7eb;\"><strong>Pipeline:</strong> Scraped {int(pipeline.get('scraped') or 0)} · Contacted {int(pipeline.get('contacted') or 0)} · Replied {int(pipeline.get('replied') or 0)} · Won {int(pipeline.get('won_paid') or 0)}</p>
+            <p style=\"margin:0;font-size:14px;color:#e5e7eb;\"><strong>Pipeline:</strong> Scraped {int(pipeline.get('scraped') or 0)} Â· Contacted {int(pipeline.get('contacted') or 0)} Â· Replied {int(pipeline.get('replied') or 0)} Â· Won {int(pipeline.get('won_paid') or 0)}</p>
           </div>
           <div style=\"background:#0b1220;border:1px solid rgba(148,163,184,.16);border-radius:18px;padding:18px;\">
             <div style=\"font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#93c5fd;margin-bottom:10px;\">Client folders</div>
@@ -6339,7 +6515,7 @@ def build_monthly_report_summary(db_path: Path, user_id: str) -> dict[str, Any]:
 def build_client_dashboard_snapshot(db_path: Path, user_id: str) -> dict[str, Any]:
     stats = get_dashboard_stats(db_path, user_id=user_id)
     folders = list_client_folders(db_path, user_id)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         unassigned_count = int(conn.execute(
             "SELECT COUNT(*) FROM leads WHERE user_id = ? AND client_folder_id IS NULL",
             (user_id,),
@@ -6449,6 +6625,14 @@ def enqueue_task(
     payload_data["task_type"] = task_type
     payload_data["user_id"] = user_id
 
+    if _is_postgres_task_store_enabled():
+        return {
+            "status": "started",
+            "task_id": task_id,
+            "job_status": "queued",
+            "execution_mode": "worker",
+        }
+
     executor = get_task_executor(task_type)
     if background_tasks is not None:
         # FastAPI-managed background kickoff (returns response immediately).
@@ -6470,8 +6654,8 @@ def get_dashboard_stats(db_path: Path, user_id: Optional[str] = None) -> dict:
     month_prefix = now_utc.strftime("%Y-%m")
     week_cutoff = (now_utc - timedelta(days=7)).isoformat()
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         total_leads = int(conn.execute(
             f"SELECT COUNT(*) FROM leads WHERE 1=1 {uid_clause}", uid_params
         ).fetchone()[0] or 0)
@@ -6646,7 +6830,7 @@ def get_dashboard_stats(db_path: Path, user_id: Optional[str] = None) -> dict:
 
     # Add manual revenue entries from revenue_log
     ensure_revenue_log_table(db_path)
-    with sqlite3.connect(db_path) as conn:
+    with pgdb.connect(db_path) as conn:
         rev_total_row = conn.execute(
             "SELECT COALESCE(SUM(amount), 0) FROM revenue_log WHERE (? IS NULL OR user_id = ?)",
             (user_id, user_id),
@@ -6761,10 +6945,10 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
             "topup_credits_balance": max(0, int(row.get("topup_credits_balance") or 0)),
         }
 
-    sqlite_db_path = db_path or DEFAULT_DB_PATH
-    ensure_users_table(sqlite_db_path)
-    with sqlite3.connect(sqlite_db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    auth_db_path = db_path or DEFAULT_DB_PATH
+    ensure_users_table(auth_db_path)
+    with pgdb.connect(auth_db_path) as conn:
+        conn.row_factory = pgdb.Row
         row = conn.execute(
             """
             SELECT
@@ -6853,10 +7037,10 @@ def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path:
             "credits_limit": verified_limit,
         }
 
-    sqlite_db_path = db_path or DEFAULT_DB_PATH
-    ensure_users_table(sqlite_db_path)
-    with sqlite3.connect(sqlite_db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    auth_db_path = db_path or DEFAULT_DB_PATH
+    ensure_users_table(auth_db_path)
+    with pgdb.connect(auth_db_path) as conn:
+        conn.row_factory = pgdb.Row
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
@@ -7160,7 +7344,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         requested_headless = bool(payload_data.get("headless", False))
 
-        # Read proxy config — supports single proxy_url or a list proxy_urls
+        # Read proxy config â€” supports single proxy_url or a list proxy_urls
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as _cfg_fh:
                 _scrape_cfg = json.load(_cfg_fh)
@@ -7221,7 +7405,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         total_scraped_from_maps = len(leads)
 
         # When Supabase is the primary DB, deduplicate against Supabase too.
-        # The local SQLite may be missing leads from previous sessions, so we
+        # The local legacy store may be missing leads from previous sessions, so we
         # must check the remote before inserting.
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
             try:
@@ -7254,7 +7438,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         progress_state["total_to_find"] = requested_total
         update_task_progress(db_path, task_id, progress_state)
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             conn.execute(
                 """
                 UPDATE leads
@@ -7372,7 +7556,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
 
         # In Supabase-primary mode, push any locally enriched data to Supabase first,
         # so that the enricher doesn't re-process leads that were already enriched in
-        # a previous crashed/cancelled task and whose enrichment data is only in SQLite.
+        # a previous crashed/cancelled task and whose enrichment data is only in legacy store.
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
             maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
 
@@ -7498,7 +7682,7 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
         mark_task_running(db_path, task_id)
         config_path = resolve_path(payload_data.get("config_path"), DEFAULT_CONFIG_PATH)
 
-        # ── Scheduled start: wait until the requested New York (ET) hour ────
+        # â”€â”€ Scheduled start: wait until the requested New York (ET) hour â”€â”€â”€â”€
         start_after_hour_est = payload_data.get("start_after_hour_est")
         if start_after_hour_est is not None:
             target_hour = int(start_after_hour_est)
@@ -7510,7 +7694,7 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
                 if now_et.hour >= target_hour:
                     break
                 logging.info(
-                    "Mailer scheduled for %02d:00 ET — current ET time is %02d:%02d. Waiting…",
+                    "Mailer scheduled for %02d:00 ET â€” current ET time is %02d:%02d. Waitingâ€¦",
                     target_hour, now_et.hour, now_et.minute,
                 )
                 # Sleep 60 s at a time so we can respond to an Emergency Stop.
@@ -7611,9 +7795,9 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
         else:
             finish_task_record(db_path, task_id, status="completed", result_payload=result_payload)
     except OSError as exc:
-        # SMTP / network failure — mark leads for retry instead of hard-failed
+        # SMTP / network failure â€” mark leads for retry instead of hard-failed
         logging.warning("Mailer SMTP/network error (retry_later): %s", exc)
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             conn.execute(
                 "UPDATE leads SET status = 'retry_later' WHERE LOWER(COALESCE(status,'')) = 'queued_mail'"
             )
@@ -7627,8 +7811,8 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
 
 def _list_reporting_users(db_path: Path) -> list[dict[str, str]]:
     ensure_users_table(db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute("SELECT id, email, plan_key FROM users ORDER BY id ASC").fetchall()
 
     recipients: list[dict[str, str]] = []
@@ -7648,7 +7832,7 @@ def run_weekly_report_digest(_app: FastAPI) -> None:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
     except Exception as exc:
-        logging.warning("Weekly report: could not read config.json — %s", exc)
+        logging.warning("Weekly report: could not read environment settings â€” %s", exc)
         return
 
     if not bool(cfg.get("auto_weekly_report_email", True)):
@@ -7665,7 +7849,7 @@ def run_weekly_report_digest(_app: FastAPI) -> None:
             send_weekly_report_email(account, recipient, summary)
             logging.info("Weekly report sent to %s for %s.", recipient, recipient_info["user_id"])
         except HTTPException as exc:
-            logging.warning("Weekly report: SMTP is not ready for %s — %s", recipient_info["user_id"], exc.detail)
+            logging.warning("Weekly report: SMTP is not ready for %s â€” %s", recipient_info["user_id"], exc.detail)
         except Exception as exc:
             logging.warning("Weekly report SMTP send failed for %s: %s", recipient, exc)
 
@@ -7677,7 +7861,7 @@ def run_monthly_report_digest(_app: FastAPI) -> None:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
     except Exception as exc:
-        logging.warning("Monthly report: could not read config.json — %s", exc)
+        logging.warning("Monthly report: could not read environment settings â€” %s", exc)
         return
 
     if not bool(cfg.get("auto_monthly_report_email", True)):
@@ -7691,11 +7875,11 @@ def run_monthly_report_digest(_app: FastAPI) -> None:
         try:
             account = get_primary_user_smtp_account(user_id=str(recipient_info["user_id"]), db_path=db_path)
             summary = build_monthly_report_summary(db_path, recipient_info["user_id"])
-            pdf_bytes = _build_report_pdf(f"Sniped Monthly Report — {summary.get('month_label', 'Current Month')}", summary, period_key="monthly")
+            pdf_bytes = _build_report_pdf(f"Sniped Monthly Report â€” {summary.get('month_label', 'Current Month')}", summary, period_key="monthly")
             send_monthly_report_email(account, recipient, summary, pdf_bytes)
             logging.info("Monthly report sent to %s for %s.", recipient, recipient_info["user_id"])
         except HTTPException as exc:
-            logging.warning("Monthly report: SMTP is not ready for %s — %s", recipient_info["user_id"], exc.detail)
+            logging.warning("Monthly report: SMTP is not ready for %s â€” %s", recipient_info["user_id"], exc.detail)
         except Exception as exc:
             logging.warning("Monthly report SMTP send failed for %s: %s", recipient, exc)
 
@@ -7705,12 +7889,12 @@ def run_daily_digest(_app: FastAPI) -> None:
     db_path = DEFAULT_DB_PATH
     config_path = DEFAULT_CONFIG_PATH
 
-    # ── Load config & SMTP ────────────────────────────────────────────────────
+    # â”€â”€ Load config & SMTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
     except Exception as exc:
-        logging.warning("Daily digest: could not read config.json — %s", exc)
+        logging.warning("Daily digest: could not read environment settings â€” %s", exc)
         return
 
     if not bool(cfg.get("auto_daily_digest_email", False)):
@@ -7719,7 +7903,7 @@ def run_daily_digest(_app: FastAPI) -> None:
 
     smtp_accounts = cfg.get("smtp_accounts", [])
     if not smtp_accounts:
-        logging.warning("Daily digest: no SMTP accounts configured — skipping.")
+        logging.warning("Daily digest: no SMTP accounts configured â€” skipping.")
         return
 
     acct = smtp_accounts[0]
@@ -7735,14 +7919,14 @@ def run_daily_digest(_app: FastAPI) -> None:
     # digest_email in config (optional, defaults to SMTP sender)
     recipient = str(cfg.get("digest_email", "") or "").strip() or smtp_email
     if not recipient or not smtp_host or not smtp_password:
-        logging.warning("Daily digest: incomplete SMTP config — skipping.")
+        logging.warning("Daily digest: incomplete SMTP config â€” skipping.")
         return
 
-    # ── Gather data ───────────────────────────────────────────────────────
+    # â”€â”€ Gather data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         stats = get_dashboard_stats(db_path)
     except Exception as exc:
-        logging.warning("Daily digest: could not gather stats — %s", exc)
+        logging.warning("Daily digest: could not gather stats â€” %s", exc)
         return
 
     mrr = stats.get("monthly_recurring_revenue", 0)
@@ -7764,8 +7948,8 @@ def run_daily_digest(_app: FastAPI) -> None:
     golden_count = 0
     uptime_alerts: list[dict] = []
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 """
                 SELECT COUNT(*) FROM leads
@@ -7791,9 +7975,9 @@ def run_daily_digest(_app: FastAPI) -> None:
                 except json.JSONDecodeError:
                     pass
     except Exception as exc:
-        logging.warning("Daily digest: DB read failed — %s", exc)
+        logging.warning("Daily digest: DB read failed â€” %s", exc)
 
-    # ── Build email ─────────────────────────────────────────────────────────
+    # â”€â”€ Build email â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     today_str = datetime.now(timezone.utc).strftime("%A, %d %b %Y")
     progress_bar = ("\u2588" * (mrr_progress // 10)).ljust(10, "\u2591")
 
@@ -7804,10 +7988,10 @@ def run_daily_digest(_app: FastAPI) -> None:
             name = a.get("business_name", "?")
             url = a.get("website_url", "?")
             code = a.get("http_status", 0) or "unreachable"
-            lines.append(f"  ⚠  {name} ({url}) — HTTP {code}")
+            lines.append(f"  âš   {name} ({url}) â€” HTTP {code}")
         alert_lines = "\n\nUptime Alerts (last 24h):\n" + "\n".join(lines)
     else:
-        alert_lines = "\n\nUptime Alerts: none ✅"
+        alert_lines = "\n\nUptime Alerts: none âś…"
 
     body = (
         f"Good morning! Here is your Daily Profit Digest for {today_str}.\n"
@@ -7826,7 +8010,7 @@ def run_daily_digest(_app: FastAPI) -> None:
     )
     subject = f"[Digest] MRR \u20ac{mrr:,.0f} | {mrr_progress}% to goal | {today_str}"
 
-    # ── Send ───────────────────────────────────────────────────────────────
+    # â”€â”€ Send â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     import smtplib
     from email.message import EmailMessage
 
@@ -7862,8 +8046,8 @@ def run_uptime_check(_app: FastAPI) -> None:
     db_path = DEFAULT_DB_PATH
     ensure_system_tables(db_path)
 
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
         rows = conn.execute(
             """
             SELECT id, business_name, website_url
@@ -8075,7 +8259,7 @@ def stop_scheduler(app: FastAPI) -> None:
     app.state.scheduler = None
 
 
-# ── Lead Qualifier helpers ─────────────────────────────────────────────────────
+# â”€â”€ Lead Qualifier helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _qualifier_extract_city(address: Optional[str]) -> str:
     """Return the most likely city name from a raw address string."""
@@ -8147,7 +8331,7 @@ def _lead_normalize_string_list(value: Any, *, limit: int = 3) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         raw_items = [str(item or "").strip() for item in value]
     elif isinstance(value, str):
-        raw_items = [segment.strip() for segment in re.split(r"\n|\||;|•", value)]
+        raw_items = [segment.strip() for segment in re.split(r"\n|\||;|â€˘", value)]
     else:
         raw_items = []
 
@@ -8521,10 +8705,10 @@ def _qualifier_pain_point(
     niche_str = keyword.strip() or "their service"
 
     if not has_website:
-        rating_str = f"{rating:.1f}★" if isinstance(rating, (int, float)) else "good"
+        rating_str = f"{rating:.1f}â…" if isinstance(rating, (int, float)) else "good"
         return (
             f"{name} has {rating_str} reviews but ZERO online presence. "
-            f"Every day, customers {city_str} search Google for '{niche_str}' — "
+            f"Every day, customers {city_str} search Google for '{niche_str}' â€” "
             f"they can't find {name} and click the first competitor that shows up instead. "
             f"Estimated impact: dozens of lost high-value jobs every month, going straight to competitors."
         )
@@ -8533,7 +8717,7 @@ def _qualifier_pain_point(
         return (
             f"{name} has only {review_count} review{'s' if review_count != 1 else ''} "
             f"while leading businesses {city_str} have {city_max_reviews}+. "
-            f"Google's local algorithm buries low-review businesses below the fold — "
+            f"Google's local algorithm buries low-review businesses below the fold â€” "
             f"new customers searching for '{niche_str}' never even see {name}. "
             f"They are effectively invisible in this market."
         )
@@ -8559,8 +8743,8 @@ def _qualifier_pain_point(
     if review_count < 15:
         return (
             f"{name} has only {review_count} reviews. "
-            f"Google's local pack prioritises businesses with strong review velocity — "
-            f"without at least 20–30 reviews, {name} is consistently outranked "
+            f"Google's local pack prioritises businesses with strong review velocity â€” "
+            f"without at least 20â€“30 reviews, {name} is consistently outranked "
             f"by competitors in the '{niche_str}' category {city_str}."
         )
 
@@ -8569,7 +8753,7 @@ def _qualifier_pain_point(
         return (
             f"{name} lacks a properly optimised website. "
             f"Competitors {city_str} are capturing high-intent Google traffic "
-            f"while {name} relies on referrals alone — that's a shrinking pipeline."
+            f"while {name} relies on referrals alone â€” that's a shrinking pipeline."
         )
 
     return (
@@ -8609,41 +8793,43 @@ def create_app() -> FastAPI:
     def startup_tasks() -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
-        # ── Env-var check ─────────────────────────────────────────────────────
+        supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+        # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
-            "SUPABASE_SERVICE_ROLE_KEY": "Supabase service-role key (required for auth & DB)",
             "OPENAI_API_KEY": "OpenAI key (required for enrichment & mail)",
         }
         _optional_env = {
+            "SUPABASE_KEY": "Shared Supabase API key alias (alternative to service-role/publishable key)",
+            "SUPABASE_SERVICE_ROLE_KEY": "Preferred Supabase service-role key for server-side writes",
+            "DATABASE_URL": "Supabase Postgres connection string for external tools/migrations",
             "BACKEND_URL": "Public URL of this server (used by Vercel proxy)",
             "STRIPE_SECRET_KEY": "Stripe secret key (required for billing)",
             "SMTP_HOST": "Default SMTP host (optional, can be set per-user)",
         }
         for var, desc in _required_env.items():
             if not os.environ.get(var):
-                print(f"[startup] ERROR: Missing required env var {var} — {desc}")
-                logging.error("[startup] Missing required env var %s — %s", var, desc)
+                print(f"[startup] ERROR: Missing required env var {var} â€” {desc}")
+                logging.error("[startup] Missing required env var %s â€” %s", var, desc)
         for var, desc in _optional_env.items():
             if not os.environ.get(var):
-                print(f"[startup] WARNING: Optional env var {var} not set — {desc}")
-        # ── DB init ───────────────────────────────────────────────────────────
-        print("[startup] Initialising database tables...")
+                print(f"[startup] WARNING: Optional env var {var} not set â€” {desc}")
+        # â”€â”€ DB init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if not supabase_settings.get("enabled"):
+            raise RuntimeError(
+                "Supabase runtime is required. Set SUPABASE_URL plus SUPABASE_KEY "
+                "(or SUPABASE_SERVICE_ROLE_KEY / SUPABASE_PUBLISHABLE_KEY)."
+            )
+
+        print("[startup] Initialising Supabase tables...")
         try:
-            ensure_system_tables(DEFAULT_DB_PATH)
-            print("[startup] SQLite system tables OK")
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            print("[startup] Supabase users table OK")
         except Exception as exc:
-            logging.error("[startup] SQLite table init failed (non-fatal): %s", exc)
-            print(f"[startup] WARNING: SQLite table init failed: {exc}")
-        try:
-            if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
-                ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
-                print("[startup] Supabase users table OK")
-        except Exception as exc:
-            logging.error("[startup] Supabase table init failed (non-fatal): %s", exc)
-            print(f"[startup] WARNING: Supabase table init failed: {exc}")
+            logging.error("[startup] Supabase table init failed (fatal): %s", exc)
+            raise RuntimeError(f"Supabase table init failed: {exc}") from exc
         start_scheduler(app)
-        print("[startup] Scheduler started — app ready")
+        print("[startup] Scheduler started â€” app ready")
 
     @app.on_event("shutdown")
     def shutdown_tasks() -> None:
@@ -8652,7 +8838,14 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"ok": True}
+        settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+        return {
+            "ok": True,
+            "database": "supabase",
+            "supabase_enabled": bool(settings.get("enabled")),
+            "supabase_primary": bool(settings.get("primary_mode")),
+            "has_database_url": bool(settings.get("has_database_url")),
+        }
 
     @app.get("/api/system-status")
     def system_status() -> dict:
@@ -8667,7 +8860,7 @@ def create_app() -> FastAPI:
                     client.table("leads").select("id", count="exact").limit(1).execute()
                     db_ok = True
             else:
-                with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
                     conn.execute("SELECT 1 FROM leads LIMIT 1").fetchone()
                 db_ok = True
         except Exception:
@@ -8898,8 +9091,8 @@ def create_app() -> FastAPI:
             now_iso = utc_now_iso()
             try:
                 ensure_mailer_campaign_tables(DEFAULT_DB_PATH)
-                with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-                    conn.row_factory = sqlite3.Row
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                    conn.row_factory = pgdb.Row
                     lead_row = conn.execute(
                         """
                         SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id
@@ -8966,7 +9159,7 @@ def create_app() -> FastAPI:
             return {
                 "ok": False,
                 "configured": False,
-                "error": "Set supabase.url and supabase key (service role or publishable) in config.json or env.",
+                "error": "Set supabase.url and supabase key (service role or publishable) in environment settings or env.",
             }
 
         client = get_supabase_client(DEFAULT_CONFIG_PATH)
@@ -9047,7 +9240,7 @@ def create_app() -> FastAPI:
         user_id = require_current_user_id(request)
         summary = build_monthly_report_summary(DEFAULT_DB_PATH, user_id)
         pdf_bytes = _build_report_pdf(
-            f"Sniped Monthly Report — {summary.get('month_label', 'Current Month')}",
+            f"Sniped Monthly Report â€” {summary.get('month_label', 'Current Month')}",
             summary,
             period_key="monthly",
         )
@@ -9235,7 +9428,7 @@ def create_app() -> FastAPI:
 
         db_path = DEFAULT_DB_PATH
         ensure_revenue_log_table(db_path)
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO revenue_log (user_id, amount, service_type, lead_name, lead_id, is_recurring, date)
@@ -9282,8 +9475,8 @@ def create_app() -> FastAPI:
 
         db_path = DEFAULT_DB_PATH
         ensure_revenue_log_table(db_path)
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 """
                 SELECT id, amount, service_type, lead_name, lead_id, is_recurring, date
@@ -9368,8 +9561,8 @@ def create_app() -> FastAPI:
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             existing_rows = conn.execute(
                 f"SELECT id FROM delivery_tasks WHERE user_id = ? AND id IN ({','.join(['?'] * len(unique_task_ids))})",
                 [user_id, *unique_task_ids],
@@ -9613,8 +9806,8 @@ def create_app() -> FastAPI:
         count_query = f"SELECT COUNT(*) FROM leads WHERE {where_sql}"
         query = f"{select_clause} WHERE {where_sql} ORDER BY {order_clause} LIMIT ? OFFSET ?"
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             total = int(conn.execute(count_query, params).fetchone()[0] or 0)
             rows = conn.execute(query, [*params, page_size, offset]).fetchall()
 
@@ -9654,7 +9847,7 @@ def create_app() -> FastAPI:
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO leads (
@@ -9814,7 +10007,7 @@ def create_app() -> FastAPI:
         if scored_count > 0:
             try:
                 ensure_users_table(DEFAULT_DB_PATH)
-                with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
                     conn.execute(
                         "UPDATE users SET credits_balance = MAX(0, credits_balance - ?) WHERE token = ?",
                         (scored_count, session_token),
@@ -9886,8 +10079,8 @@ def create_app() -> FastAPI:
 
         db_path = DEFAULT_DB_PATH
         ensure_blacklist_table(db_path)
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 "SELECT id, kind, value, reason, created_at FROM lead_blacklist ORDER BY datetime(created_at) DESC, id DESC LIMIT 200"
             ).fetchall()
@@ -9945,7 +10138,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="Forbidden")
             return blacklist_lead_and_matches_supabase(lead_id, "Manual blacklist", DEFAULT_CONFIG_PATH)
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
@@ -9971,7 +10164,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="Forbidden")
             return remove_lead_blacklist_and_matches_supabase(lead_id, DEFAULT_CONFIG_PATH)
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
@@ -10052,7 +10245,7 @@ def create_app() -> FastAPI:
         ensure_system_tables(db_path)
 
         if next_status_normalized == "blacklisted":
-            with sqlite3.connect(db_path) as conn:
+            with pgdb.connect(db_path) as conn:
                 owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
                 if owner_row is None:
                     raise HTTPException(status_code=404, detail="Lead not found")
@@ -10060,8 +10253,8 @@ def create_app() -> FastAPI:
                     raise HTTPException(status_code=403, detail="Forbidden")
             return blacklist_lead_and_matches(db_path, lead_id, "Manual status blacklist")
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             owner_row = conn.execute(
                 "SELECT user_id, paid_at, sent_at, last_contacted_at, reply_detected_at FROM leads WHERE id = ?",
                 (lead_id,),
@@ -10397,7 +10590,7 @@ def create_app() -> FastAPI:
         if status_value not in {"Active", "Idle"}:
             raise HTTPException(status_code=422, detail="Status must be Active or Idle")
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO workers (user_id, worker_name, role, monthly_cost, status, comms_link, created_at, updated_at)
@@ -10475,8 +10668,8 @@ def create_app() -> FastAPI:
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, user_id, worker_name, role, monthly_cost, status, comms_link FROM workers WHERE id = ?",
                 (worker_id,),
@@ -10547,8 +10740,8 @@ def create_app() -> FastAPI:
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute("SELECT user_id, worker_name FROM workers WHERE id = ?", (worker_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Worker not found")
@@ -10633,7 +10826,7 @@ def create_app() -> FastAPI:
 
         worker_id = payload.worker_id
         worker_name = None
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             if worker_id is not None:
                 row = conn.execute("SELECT id, user_id, worker_name FROM workers WHERE id = ?", (worker_id,)).fetchone()
                 if row is None:
@@ -10758,8 +10951,8 @@ def create_app() -> FastAPI:
             where_clause += " AND LOWER(COALESCE(dt.status, '')) = ?"
             params.append(status.strip().lower())
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 f"""
                 SELECT
@@ -10875,8 +11068,8 @@ def create_app() -> FastAPI:
         if next_status is not None and next_status not in allowed_statuses:
             raise HTTPException(status_code=422, detail="Invalid delivery task status")
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, user_id, worker_id, lead_id, business_name, status, notes, done_at FROM delivery_tasks WHERE id = ?",
                 (task_id,),
@@ -10958,7 +11151,7 @@ def create_app() -> FastAPI:
         if tier_value not in allowed_tiers:
             raise HTTPException(status_code=422, detail=f"Invalid tier. Allowed: {', '.join(sorted(allowed_tiers))}")
 
-        with sqlite3.connect(db_path) as conn:
+        with pgdb.connect(db_path) as conn:
             row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
@@ -10978,7 +11171,7 @@ def create_app() -> FastAPI:
         return {"status": "updated", "lead_id": lead_id, "new_tier": tier_value}
 
     # ------------------------------------------------------------------
-    # Job Queue endpoints  (Supabase-first, SQLite fallback)
+    # Job Queue endpoints  (Supabase-first, legacy store fallback)
     # ------------------------------------------------------------------
     import uuid as _uuid
 
@@ -11010,11 +11203,11 @@ def create_app() -> FastAPI:
             job_id = inserted[0].get("id")
             return {"job_id": job_id, "status": "pending"}
 
-        # SQLite fallback — jobs table in leads.db
+        # legacy store fallback â€” jobs table in leads.db
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
-        _ensure_jobs_table_sqlite(db_path)
-        with sqlite3.connect(db_path) as conn:
+        ensure_jobs_queue_table(db_path)
+        with pgdb.connect(db_path) as conn:
             import json as _json
             cursor = conn.execute(
                 "INSERT INTO jobs (user_id, type, status, payload) VALUES (?, ?, 'pending', ?)",
@@ -11039,11 +11232,11 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="Job not found")
             return rows[0]
 
-        # SQLite fallback
+        # legacy store fallback
         db_path = DEFAULT_DB_PATH
-        _ensure_jobs_table_sqlite(db_path)
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        ensure_jobs_queue_table(db_path)
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id,user_id,type,status,result,error,created_at,started_at,completed_at FROM jobs WHERE id=? AND user_id=?",
                 (job_id, user_id),
@@ -11073,9 +11266,9 @@ def create_app() -> FastAPI:
             return {"items": rows}
 
         db_path = DEFAULT_DB_PATH
-        _ensure_jobs_table_sqlite(db_path)
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        ensure_jobs_queue_table(db_path)
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 "SELECT id,user_id,type,status,error,created_at,started_at,completed_at FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
                 (user_id, limit),
@@ -11084,7 +11277,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scrape")
     def run_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
-        print(f"[scrape] POST /api/scrape — keyword={payload.keyword!r} results={payload.results}")
+        print(f"[scrape] POST /api/scrape â€” keyword={payload.keyword!r} results={payload.results}")
         _, billing, access = resolve_plan_access_context(request, feature_key="basic_search")
         user_id = require_current_user_id(request)
         print(f"[scrape] user_id={user_id}")
@@ -11222,9 +11415,9 @@ def create_app() -> FastAPI:
             except Exception:
                 return False
 
-        sqlite_db_path = db_path or DEFAULT_DB_PATH
-        ensure_users_table(sqlite_db_path)
-        with sqlite3.connect(sqlite_db_path) as conn:
+        auth_db_path = db_path or DEFAULT_DB_PATH
+        ensure_users_table(auth_db_path)
+        with pgdb.connect(auth_db_path) as conn:
             row = conn.execute("SELECT 1 FROM users WHERE token = ? LIMIT 1", (token,)).fetchone()
         return bool(row)
 
@@ -11256,10 +11449,10 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=401, detail="Invalid or expired session token.")
             return candidate
 
-        sqlite_db_path = db_path or DEFAULT_DB_PATH
-        ensure_users_table(sqlite_db_path)
-        with sqlite3.connect(sqlite_db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        auth_db_path = db_path or DEFAULT_DB_PATH
+        ensure_users_table(auth_db_path)
+        with pgdb.connect(auth_db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute("SELECT id FROM users WHERE token = ?", (token,)).fetchone()
         if row is None:
             raise HTTPException(status_code=401, detail="Invalid or expired session token.")
@@ -11519,8 +11712,8 @@ def create_app() -> FastAPI:
             }
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 f"""
                 SELECT
@@ -11572,7 +11765,7 @@ def create_app() -> FastAPI:
                     _safe_int(stripe_recovered.get("credits_balance"), 0),
                     recovered_limit + existing_topup,
                 )
-                with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
                     conn.execute(
                         """
                         UPDATE users
@@ -11635,7 +11828,7 @@ def create_app() -> FastAPI:
             next_topup_balance = max(0, _safe_int(row_data.get("topup_credits_balance"), 0)) + recovered_topup_delta
             next_balance = max(0, _safe_int(row_data.get("credits_balance"), 0)) + recovered_topup_delta
             now_iso = utc_now_iso()
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
                     """
                     UPDATE users
@@ -11673,7 +11866,7 @@ def create_app() -> FastAPI:
 
         if is_active and cancel_at_period_end and _is_subscription_cancel_expired(cancel_at_raw):
             downgraded_balance = free_quota + topup_balance
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
                     """
                     UPDATE users
@@ -11732,7 +11925,7 @@ def create_app() -> FastAPI:
     def create_stripe_billing_portal_session(customer_id: str, return_url: str) -> str:
         secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
         if not secret_key:
-            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `config.json` or set `STRIPE_SECRET_KEY`.")
+            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `environment settings` or set `STRIPE_SECRET_KEY`.")
 
         payload = urlencode({"customer": customer_id, "return_url": return_url}).encode("utf-8")
         req = urllib.request.Request(
@@ -11767,7 +11960,7 @@ def create_app() -> FastAPI:
     ) -> str:
         secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
         if not secret_key:
-            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `config.json` or set `STRIPE_SECRET_KEY`.")
+            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `environment settings` or set `STRIPE_SECRET_KEY`.")
 
         plan_key = str(plan_id or "").strip().lower()
         plan = STRIPE_SUBSCRIPTION_PLANS.get(plan_key)
@@ -11777,6 +11970,12 @@ def create_app() -> FastAPI:
         price_id = str(plan.get("price_id") or "").strip()
         monthly_credits = int(plan.get("credits") or 0)
         if not price_id or monthly_credits <= 0:
+            logging.error(
+                "Stripe subscription plan misconfigured: plan_id=%s price_id=%s monthly_credits=%s",
+                plan_key,
+                price_id,
+                monthly_credits,
+            )
             raise HTTPException(status_code=500, detail="Subscription plan is misconfigured.")
 
         form_items: list[tuple[str, str]] = [
@@ -11819,8 +12018,30 @@ def create_app() -> FastAPI:
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            stripe_message, raw_body = extract_stripe_http_error_details(exc)
+            logging.error(
+                "Stripe subscription checkout session creation failed: status=%s plan_id=%s price_id=%s success_url=%s cancel_url=%s stripe_message=%s stripe_body=%s",
+                getattr(exc, "code", None),
+                plan_key,
+                price_id,
+                success_url,
+                cancel_url,
+                stripe_message,
+                raw_body[:1500],
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not create Stripe subscription checkout session. Stripe error: {stripe_message}",
+            )
         except Exception as exc:
-            logging.warning("Stripe subscription checkout session creation failed: %s", exc)
+            logging.exception(
+                "Stripe subscription checkout session creation failed unexpectedly: plan_id=%s price_id=%s success_url=%s cancel_url=%s",
+                plan_key,
+                price_id,
+                success_url,
+                cancel_url,
+            )
             raise HTTPException(status_code=502, detail="Could not create Stripe subscription checkout session.")
 
         checkout_url = str(data.get("url") or "").strip()
@@ -11838,7 +12059,7 @@ def create_app() -> FastAPI:
     ) -> str:
         secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
         if not secret_key:
-            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `config.json` or set `STRIPE_SECRET_KEY`.")
+            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `environment settings` or set `STRIPE_SECRET_KEY`.")
 
         package_key = str(package_id or "").strip().lower()
         package = STRIPE_TOP_UP_PACKAGES.get(package_key)
@@ -11895,8 +12116,30 @@ def create_app() -> FastAPI:
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            stripe_message, raw_body = extract_stripe_http_error_details(exc)
+            logging.error(
+                "Stripe top-up checkout session creation failed: status=%s package_id=%s price_id=%s success_url=%s cancel_url=%s stripe_message=%s stripe_body=%s",
+                getattr(exc, "code", None),
+                package_key,
+                price_id,
+                success_url,
+                cancel_url,
+                stripe_message,
+                raw_body[:1500],
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not create Stripe checkout session. Stripe error: {stripe_message}",
+            )
         except Exception as exc:
-            logging.warning("Stripe checkout session creation failed: %s", exc)
+            logging.exception(
+                "Stripe top-up checkout session creation failed unexpectedly: package_id=%s price_id=%s success_url=%s cancel_url=%s",
+                package_key,
+                price_id,
+                success_url,
+                cancel_url,
+            )
             raise HTTPException(status_code=502, detail="Could not create Stripe checkout session.")
 
         checkout_url = str(data.get("url") or "").strip()
@@ -11926,7 +12169,7 @@ def create_app() -> FastAPI:
             return
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.execute(
                 "UPDATE users SET updated_at = ? WHERE id = ?",
                 (utc_now_iso(), target_user_id),
@@ -11981,10 +12224,10 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=401, detail="Invalid or expired session token.")
             return str(rows[0].get("niche") or "").strip()
 
-        sqlite_db_path = db_path or DEFAULT_DB_PATH
-        ensure_users_table(sqlite_db_path)
-        with sqlite3.connect(sqlite_db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        auth_db_path = db_path or DEFAULT_DB_PATH
+        ensure_users_table(auth_db_path)
+        with pgdb.connect(auth_db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT niche FROM users WHERE token = ?", (session_token,)
             ).fetchone()
@@ -12021,10 +12264,10 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=401, detail="Authenticated user does not exist.")
             return str(rows[0].get("niche") or "").strip()
 
-        sqlite_db_path = db_path or DEFAULT_DB_PATH
-        ensure_users_table(sqlite_db_path)
-        with sqlite3.connect(sqlite_db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        auth_db_path = db_path or DEFAULT_DB_PATH
+        ensure_users_table(auth_db_path)
+        with pgdb.connect(auth_db_path) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT niche FROM users WHERE id = ?",
                 (target_user_id,),
@@ -12035,7 +12278,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/enrich")
     def run_enrichment(payload: EnrichRequest, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
-        print(f"[enrich] POST /api/enrich — limit={payload.limit}")
+        print(f"[enrich] POST /api/enrich â€” limit={payload.limit}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
         try:
             ensure_system_tables(db_path)
@@ -12110,7 +12353,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/mailer/send")
     def run_mailer(payload: MailerRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
-        print(f"[mailer] POST /api/mailer/send — limit={payload.limit}")
+        print(f"[mailer] POST /api/mailer/send â€” limit={payload.limit}")
         session_token, billing, access = resolve_plan_access_context(request)
         user_id = require_current_user_id(request)
         print(f"[mailer] user_id={user_id}")
@@ -12453,7 +12696,7 @@ def create_app() -> FastAPI:
         response["retried_from"] = task_id
         return response
 
-    # ── Lead Qualifier ─────────────────────────────────────────────────────────
+    # â”€â”€ Lead Qualifier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @app.get("/api/leads/qualify")
     def qualify_leads(request: Request) -> dict:
         """
@@ -12461,9 +12704,9 @@ def create_app() -> FastAPI:
 
                 Uses user selected niche + context benchmark instead of fixed city-only logic.
                 Buckets:
-                    1. ghost            – digital presence exists, but critical niche signal is missing
-                    2. invisible_giant  – operationally large, digitally quiet
-                    3. tech_debt        – technical stack drags conversion and visibility
+                    1. ghost            â€“ digital presence exists, but critical niche signal is missing
+                    2. invisible_giant  â€“ operationally large, digitally quiet
+                    3. tech_debt        â€“ technical stack drags conversion and visibility
 
                 Benchmark signals:
                     - niche_avg_score
@@ -12488,8 +12731,8 @@ def create_app() -> FastAPI:
 
         qualifier_scope = "user"
 
-        with sqlite3.connect(db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
             rows = conn.execute(
                 """
                 SELECT
@@ -12531,7 +12774,7 @@ def create_app() -> FastAPI:
             if str(l.get("status") or "").strip().lower() not in excluded_statuses
         ]
 
-        # Build city → review counts (kept as part of context benchmark)
+        # Build city â†’ review counts (kept as part of context benchmark)
         city_reviews: dict[str, list[int]] = {}
         ai_scores: list[float] = []
         for lead in leads_raw:
@@ -12680,7 +12923,7 @@ def create_app() -> FastAPI:
                 },
             }
 
-            # Bucket #1 — The Ghost
+            # Bucket #1 â€” The Ghost
             if is_ghost and lead_id not in seen_ids:
                 out["pain_point"] = _qualifier_dynamic_pain_point(
                     bucket_name="ghost",
@@ -12696,7 +12939,7 @@ def create_app() -> FastAPI:
                 seen_ids.add(lead_id)
                 continue
 
-            # Bucket #2 — The Invisible Giant
+            # Bucket #2 â€” The Invisible Giant
             if is_invisible_giant and lead_id not in seen_ids:
                 out["pain_point"] = _qualifier_dynamic_pain_point(
                     bucket_name="invisible_giant",
@@ -12712,7 +12955,7 @@ def create_app() -> FastAPI:
                 seen_ids.add(lead_id)
                 continue
 
-            # Bucket #3 — Tech Debt
+            # Bucket #3 â€” Tech Debt
             if is_tech_debt and lead_id not in seen_ids:
                 out["pain_point"] = _qualifier_dynamic_pain_point(
                     bucket_name="tech_debt",
@@ -12756,7 +12999,7 @@ def create_app() -> FastAPI:
             },
         }
 
-    # ── Auth ───────────────────────────────────────────────────────────────────
+    # â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @app.post("/api/auth/register")
     def auth_register(req: RegisterRequest) -> dict:
         if req.niche not in NICHES:
@@ -12774,6 +13017,9 @@ def create_app() -> FastAPI:
         password_hash = _hash_password(req.password, salt)
         token = str(uuid.uuid4())
 
+        if auth_email_exists(email, config_path=DEFAULT_CONFIG_PATH, db_path=DEFAULT_DB_PATH):
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
             if not ensure_supabase_users_table(DEFAULT_CONFIG_PATH):
                 raise HTTPException(
@@ -12783,12 +13029,6 @@ def create_app() -> FastAPI:
             sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
-            try:
-                existing = sb_client.table("users").select("id").eq("email", email).limit(1).execute()
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Supabase register query failed: {exc}")
-            if list(getattr(existing, "data", None) or []):
-                raise HTTPException(status_code=409, detail="An account with this email already exists.")
             try:
                 sb_client.table("users").insert(
                     {
@@ -12832,16 +13072,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=502, detail=f"Supabase register failed: {exc}")
             return {"token": token, "niche": req.niche, "email": email, "display_name": display_name}
 
-        ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            existing = conn.execute(
-                "SELECT 1 FROM users WHERE email = ? LIMIT 1",
-                (email,),
-            ).fetchone()
-            if existing is not None:
-                raise HTTPException(status_code=409, detail="An account with this email already exists.")
         try:
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
                     "INSERT INTO users (email, password_hash, salt, niche, account_type, display_name, contact_name, token, credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_start_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -12862,9 +13094,23 @@ def create_app() -> FastAPI:
                     ),
                 )
                 conn.commit()
-        except sqlite3.IntegrityError:
+        except pgdb.IntegrityError:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
         return {"token": token, "niche": req.niche, "email": email, "display_name": display_name}
+
+    @app.get("/api/auth/check-email")
+    def auth_check_email(email: str = Query(..., min_length=3, max_length=320)) -> dict:
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_email or "@" not in normalized_email:
+            raise HTTPException(status_code=400, detail="Invalid email address.")
+
+        exists = auth_email_exists(normalized_email, config_path=DEFAULT_CONFIG_PATH, db_path=DEFAULT_DB_PATH)
+        return {
+            "ok": True,
+            "email": normalized_email,
+            "available": not exists,
+            "detail": "" if not exists else "An account with this email already exists.",
+        }
 
     @app.post("/api/auth/login")
     def auth_login(req: LoginRequest) -> dict:
@@ -12907,8 +13153,8 @@ def create_app() -> FastAPI:
             }
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type FROM users WHERE email = ?",
                 (email,),
@@ -12919,7 +13165,7 @@ def create_app() -> FastAPI:
         if not secrets.compare_digest(expected, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         token = row["token"] or str(uuid.uuid4())
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.execute("UPDATE users SET token = ? WHERE id = ?", (token, row["id"]))
             conn.commit()
         return {
@@ -12967,8 +13213,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=502, detail=f"Supabase password reset update failed: {exc}")
         else:
             ensure_users_table(DEFAULT_DB_PATH)
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-                conn.row_factory = sqlite3.Row
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                conn.row_factory = pgdb.Row
                 row = conn.execute("SELECT id, email FROM users WHERE email = ?", (email,)).fetchone()
                 if row is None:
                     return {"ok": True, "message": "If the account exists, a reset link has been sent."}
@@ -13045,8 +13291,8 @@ def create_app() -> FastAPI:
             return {"ok": True, "message": "Password updated successfully."}
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, reset_token_expires_at FROM users WHERE reset_token = ?",
                 (reset_token,),
@@ -13069,6 +13315,7 @@ def create_app() -> FastAPI:
         token = str(req.token or "").strip()
         if not token:
             raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+        ensure_supabase_runtime("auth profile")
         billing = load_user_billing_context(token)
 
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
@@ -13133,10 +13380,10 @@ def create_app() -> FastAPI:
                 "average_deal_value": float(row_dict.get("average_deal_value") or DEFAULT_AVERAGE_DEAL_VALUE),
             }
 
-        # Fallback to SQLite if Supabase not available
+        # Fallback to legacy store if Supabase not available
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT email, niche, display_name, contact_name, account_type, quickstart_completed, average_deal_value FROM users WHERE token = ?",
                 (token,),
@@ -13172,6 +13419,11 @@ def create_app() -> FastAPI:
             "quickstart_completed": bool(row["quickstart_completed"] or False),
             "average_deal_value": float(row["average_deal_value"] or DEFAULT_AVERAGE_DEAL_VALUE),
         }
+
+    @app.get("/api/auth/me")
+    def auth_me(request: Request) -> dict:
+        token = require_authenticated_session(request)
+        return auth_profile(SessionTokenRequest(token=token))
 
     @app.post("/api/stripe/create-portal-session")
     def stripe_create_portal_session(request: Request) -> dict:
@@ -13219,12 +13471,26 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid subscription plan.")
 
         checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
-        success_url = str(os.environ.get("STRIPE_SUBSCRIPTION_SUCCESS_URL") or "").strip()
-        cancel_url = str(os.environ.get("STRIPE_SUBSCRIPTION_CANCEL_URL") or "").strip()
-        if not success_url:
-            success_url = f"{checkout_app_base_url}/app?checkout=success&session_id={{CHECKOUT_SESSION_ID}}"
-        if not cancel_url:
-            cancel_url = f"{checkout_app_base_url}/pricing?checkout=cancel"
+        success_url = build_checkout_app_redirect_url(
+            checkout_app_base_url,
+            checkout_status="success",
+            plan_key=plan_key,
+        )
+        cancel_url = build_checkout_app_redirect_url(
+            checkout_app_base_url,
+            checkout_status="cancel",
+            plan_key=plan_key,
+        )
+
+        logging.info(
+            "Creating Stripe subscription checkout session: user_id=%s plan_id=%s price_id=%s success_url=%s cancel_url=%s stripe_customer_id_present=%s",
+            user_id,
+            plan_key,
+            str(plan.get("price_id") or "").strip(),
+            success_url,
+            cancel_url,
+            bool(str(billing.get("stripe_customer_id") or "").strip()),
+        )
 
         checkout_url = create_stripe_subscription_checkout_session(
             user_id=user_id,
@@ -13244,6 +13510,10 @@ def create_app() -> FastAPI:
             "display_name": str(plan.get("display_name") or plan_key.title()),
         }
 
+    @app.post("/api/create-checkout-session")
+    def create_checkout_session_alias(payload: StripeSubscriptionSessionRequest, request: Request) -> dict:
+        return stripe_create_subscription_session(payload, request)
+
     @app.post("/api/stripe/create-topup-session")
     def stripe_create_topup_session(payload: StripeTopUpSessionRequest, request: Request) -> dict:
         session_token = require_authenticated_session(request)
@@ -13261,12 +13531,16 @@ def create_app() -> FastAPI:
         package_credits = max(0, int(package.get("credits") or 0))
 
         checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
-        success_url = str(os.environ.get("STRIPE_TOPUP_SUCCESS_URL") or "").strip()
-        cancel_url = str(os.environ.get("STRIPE_TOPUP_CANCEL_URL") or "").strip()
-        if not success_url:
-            success_url = f"{checkout_app_base_url}/app?topup=success&topup_package={quote_plus(package_key)}&topup_credits={package_credits}"
-        if not cancel_url:
-            cancel_url = f"{checkout_app_base_url}/app?topup=cancel"
+        success_url = build_checkout_app_redirect_url(
+            checkout_app_base_url,
+            topup_status="success",
+            package_key=package_key,
+            package_credits=package_credits,
+        )
+        cancel_url = build_checkout_app_redirect_url(
+            checkout_app_base_url,
+            topup_status="cancel",
+        )
 
         checkout_url = create_stripe_topup_checkout_session(
             user_id=user_id,
@@ -13411,8 +13685,8 @@ def create_app() -> FastAPI:
             }
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, email, niche, display_name, contact_name, account_type, password_hash, salt, quickstart_completed, average_deal_value FROM users WHERE token = ?",
                 (token,),
@@ -13575,8 +13849,8 @@ def create_app() -> FastAPI:
             return {"ok": True, "message": "Account deleted successfully."}
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             row = conn.execute(
                 "SELECT id, email, password_hash, salt FROM users WHERE token = ?",
                 (token,),
@@ -13586,13 +13860,13 @@ def create_app() -> FastAPI:
             expected = _hash_password(current_password, row["salt"])
             if not secrets.compare_digest(expected, row["password_hash"]):
                 raise HTTPException(status_code=401, detail="Current password is incorrect.")
-            _ensure_jobs_table_sqlite(DEFAULT_DB_PATH)
+            ensure_jobs_queue_table(DEFAULT_DB_PATH)
             conn.execute("DELETE FROM jobs WHERE user_id IN (?, ?)", (row["email"], token))
             conn.execute("DELETE FROM users WHERE id = ?", (row["id"],))
             conn.commit()
         return {"ok": True, "message": "Account deleted successfully."}
 
-    # ── Cold Email Opener ──────────────────────────────────────────────────────
+    # â”€â”€ Cold Email Opener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @app.post("/api/cold-email-opener")
     def cold_email_opener(req: ColdEmailOpenerRequest, request: Request) -> dict:
         session_token, _billing, access = resolve_plan_access_context(request, fallback_token=req.token)
@@ -13618,8 +13892,8 @@ def create_app() -> FastAPI:
             niche = str(rows[0].get("niche") or "").strip()
         else:
             ensure_users_table(DEFAULT_DB_PATH)
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-                conn.row_factory = sqlite3.Row
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                conn.row_factory = pgdb.Row
                 row = conn.execute(
                     "SELECT niche FROM users WHERE token = ?", (session_token,)
                 ).fetchone()
@@ -13669,6 +13943,9 @@ def create_app() -> FastAPI:
         password_hash = _hash_password(req.password, salt)
         token = str(uuid.uuid4())
 
+        if auth_email_exists(email, config_path=DEFAULT_CONFIG_PATH, db_path=DEFAULT_DB_PATH):
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
             if not ensure_supabase_users_table(DEFAULT_CONFIG_PATH):
                 raise HTTPException(
@@ -13678,13 +13955,6 @@ def create_app() -> FastAPI:
             sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
-            try:
-                existing = sb_client.table("users").select("id").eq("email", email).limit(1).execute()
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Supabase onboarding query failed: {exc}")
-            if list(getattr(existing, "data", None) or []):
-                raise HTTPException(status_code=409, detail="An account with this email already exists.")
-
             try:
                 sb_client.table("users").insert(
                     {
@@ -13717,16 +13987,8 @@ def create_app() -> FastAPI:
                 "opener": opener,
             }
 
-        ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            existing = conn.execute(
-                "SELECT 1 FROM users WHERE email = ? LIMIT 1",
-                (email,),
-            ).fetchone()
-            if existing is not None:
-                raise HTTPException(status_code=409, detail="An account with this email already exists.")
         try:
-            with sqlite3.connect(DEFAULT_DB_PATH) as conn:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
                 conn.execute(
                     "INSERT INTO users (email, password_hash, salt, niche, account_type, display_name, contact_name, token, credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_start_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -13747,7 +14009,7 @@ def create_app() -> FastAPI:
                     ),
                 )
                 conn.commit()
-        except sqlite3.IntegrityError:
+        except pgdb.IntegrityError:
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
         return {
@@ -14119,8 +14381,8 @@ def create_app() -> FastAPI:
             }
 
         ensure_users_table(DEFAULT_DB_PATH)
-        with sqlite3.connect(DEFAULT_DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
             if user_id:
                 row = conn.execute(
                     "SELECT id, credits_balance, topup_credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = ? LIMIT 1",
@@ -14255,3 +14517,4 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+

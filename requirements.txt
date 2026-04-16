@@ -12,3 +12,5 @@ apscheduler>=3.10.4
 pydantic>=2.10.0
 dnspython>=2.6.0
 supabase>=2.7.4
+SQLAlchemy>=2.0.36
+psycopg2-binary>=2.9.9

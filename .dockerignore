@@ -15,3 +15,14 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .vscode
+backend/test_*.py
+frontend
+api
+profiles
+archive
+*.csv
+*.sql
+*.toml
+*.md
+MIGRACIJA_ZAKLJUCANA.txt
+MIGRATION_COMPLETE.txt

@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 """Execute missing columns patch for quickstart_completed."""
-import json
+
+import sys
 from pathlib import Path
-from supabase import create_client
 
-config = json.loads(Path('config.json').read_text(encoding='utf-8'))
-sb_config = config.get('supabase', {})
-url = sb_config.get('url', '')
-key = sb_config.get('service_role_key', '')
+sys.path.insert(0, "backend")
 
-if not url or not key:
-    print('ERROR: Supabase config missing!')
-    raise SystemExit(1)
+from app import DEFAULT_CONFIG_PATH, get_supabase_client
 
-sql_patch = Path('supabase_quickstart_completed_patch.sql').read_text(encoding='utf-8')
-client = create_client(url, key)
 
-print('Executing quickstart_completed column patch...')
-try:
-    # Execute the SQL patch
-    response = client.postgrest.rpc('exec_sql', {'sql': sql_patch}).execute()
-    print('✓ Patch executed successfully!')
-except Exception as e:
-    print(f'Trying direct execute method...')
+def main() -> int:
+    client = get_supabase_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        print("ERROR: Supabase env/config missing or unreachable!")
+        return 1
+
+    sql_patch = Path("supabase_quickstart_completed_patch.sql").read_text(encoding="utf-8")
+
+    print("Executing quickstart_completed column patch...")
     try:
-        # Try alternative method
-        result = client.table('users').select('id').limit(1).execute()
-        print('Testing column access...')
-        # If we get here, check if the column exists
-        print('✓ Column appears to exist now')
-    except Exception as e2:
-        print(f'Column check failed: {e2}')
-        print('\nManual patch required. Run this in Supabase SQL Editor:')
-        print('=' * 60)
-        print(sql_patch)
-        print('=' * 60)
+        client.postgrest.rpc("exec_sql", {"sql": sql_patch}).execute()
+        print("Patch executed successfully.")
+        return 0
+    except Exception:
+        print("Trying direct verification...")
+        try:
+            client.table("users").select("id,quickstart_completed").limit(1).execute()
+            print("Column appears to exist now.")
+            return 0
+        except Exception as exc:
+            print(f"Column check failed: {exc}")
+            print("\nManual patch required. Run this in Supabase SQL Editor:")
+            print("=" * 60)
+            print(sql_patch)
+            print("=" * 60)
+            return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,21 +7,21 @@ import random
 import re
 import secrets
 import smtplib
-import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from threading import Event
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 from openai import OpenAI
+from sqlalchemy import bindparam, text
 
 from backend.services.prompt_service import PromptFactory
-from backend.scraper.db import init_db
+from backend.scraper.db import get_engine, init_db
 
 FORCED_AI_MODEL = "gpt-4o-mini"   # hardcoded — no other models allowed
 _AI_CALL_TIMEOUT = 15.0            # 15s timeout on every call
@@ -232,7 +232,7 @@ class SMTPAccount:
 
 
 class AIMailer:
-    def __init__(self, db_path: str = "leads.db", config_path: str = "config.json", model_name_override: Optional[str] = None, user_id: Optional[str] = None, smtp_accounts_override: Optional[list[dict]] = None) -> None:
+    def __init__(self, db_path: str = "leads.db", config_path: str = "env", model_name_override: Optional[str] = None, user_id: Optional[str] = None, smtp_accounts_override: Optional[list[dict]] = None) -> None:
         self.db_path = db_path
         self.config_path = Path(config_path)
         self.user_id = str(user_id).strip() if user_id is not None and str(user_id).strip() else None
@@ -258,6 +258,64 @@ class AIMailer:
             "remaining_today": 0,
             "candidate_count": 0,
         }
+
+    def _fetchall(self, statement, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+        with get_engine().begin() as conn:
+            return [dict(row) for row in conn.execute(statement, params or {}).mappings().all()]
+
+    def _fetchone(self, statement, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        with get_engine().begin() as conn:
+            row = conn.execute(statement, params or {}).mappings().first()
+        return dict(row) if row is not None else None
+
+    def _execute(self, statement, params: Optional[dict[str, Any]] = None) -> None:
+        with get_engine().begin() as conn:
+            conn.execute(statement, params or {})
+
+    @staticmethod
+    def _deserialize_json_payload(raw_value: Any) -> Any:
+        if isinstance(raw_value, (dict, list)):
+            return raw_value
+        text_value = str(raw_value or "").strip()
+        if not text_value:
+            return None
+        try:
+            return json.loads(text_value)
+        except Exception:
+            return None
+
+    def _load_user_settings_smtp_accounts(self) -> list[dict[str, Any]]:
+        if not self.user_id:
+            return []
+
+        user_settings_sql = text(
+            """
+            SELECT smtp_accounts_json
+            FROM user_settings
+            WHERE user_id = :user_id
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT 1
+            """
+        )
+        try:
+            row = self._fetchone(user_settings_sql, {"user_id": self.user_id})
+            payload = self._deserialize_json_payload((row or {}).get("smtp_accounts_json"))
+            if isinstance(payload, list):
+                return [dict(item) for item in payload if isinstance(item, dict)]
+        except Exception as exc:
+            logging.warning("user_settings SMTP lookup failed for %s: %s", self.user_id, exc)
+
+        try:
+            row = self._fetchone(
+                text("SELECT smtp_accounts_json FROM users WHERE id::text = :user_id LIMIT 1"),
+                {"user_id": self.user_id},
+            )
+            payload = self._deserialize_json_payload((row or {}).get("smtp_accounts_json"))
+            if isinstance(payload, list):
+                return [dict(item) for item in payload if isinstance(item, dict)]
+        except Exception as exc:
+            logging.warning("users SMTP lookup fallback failed for %s: %s", self.user_id, exc)
+        return []
         self._next_account_index = 0
         self.used_openers: set[str] = set()
         strategy_raw = str((self.config.get("mailer", {}) or {}).get("sending_strategy", "round_robin") or "round_robin")
@@ -659,20 +717,19 @@ class AIMailer:
 
     def get_active_campaign_sequence(self) -> Optional[dict]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
+            return self._fetchone(
+                text(
                     """
                     SELECT *
-                    FROM CampaignSequences
-                    WHERE user_id = ? AND COALESCE(active, 1) = 1
-                    ORDER BY datetime(updated_at) DESC, id DESC
+                    FROM "CampaignSequences"
+                    WHERE user_id = :user_id AND COALESCE(active, true) = true
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
                     LIMIT 1
-                    """,
-                    (self.user_id,),
-                ).fetchone()
-            return dict(row) if row else None
-        except sqlite3.Error:
+                    """
+                ),
+                {"user_id": self.user_id or "legacy"},
+            )
+        except Exception:
             return None
 
     def select_ab_subject_variant(self, lead_id: int, sequence: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
@@ -695,7 +752,7 @@ class AIMailer:
             return max(1, int((sequence or {}).get("step2_delay_days") or FOLLOW_UP_DELAY_DAYS or 3))
         return max(1, int((sequence or {}).get("step3_delay_days") or 7))
 
-    def resolve_campaign_step(self, lead: sqlite3.Row, sequence: Optional[dict]) -> Optional[int]:
+    def resolve_campaign_step(self, lead: dict[str, Any], sequence: Optional[dict]) -> Optional[int]:
         status = str(lead["status"] or "pending").strip().lower()
         follow_up_count = int(lead["follow_up_count"] or 0)
         if status != "emailed":
@@ -724,11 +781,11 @@ class AIMailer:
         local = str(account.email or "").split("@", 1)[0].strip()
         return local or "Your Team"
 
-    def infer_niche(self, lead: sqlite3.Row) -> str:
-        ai_description = str((lead["ai_description"] if "ai_description" in lead.keys() else "") or "")
-        search_keyword = str((lead["search_keyword"] if "search_keyword" in lead.keys() else "") or "")
-        business_name = str((lead["business_name"] if "business_name" in lead.keys() else "") or "")
-        shortcoming = str((lead["main_shortcoming"] if "main_shortcoming" in lead.keys() else "") or "")
+    def infer_niche(self, lead: dict[str, Any]) -> str:
+        ai_description = str(lead.get("ai_description") or "")
+        search_keyword = str(lead.get("search_keyword") or "")
+        business_name = str(lead.get("business_name") or "")
+        shortcoming = str(lead.get("main_shortcoming") or "")
         source = " ".join([ai_description, search_keyword, business_name, shortcoming]).lower()
 
         keyword_map = {
@@ -806,29 +863,21 @@ class AIMailer:
         if not business_name:
             return None
         try:
-            import importlib as _il
-            _sb_mod = _il.import_module("supabase")
-            _create = getattr(_sb_mod, "create_client")
-            cfg = json.loads(Path(self.db_path).parent.parent.joinpath("config.json").read_text(encoding="utf-8"))
-            sb = cfg.get("supabase", {})
-            url = str(sb.get("url", "")).strip()
-            key = str(sb.get("service_role_key", "") or sb.get("key", "")).strip()
-            if not url or not key:
-                return None
-            client = _create(url, key)
-            rows = (
-                client.table("leads")
-                .select("ai_description,search_keyword")
-                .eq("business_name", business_name)
-                .not_.is_("ai_description", "null")
-                .order("id", desc=True)
-                .limit(1)
-                .execute()
-                .data or []
+            row = self._fetchone(
+                text(
+                    """
+                    SELECT ai_description, search_keyword
+                    FROM leads
+                    WHERE business_name = :business_name
+                      AND COALESCE(ai_description, '') != ''
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"business_name": business_name},
             )
-            if not rows:
+            if not row:
                 return None
-            row = rows[0]
             desc = str(row.get("ai_description") or "").strip()
             kw = str(row.get("search_keyword") or "").strip()
             combined = (desc + " " + kw).lower()
@@ -850,7 +899,7 @@ class AIMailer:
 
     def build_template_email(
         self,
-        lead: sqlite3.Row,
+        lead: dict[str, Any],
         city: str,
         score: float,
         website: Optional[str],
@@ -1016,7 +1065,7 @@ class AIMailer:
             return {}
 
     def _load_accounts(self) -> list[SMTPAccount]:
-        raw_accounts = self.smtp_accounts_override if self.smtp_accounts_override is not None else self.config.get("smtp_accounts", [])
+        raw_accounts = self.smtp_accounts_override if self.smtp_accounts_override is not None else self._load_user_settings_smtp_accounts()
         accounts = []
         for item in raw_accounts:
             if not str(item.get("password") or "").strip():
@@ -1037,186 +1086,114 @@ class AIMailer:
         return accounts
 
     def _ensure_mailer_columns(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
-
-            if "status" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN status TEXT")
-
-            if "sent_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN sent_at TEXT")
-
-            if "last_sender_email" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN last_sender_email TEXT")
-
-            if "last_contacted_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN last_contacted_at TEXT")
-
-            if "follow_up_count" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN follow_up_count INTEGER DEFAULT 0")
-
-            if "generated_email_body" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN generated_email_body TEXT")
-
-            if "open_tracking_token" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN open_tracking_token TEXT")
-
-            if "open_count" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN open_count INTEGER DEFAULT 0")
-
-            if "first_opened_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN first_opened_at TEXT")
-
-            if "last_opened_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN last_opened_at TEXT")
-
-            if "competitive_hook" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN competitive_hook TEXT")
-
-            if "campaign_sequence_id" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN campaign_sequence_id INTEGER")
-
-            if "campaign_step" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN campaign_step INTEGER DEFAULT 1")
-
-            if "ab_variant" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN ab_variant TEXT")
-
-            if "last_subject_line" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN last_subject_line TEXT")
-
-            if "reply_detected_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN reply_detected_at TEXT")
-
-            if "bounced_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN bounced_at TEXT")
-
-            if "bounce_reason" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN bounce_reason TEXT")
-
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS lead_blacklist (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    reason TEXT,
-                    created_at TEXT NOT NULL
-                )
-                """
+        statements = [
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS status text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS sent_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_sender_email text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_contacted_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS follow_up_count bigint DEFAULT 0',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS generated_email_body text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS open_tracking_token text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS open_count bigint DEFAULT 0',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS first_opened_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_opened_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS competitive_hook text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS campaign_sequence_id bigint',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS campaign_step bigint DEFAULT 1',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ab_variant text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_subject_line text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS reply_detected_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS bounced_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS bounce_reason text',
+            """
+            CREATE TABLE IF NOT EXISTS lead_blacklist (
+                id bigint generated by default as identity primary key,
+                kind text NOT NULL,
+                value text NOT NULL,
+                reason text,
+                created_at text NOT NULL
             )
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)"
+            """,
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)',
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_open_tracking_token ON leads(open_tracking_token)',
+            """
+            CREATE TABLE IF NOT EXISTS mailer_meta (
+                key text PRIMARY KEY,
+                value text NOT NULL
             )
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_open_tracking_token ON leads(open_tracking_token)"
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS \"CampaignSequences\" (
+                id bigint generated by default as identity primary key,
+                user_id text NOT NULL DEFAULT 'legacy',
+                name text NOT NULL,
+                step1_subject text,
+                step1_body text,
+                step2_delay_days bigint DEFAULT 3,
+                step2_subject text,
+                step2_body text,
+                step3_delay_days bigint DEFAULT 7,
+                step3_subject text,
+                step3_body text,
+                ab_subject_a text,
+                ab_subject_b text,
+                active boolean DEFAULT true,
+                created_at text NOT NULL,
+                updated_at text NOT NULL
             )
-
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS mailer_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                """
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS \"SavedTemplates\" (
+                id bigint generated by default as identity primary key,
+                user_id text NOT NULL DEFAULT 'legacy',
+                name text NOT NULL,
+                category text DEFAULT 'general',
+                prompt_text text,
+                subject_template text,
+                body_template text,
+                created_at text NOT NULL,
+                updated_at text NOT NULL
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS CampaignSequences (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL DEFAULT 'legacy',
-                    name TEXT NOT NULL,
-                    step1_subject TEXT,
-                    step1_body TEXT,
-                    step2_delay_days INTEGER DEFAULT 3,
-                    step2_subject TEXT,
-                    step2_body TEXT,
-                    step3_delay_days INTEGER DEFAULT 7,
-                    step3_subject TEXT,
-                    step3_body TEXT,
-                    ab_subject_a TEXT,
-                    ab_subject_b TEXT,
-                    active INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS \"CampaignEvents\" (
+                id bigint generated by default as identity primary key,
+                lead_id bigint,
+                user_id text NOT NULL DEFAULT 'legacy',
+                email text,
+                event_type text NOT NULL,
+                subject_variant text,
+                subject_line text,
+                metadata_json text,
+                occurred_at text NOT NULL
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS SavedTemplates (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL DEFAULT 'legacy',
-                    name TEXT NOT NULL,
-                    category TEXT DEFAULT 'general',
-                    prompt_text TEXT,
-                    subject_template TEXT,
-                    body_template TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS CampaignEvents (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    lead_id INTEGER,
-                    user_id TEXT NOT NULL DEFAULT 'legacy',
-                    email TEXT,
-                    event_type TEXT NOT NULL,
-                    subject_variant TEXT,
-                    subject_line TEXT,
-                    metadata_json TEXT,
-                    occurred_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_sequences_user_active ON CampaignSequences(user_id, active)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_templates_user_category ON SavedTemplates(user_id, category)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_events_user_type ON CampaignEvents(user_id, event_type)")
-
-            conn.commit()
+            """,
+            'CREATE INDEX IF NOT EXISTS idx_campaign_sequences_user_active ON "CampaignSequences"(user_id, active)',
+            'CREATE INDEX IF NOT EXISTS idx_saved_templates_user_category ON "SavedTemplates"(user_id, category)',
+            'CREATE INDEX IF NOT EXISTS idx_campaign_events_user_type ON "CampaignEvents"(user_id, event_type)',
+        ]
+        for statement in statements:
+            self._execute(text(statement))
 
     def _get_or_create_tracking_token(self, lead_id: int) -> str:
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT open_tracking_token FROM leads WHERE id = ?",
-                (lead_id,),
-            ).fetchone()
-            existing = str(row[0] or "").strip() if row else ""
-            if existing:
-                self._sync_token_to_supabase(lead_id, existing)
-                return existing
+        row = self._fetchone(
+            text("SELECT open_tracking_token FROM leads WHERE id = :lead_id LIMIT 1"),
+            {"lead_id": int(lead_id)},
+        )
+        existing = str((row or {}).get("open_tracking_token") or "").strip()
+        if existing:
+            return existing
 
-            token = secrets.token_urlsafe(24)
-            conn.execute(
-                "UPDATE leads SET open_tracking_token = ? WHERE id = ?",
-                (token, lead_id),
-            )
-            conn.commit()
-
-        self._sync_token_to_supabase(lead_id, token)
+        token = secrets.token_urlsafe(24)
+        self._execute(
+            text("UPDATE leads SET open_tracking_token = :token WHERE id = :lead_id"),
+            {"token": token, "lead_id": int(lead_id)},
+        )
         return token
 
     def _sync_token_to_supabase(self, lead_id: int, token: str) -> None:
-        """Sync open_tracking_token to Supabase so the pixel endpoint can look it up."""
-        try:
-            import importlib as _il
-            _sb_mod = _il.import_module("supabase")
-            _create = getattr(_sb_mod, "create_client")
-            cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
-            if not cfg.get("supabase", {}).get("primary_mode"):
-                return
-            sb = cfg.get("supabase", {})
-            url = str(sb.get("url", "")).strip()
-            key = str(sb.get("service_role_key", "") or sb.get("key", "")).strip()
-            if not url or not key:
-                return
-            client = _create(url, key)
-            client.table("leads").update({"open_tracking_token": token}).eq("id", lead_id).execute()
-        except Exception as exc:
-            logging.debug("Failed to sync tracking token to Supabase for lead %s: %s", lead_id, exc)
+        del lead_id, token
+        return None
 
     def _build_open_tracking_url(self, lead_id: Optional[int]) -> Optional[str]:
         if not lead_id:
@@ -1262,7 +1239,7 @@ class AIMailer:
             return footer
         return f"{clean_body}\n\n---\n{footer}".strip()
 
-    def _fetch_sendable_leads(self, limit: int, status_allowlist: Optional[list[str]] = None) -> list[sqlite3.Row]:
+    def _fetch_sendable_leads(self, limit: int, status_allowlist: Optional[list[str]] = None) -> list[dict[str, Any]]:
         base_query = """
             SELECT
                 id,
@@ -1288,28 +1265,25 @@ class AIMailer:
                 email IS NOT NULL
                 AND TRIM(email) != ''
         """
-        params: list = []
+        params: dict[str, Any] = {"limit": int(limit)}
+        query_text = base_query
 
         if status_allowlist:
             normalized_statuses = [status.strip().lower() for status in status_allowlist if status and status.strip()]
             if not normalized_statuses:
                 return []
-            placeholders = ",".join(["?"] * len(normalized_statuses))
-            base_query += f" AND LOWER(COALESCE(status, '')) IN ({placeholders})"
-            params.extend(normalized_statuses)
+            query_text += " AND LOWER(COALESCE(status, '')) IN :status_allowlist"
+            params["status_allowlist"] = normalized_statuses
         if self.user_id:
-            base_query += " AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?"
-            params.append(self.user_id)
+            query_text += " AND COALESCE(NULLIF(user_id, ''), 'legacy') = :user_id"
+            params["user_id"] = self.user_id
 
         if status_allowlist:
             normalized_statuses = [status.strip().lower() for status in status_allowlist if status and status.strip()]
             if not normalized_statuses:
                 return []
-            placeholders = ",".join(["?"] * len(normalized_statuses))
-            base_query += f" AND LOWER(COALESCE(status, '')) IN ({placeholders})"
-            params.extend(normalized_statuses)
         else:
-            base_query += """
+            query_text += """
                 AND (
                     LOWER(COALESCE(status, 'pending')) NOT IN (
                         'blacklisted',
@@ -1335,12 +1309,11 @@ class AIMailer:
                 )
             """
 
-        base_query += " ORDER BY COALESCE(ai_score, 0) DESC, id ASC LIMIT ?"
-        params.append(limit)
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            return conn.execute(base_query, params).fetchall()
+        query_text += " ORDER BY COALESCE(ai_score, 0) DESC, id ASC LIMIT :limit"
+        statement = text(query_text)
+        if status_allowlist:
+            statement = statement.bindparams(bindparam("status_allowlist", expanding=True))
+        return self._fetchall(statement, params)
 
     def mark_emailed(
         self,
@@ -1356,91 +1329,94 @@ class AIMailer:
         bounce_reason: Optional[str] = None,
     ) -> None:
         normalized_status = str(status or "").strip().lower()
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            lead_row = conn.execute(
-                "SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id FROM leads WHERE id = ? LIMIT 1",
-                (lead_id,),
-            ).fetchone()
-            if lead_row is None:
-                return
+        lead_row = self._fetchone(
+            text("SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id FROM leads WHERE id = :lead_id LIMIT 1"),
+            {"lead_id": int(lead_id)},
+        )
+        if lead_row is None:
+            return
 
-            if normalized_status == "emailed":
-                conn.execute(
+        if normalized_status == "emailed":
+            self._execute(
+                text(
                     """
                     UPDATE leads
                     SET
-                        status = ?,
-                        sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP),
-                        last_contacted_at = CURRENT_TIMESTAMP,
-                        last_sender_email = ?,
-                        generated_email_body = COALESCE(?, generated_email_body),
-                        follow_up_count = COALESCE(follow_up_count, 0) + ?,
-                        last_subject_line = COALESCE(?, last_subject_line),
-                        ab_variant = COALESCE(?, ab_variant),
-                        campaign_sequence_id = COALESCE(?, campaign_sequence_id),
-                        campaign_step = COALESCE(?, campaign_step)
-                    WHERE id = ?
-                    """,
-                    (
-                        status,
-                        sender_email,
-                        generated_email_body,
-                        1 if is_follow_up else 0,
-                        subject_line,
-                        ab_variant,
-                        campaign_sequence_id,
-                        campaign_step,
-                        lead_id,
-                    ),
-                )
-                conn.execute(
+                        status = :status,
+                        sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP::text),
+                        last_contacted_at = CURRENT_TIMESTAMP::text,
+                        last_sender_email = :sender_email,
+                        generated_email_body = COALESCE(:generated_email_body, generated_email_body),
+                        follow_up_count = COALESCE(follow_up_count, 0) + :follow_up_increment,
+                        last_subject_line = COALESCE(:subject_line, last_subject_line),
+                        ab_variant = COALESCE(:ab_variant, ab_variant),
+                        campaign_sequence_id = COALESCE(:campaign_sequence_id, campaign_sequence_id),
+                        campaign_step = COALESCE(:campaign_step, campaign_step)
+                    WHERE id = :lead_id
                     """
-                    INSERT INTO CampaignEvents (
+                ),
+                {
+                    "status": status,
+                    "sender_email": sender_email,
+                    "generated_email_body": generated_email_body,
+                    "follow_up_increment": 1 if is_follow_up else 0,
+                    "subject_line": subject_line,
+                    "ab_variant": ab_variant,
+                    "campaign_sequence_id": campaign_sequence_id,
+                    "campaign_step": campaign_step,
+                    "lead_id": int(lead_id),
+                },
+            )
+            self._execute(
+                text(
+                    """
+                    INSERT INTO "CampaignEvents" (
                         lead_id, user_id, email, event_type, subject_variant, subject_line, metadata_json, occurred_at
-                    ) VALUES (?, ?, ?, 'sent', ?, ?, ?, CURRENT_TIMESTAMP)
-                    """,
-                    (
-                        lead_id,
-                        str(lead_row["user_id"] or self.user_id),
-                        str(lead_row["email"] or "").strip(),
-                        ab_variant,
-                        subject_line,
-                        json.dumps({"campaign_step": campaign_step or (2 if is_follow_up else 1)}),
-                    ),
-                )
-            else:
-                conn.execute(
+                    ) VALUES (:lead_id, :user_id, :email, 'sent', :subject_variant, :subject_line, :metadata_json, CURRENT_TIMESTAMP::text)
                     """
-                    UPDATE leads
-                    SET
-                        status = ?,
-                        last_sender_email = ?,
-                        generated_email_body = COALESCE(?, generated_email_body),
-                        last_subject_line = COALESCE(?, last_subject_line),
-                        ab_variant = COALESCE(?, ab_variant),
-                        campaign_sequence_id = COALESCE(?, campaign_sequence_id),
-                        campaign_step = COALESCE(?, campaign_step),
-                        reply_detected_at = CASE WHEN ? IN ('replied', 'interested', 'meeting set') THEN CURRENT_TIMESTAMP ELSE reply_detected_at END,
-                        bounced_at = CASE WHEN ? IN ('bounced', 'invalid_email') THEN CURRENT_TIMESTAMP ELSE bounced_at END,
-                        bounce_reason = COALESCE(?, bounce_reason)
-                    WHERE id = ?
-                    """,
-                    (
-                        status,
-                        sender_email,
-                        generated_email_body,
-                        subject_line,
-                        ab_variant,
-                        campaign_sequence_id,
-                        campaign_step,
-                        normalized_status,
-                        normalized_status,
-                        bounce_reason,
-                        lead_id,
-                    ),
-                )
-            conn.commit()
+                ),
+                {
+                    "lead_id": int(lead_id),
+                    "user_id": str(lead_row.get("user_id") or self.user_id or "legacy"),
+                    "email": str(lead_row.get("email") or "").strip(),
+                    "subject_variant": ab_variant,
+                    "subject_line": subject_line,
+                    "metadata_json": json.dumps({"campaign_step": campaign_step or (2 if is_follow_up else 1)}),
+                },
+            )
+            return
+
+        self._execute(
+            text(
+                """
+                UPDATE leads
+                SET
+                    status = :status,
+                    last_sender_email = :sender_email,
+                    generated_email_body = COALESCE(:generated_email_body, generated_email_body),
+                    last_subject_line = COALESCE(:subject_line, last_subject_line),
+                    ab_variant = COALESCE(:ab_variant, ab_variant),
+                    campaign_sequence_id = COALESCE(:campaign_sequence_id, campaign_sequence_id),
+                    campaign_step = COALESCE(:campaign_step, campaign_step),
+                    reply_detected_at = CASE WHEN :normalized_status IN ('replied', 'interested', 'meeting set') THEN CURRENT_TIMESTAMP::text ELSE reply_detected_at END,
+                    bounced_at = CASE WHEN :normalized_status IN ('bounced', 'invalid_email') THEN CURRENT_TIMESTAMP::text ELSE bounced_at END,
+                    bounce_reason = COALESCE(:bounce_reason, bounce_reason)
+                WHERE id = :lead_id
+                """
+            ),
+            {
+                "status": status,
+                "sender_email": sender_email,
+                "generated_email_body": generated_email_body,
+                "subject_line": subject_line,
+                "ab_variant": ab_variant,
+                "campaign_sequence_id": campaign_sequence_id,
+                "campaign_step": campaign_step,
+                "normalized_status": normalized_status,
+                "bounce_reason": bounce_reason,
+                "lead_id": int(lead_id),
+            },
+        )
 
     @staticmethod
     def truncate_to_word_limit(text: str, max_words: int = 100) -> str:
@@ -1522,7 +1498,7 @@ class AIMailer:
             domain = domain[4:]
         return domain or None
 
-    def is_test_lead(self, lead: sqlite3.Row) -> bool:
+    def is_test_lead(self, lead: dict[str, Any]) -> bool:
         status_value = str(lead["status"] or "").strip().lower()
         if status_value == "qa_test_mail":
             return True
@@ -1551,25 +1527,24 @@ class AIMailer:
         if not email_value and not domain_values:
             return False
 
-        with sqlite3.connect(self.db_path) as conn:
-            if email_value:
-                row = conn.execute(
-                    "SELECT 1 FROM lead_blacklist WHERE kind = 'email' AND value = ? LIMIT 1",
-                    (email_value,),
-                ).fetchone()
-                if row:
-                    return True
-            for domain_value in domain_values:
-                row = conn.execute(
-                    "SELECT 1 FROM lead_blacklist WHERE kind = 'domain' AND value = ? LIMIT 1",
-                    (domain_value,),
-                ).fetchone()
-                if row:
-                    return True
+        if email_value:
+            row = self._fetchone(
+                text("SELECT 1 AS exists_flag FROM lead_blacklist WHERE kind = 'email' AND value = :value LIMIT 1"),
+                {"value": email_value},
+            )
+            if row:
+                return True
+        for domain_value in domain_values:
+            row = self._fetchone(
+                text("SELECT 1 AS exists_flag FROM lead_blacklist WHERE kind = 'domain' AND value = :value LIMIT 1"),
+                {"value": domain_value},
+            )
+            if row:
+                return True
         return False
 
     @staticmethod
-    def should_send_follow_up(lead: sqlite3.Row) -> bool:
+    def should_send_follow_up(lead: dict[str, Any]) -> bool:
         status = str(lead["status"] or "").strip().lower()
         if status != "emailed":
             return False
@@ -1617,29 +1592,37 @@ class AIMailer:
 
     def get_sent_today_count(self) -> int:
         today = datetime.now().date().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM leads WHERE DATE(COALESCE(last_contacted_at, sent_at)) = ?",
-                (today,),
-            ).fetchone()
-        return int(row[0] if row else 0)
+        row = self._fetchone(
+            text(
+                """
+                SELECT COUNT(*) AS count_value
+                FROM leads
+                WHERE COALESCE(NULLIF(last_contacted_at, ''), NULLIF(sent_at, '')) IS NOT NULL
+                  AND CAST(COALESCE(NULLIF(last_contacted_at, ''), NULLIF(sent_at, '')) AS timestamp) :: date = :today_date
+                """
+            ),
+            {"today_date": today},
+        )
+        return int((row or {}).get("count_value") or 0)
 
     def get_or_create_warmup_start_date(self):
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT value FROM mailer_meta WHERE key = 'warmup_start_date'"
-            ).fetchone()
+        row = self._fetchone(text("SELECT value FROM mailer_meta WHERE key = 'warmup_start_date' LIMIT 1"))
+        existing = str((row or {}).get("value") or "").strip()
+        if existing:
+            return datetime.strptime(existing, "%Y-%m-%d").date()
 
-            if row and row[0]:
-                return datetime.strptime(row[0], "%Y-%m-%d").date()
-
-            today = datetime.now().date().isoformat()
-            conn.execute(
-                "INSERT OR REPLACE INTO mailer_meta (key, value) VALUES ('warmup_start_date', ?)",
-                (today,),
-            )
-            conn.commit()
-            return datetime.strptime(today, "%Y-%m-%d").date()
+        today = datetime.now().date().isoformat()
+        self._execute(
+            text(
+                """
+                INSERT INTO mailer_meta (key, value)
+                VALUES ('warmup_start_date', :value)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """
+            ),
+            {"value": today},
+        )
+        return datetime.strptime(today, "%Y-%m-%d").date()
 
     @staticmethod
     def strip_known_signature_lines(text: str) -> str:
@@ -1827,8 +1810,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     send_cmd = subparsers.add_parser("send", help="Generate and send AI-personalized emails.")
-    send_cmd.add_argument("--db", default="leads.db", help="SQLite DB path.")
-    send_cmd.add_argument("--config", default="config.json", help="JSON config path.")
+    send_cmd.add_argument("--db", default="postgres", help="Deprecated local DB arg; Postgres is used via SUPABASE_DATABASE_URL.")
+    send_cmd.add_argument("--config", default="env", help="Optional settings source label for non-SMTP settings.")
     send_cmd.add_argument("--limit", type=int, default=10, help="Maximum number of leads to process.")
     send_cmd.add_argument("--delay-min", type=int, default=400, help="Minimum delay between emails in seconds.")
     send_cmd.add_argument("--delay-max", type=int, default=900, help="Maximum delay between emails in seconds.")

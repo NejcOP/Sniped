@@ -5,12 +5,12 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import time
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import aiohttp
+from sqlalchemy import text
 
 try:
     import dns.resolver as _dns_resolver  # dnspython
@@ -25,7 +25,7 @@ from backend.services.prompt_service import PromptFactory
 from playwright.sync_api import sync_playwright
 
 from backend.scraper.anti_bot import MODERN_USER_AGENT, apply_stealth, random_delay, random_mouse_movements
-from backend.scraper.db import init_db
+from backend.scraper.db import get_engine, init_db
 from backend.scraper.phone_extractor import PhoneExtractor
 
 EMAIL_REGEX = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -61,7 +61,7 @@ class LeadEnricher:
         db_path: str = "leads.db",
         headless: bool = True,
         max_google_links: int = 3,
-        config_path: str = "config.json",
+        config_path: str = "env",
         user_niche: Optional[str] = None,
         user_id: Optional[str] = None,
         model_name_override: Optional[str] = None,
@@ -81,6 +81,19 @@ class LeadEnricher:
 
         init_db(db_path=self.db_path)
         self._ensure_enrichment_columns()
+
+    def _fetchall(self, statement, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+        with get_engine().begin() as conn:
+            return [dict(row) for row in conn.execute(statement, params or {}).mappings().all()]
+
+    def _fetchone(self, statement, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        with get_engine().begin() as conn:
+            row = conn.execute(statement, params or {}).mappings().first()
+        return dict(row) if row is not None else None
+
+    def _execute(self, statement, params: Optional[dict[str, Any]] = None) -> None:
+        with get_engine().begin() as conn:
+            conn.execute(statement, params or {})
 
     def run(
         self,
@@ -264,42 +277,26 @@ class LeadEnricher:
         return api_key, resolved_model
 
     def _ensure_enrichment_columns(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
+        statements = [
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS email text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS insecure_site bigint DEFAULT 0',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS main_shortcoming text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS status text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS status_updated_at text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_score double precision',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_description text',
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS client_tier text DEFAULT 'standard'",
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enrichment_data text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_formatted text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_type text',
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS enrichment_status text DEFAULT 'pending'",
+        ]
+        for statement in statements:
+            self._execute(text(statement))
 
-            if "email" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN email TEXT")
-            if "insecure_site" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN insecure_site INTEGER DEFAULT 0")
-            if "main_shortcoming" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN main_shortcoming TEXT")
-            if "enriched_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN enriched_at TEXT")
-            if "status" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN status TEXT")
-            if "status_updated_at" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN status_updated_at TEXT")
-            if "ai_score" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN ai_score REAL")
-            if "ai_description" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN ai_description TEXT")
-            if "client_tier" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN client_tier TEXT DEFAULT 'standard'")
-            if "enrichment_data" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN enrichment_data TEXT")
-            if "phone_formatted" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN phone_formatted TEXT")
-            if "phone_type" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN phone_type TEXT")
-            if "enrichment_status" not in columns:
-                conn.execute("ALTER TABLE leads ADD COLUMN enrichment_status TEXT DEFAULT 'pending'")
-
-            conn.commit()
-
-    def _fetch_leads_for_enrichment(self, limit: Optional[int] = None) -> List[sqlite3.Row]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            query = """
+    def _fetch_leads_for_enrichment(self, limit: Optional[int] = None) -> List[dict[str, Any]]:
+        query = """
                 SELECT
                     id,
                     business_name,
@@ -320,50 +317,49 @@ class LeadEnricher:
                     )
                     AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
             """
-            params: list[object] = []
+        params: dict[str, Any] = {}
 
-            if self.user_id:
-                query += " AND user_id = ?"
-                params.append(self.user_id)
+        if self.user_id:
+            query += " AND user_id = :user_id"
+            params["user_id"] = self.user_id
 
-            query += " ORDER BY id ASC"
+        query += " ORDER BY id ASC"
 
-            if limit and limit > 0:
-                query += " LIMIT ?"
-                params.append(limit)
-                return conn.execute(query, params).fetchall()
+        if limit and limit > 0:
+            query += " LIMIT :limit"
+            params["limit"] = int(limit)
 
-            return conn.execute(query, params).fetchall()
+        return self._fetchall(text(query), params)
 
     def _mark_lead_processing(self, lead_id: int) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+        self._execute(
+            text(
                 """
                 UPDATE leads
                 SET
                     enrichment_status = 'processing',
                     status = 'processing',
-                    status_updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (lead_id,),
-            )
-            conn.commit()
+                    status_updated_at = CURRENT_TIMESTAMP::text
+                WHERE id = :lead_id
+                """
+            ),
+            {"lead_id": int(lead_id)},
+        )
 
     def _mark_lead_failed(self, lead_id: int) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+        self._execute(
+            text(
                 """
                 UPDATE leads
                 SET
                     enrichment_status = 'failed',
                     status = 'failed',
-                    status_updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (lead_id,),
-            )
-            conn.commit()
+                    status_updated_at = CURRENT_TIMESTAMP::text
+                WHERE id = :lead_id
+                """
+            ),
+            {"lead_id": int(lead_id)},
+        )
 
     def _update_lead_enrichment(
         self,
@@ -392,46 +388,44 @@ class LeadEnricher:
                 phone_formatted = result["primary_number"]
                 phone_type = result["type"]
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
+        self._execute(
+            text(
                 """
                 UPDATE leads
                 SET
-                    email = COALESCE(?, email),
-                    insecure_site = ?,
-                    main_shortcoming = ?,
-                    ai_score = ?,
-                    ai_description = ?,
-                    client_tier = ?,
-                    enrichment_data = COALESCE(?, enrichment_data),
+                    email = COALESCE(:email, email),
+                    insecure_site = :insecure_site,
+                    main_shortcoming = :main_shortcoming,
+                    ai_score = :ai_score,
+                    ai_description = :ai_description,
+                    client_tier = :client_tier,
+                    enrichment_data = COALESCE(:enrichment_data, enrichment_data),
                     enrichment_status = 'completed',
-                    status = ?,
-                    status_updated_at = CURRENT_TIMESTAMP,
-                    enriched_at = CURRENT_TIMESTAMP,
-                    phone_formatted = COALESCE(?, phone_formatted),
-                    phone_type = COALESCE(?, phone_type)
-                WHERE id = ?
-                """,
-                (
-                    email,
-                    1 if insecure_site else 0,
-                    main_shortcoming,
-                    ai_score,
-                    ai_description,
-                    client_tier,
-                    enrichment_data,
-                    new_status,
-                    phone_formatted,
-                    phone_type,
-                    lead_id,
-                ),
-            )
-            conn.commit()
+                    status = :new_status,
+                    status_updated_at = CURRENT_TIMESTAMP::text,
+                    enriched_at = CURRENT_TIMESTAMP::text,
+                    phone_formatted = COALESCE(:phone_formatted, phone_formatted),
+                    phone_type = COALESCE(:phone_type, phone_type)
+                WHERE id = :lead_id
+                """
+            ),
+            {
+                "email": email,
+                "insecure_site": 1 if insecure_site else 0,
+                "main_shortcoming": main_shortcoming,
+                "ai_score": ai_score,
+                "ai_description": ai_description,
+                "client_tier": client_tier,
+                "enrichment_data": enrichment_data,
+                "new_status": new_status,
+                "phone_formatted": phone_formatted,
+                "phone_type": phone_type,
+                "lead_id": int(lead_id),
+            },
+        )
 
-    def _fetch_ai_mailer_rows(self) -> List[sqlite3.Row]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            query = """
+    def _fetch_ai_mailer_rows(self) -> List[dict[str, Any]]:
+        query = """
                 SELECT
                     business_name,
                     email,
@@ -444,16 +438,14 @@ class LeadEnricher:
                     AND LOWER(COALESCE(status, '')) IN ('enriched', 'queued_mail')
                     AND LOWER(COALESCE(enrichment_status, 'completed')) = 'completed'
             """
-            params: list[object] = []
+        params: dict[str, Any] = {}
 
-            if self.user_id:
-                query += " AND user_id = ?"
-                params.append(self.user_id)
+        if self.user_id:
+            query += " AND user_id = :user_id"
+            params["user_id"] = self.user_id
 
-            query += " ORDER BY business_name ASC"
-            rows = conn.execute(query, params).fetchall()
-
-        return rows
+        query += " ORDER BY business_name ASC"
+        return self._fetchall(text(query), params)
 
     def _find_email_on_website(self, page, website_url: str) -> tuple[Optional[str], bool, str]:
         try:
@@ -1434,7 +1426,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     enrich_cmd = subparsers.add_parser("enrich", help="Populate enrichment fields and AI score.")
-    enrich_cmd.add_argument("--db", default="leads.db", help="SQLite DB path.")
+    enrich_cmd.add_argument("--db", default="postgres", help="Deprecated local DB arg; Postgres is used via SUPABASE_DATABASE_URL.")
     enrich_cmd.add_argument(
         "--limit",
         type=int,
@@ -1448,8 +1440,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enrich_cmd.add_argument(
         "--config",
-        default="config.json",
-        help="Path to config.json with OpenAI settings.",
+        default="env",
+        help="Optional settings source label for OpenAI settings when env vars are absent.",
     )
     enrich_cmd.add_argument(
         "--output",
@@ -1463,7 +1455,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     export_cmd = subparsers.add_parser("export-ai", help="Export AI Mailer ready CSV.")
-    export_cmd.add_argument("--db", default="leads.db", help="SQLite DB path.")
+    export_cmd.add_argument("--db", default="postgres", help="Deprecated local DB arg; Postgres is used via SUPABASE_DATABASE_URL.")
     export_cmd.add_argument(
         "--output",
         default="ai_mailer_ready.csv",

@@ -8177,7 +8177,7 @@ function App({ initialTab = 'leads' }) {
                 <h3 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
                   <Settings className="h-4 w-4 text-cyan-400" /> OpenAI
                 </h3>
-                <p className="text-xs text-slate-500">API key is configured directly in <span className="font-mono text-slate-400">config.json</span>.</p>
+                <p className="text-xs text-slate-500">API key is configured from environment-backed server settings.</p>
               </div>
               <div>
                 <h3 className="text-base font-semibold text-white mb-4 flex items-center gap-2">

@@ -119,8 +119,18 @@ export default function ColdEmailOpenerPage() {
 
         if (!regRes.ok) {
           if (regRes.status === 409) {
-            toast.error('This email already exists. Please sign in.')
-            navigate('/login')
+            const nextParams = new URLSearchParams()
+            const duplicateEmail = String(pendingSignup?.email || '').trim().toLowerCase()
+            const duplicateAccountType = String(pendingSignup?.account_type || '').trim().toLowerCase()
+            if (duplicateAccountType) {
+              nextParams.set('accountType', duplicateAccountType)
+            }
+            if (duplicateEmail) {
+              nextParams.set('email', duplicateEmail)
+            }
+            nextParams.set('error', 'email_exists')
+            localStorage.removeItem('lf_pending_signup')
+            navigate(`/signup?${nextParams.toString()}`)
             return
           }
           toast.error(regData.detail || 'Registration failed.')

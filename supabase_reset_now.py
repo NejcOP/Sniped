@@ -3,23 +3,18 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import sys
 
-from supabase import create_client
+sys.path.insert(0, "backend")
 
-ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.json"
+from backend.app import DEFAULT_CONFIG_PATH, get_supabase_client
 
 
 def load_client():
-    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    sb = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
-    url = str(sb.get("url", "") or "").strip()
-    key = str(sb.get("service_role_key", "") or "").strip()
-    if not url or not key:
-        raise RuntimeError("Missing supabase.url or supabase.service_role_key in config.json")
-    return create_client(url, key)
+    client = get_supabase_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        raise RuntimeError("Missing Supabase env/config settings")
+    return client
 
 
 def count_rows(client, table: str) -> int:

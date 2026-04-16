@@ -30,7 +30,6 @@ profiles/
 # Secrets / local config
 .env
 .env.*
-config.json
 config.local.json
 
 # Build artifacts

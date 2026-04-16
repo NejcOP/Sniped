@@ -6,6 +6,7 @@ import { ALLOWED_NICHES, NICHE_DESCRIPTIONS, ACCOUNT_TYPE_LABELS } from './const
 
 const NICHES = ALLOWED_NICHES
 const COMPANY_TYPES = ['agency', 'company']
+const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 function InputField({ icon, ...props }) {
   return (
@@ -61,6 +62,7 @@ export default function SignupPage() {
   const [password, setPassword] = useState('')
   const [niche, setNiche] = useState('')
   const [loading, setLoading] = useState(false)
+  const [signupError, setSignupError] = useState('')
 
   useEffect(() => {
     if (getStoredValue('lf_token')) {
@@ -72,7 +74,7 @@ export default function SignupPage() {
       if (!raw) return
       const pending = JSON.parse(raw)
       if (pending && typeof pending === 'object') {
-        setEmail(String(pending.email || ''))
+        setEmail((current) => current || String(pending.email || ''))
         setNiche(String(pending.niche || ''))
         setCompanyName(String(pending.display_name || ''))
       }
@@ -81,8 +83,20 @@ export default function SignupPage() {
     }
   }, [navigate])
 
+  useEffect(() => {
+    const error = String(searchParams.get('error') || '').trim().toLowerCase()
+    const nextEmail = String(searchParams.get('email') || '').trim().toLowerCase()
+    if (nextEmail) {
+      setEmail(nextEmail)
+    }
+    if (error === 'email_exists') {
+      setSignupError('An account with this email already exists. Please sign in.')
+    }
+  }, [searchParams])
+
   async function handleSubmit(e) {
     e.preventDefault()
+    setSignupError('')
     if (!niche) {
       return
     }
@@ -97,11 +111,29 @@ export default function SignupPage() {
     }
     setLoading(true)
     try {
+      const normalizedEmail = email.trim().toLowerCase()
+      const response = await fetch(`${API_BASE}/api/auth/check-email?email=${encodeURIComponent(normalizedEmail)}`)
+      const raw = await response.text()
+      let payload = {}
+      try {
+        payload = raw ? JSON.parse(raw) : {}
+      } catch {
+        payload = { detail: raw || 'Could not validate email.' }
+      }
+      if (!response.ok) {
+        setSignupError(String(payload?.detail || 'Could not validate email.'))
+        return
+      }
+      if (!payload?.available) {
+        setSignupError(String(payload?.detail || 'An account with this email already exists. Please sign in.'))
+        return
+      }
+
       clearAuthSession()
       localStorage.setItem(
         'lf_pending_signup',
         JSON.stringify({
-          email: email.trim().toLowerCase(),
+          email: normalizedEmail,
           password,
           niche,
           account_type: accountType,
@@ -236,6 +268,12 @@ export default function SignupPage() {
                 ))}
               </div>
             </div>
+
+            {signupError ? (
+              <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                {signupError}
+              </p>
+            ) : null}
 
             <button
               type="submit"

@@ -1,9 +1,7 @@
 -- ============================================================
 -- Sniped – Performance Indexes
--- Run once against your SQLite leads.db and/or Supabase project.
---
--- SQLite:   sqlite3 leads.db < add_indexes.sql
--- Supabase: paste into the Supabase SQL Editor and execute.
+-- Run once against your Supabase project.
+-- Paste into the Supabase SQL Editor and execute.
 -- ============================================================
 
 -- Main filter column – status is used in almost every dashboard query
