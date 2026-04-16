@@ -4058,7 +4058,12 @@ def load_supabase_settings(config_path: Path) -> dict:
 
     supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
     url = str(os.environ.get("SUPABASE_URL") or supabase_cfg.get("url", "") or "").strip()
-    database_url = str(os.environ.get("DATABASE_URL") or supabase_cfg.get("database_url", "") or "").strip()
+    database_url = str(
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("SUPABASE_DATABASE_URL")
+        or supabase_cfg.get("database_url", "")
+        or ""
+    ).strip()
     shared_key = str(os.environ.get("SUPABASE_KEY") or supabase_cfg.get("key", "") or "").strip()
     service_role_key = str(
         os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -8797,12 +8802,13 @@ def create_app() -> FastAPI:
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
+            "DATABASE_URL": "Supabase Postgres connection string (required for pgdb/worker/runtime access)",
             "OPENAI_API_KEY": "OpenAI key (required for enrichment & mail)",
         }
         _optional_env = {
             "SUPABASE_KEY": "Shared Supabase API key alias (alternative to service-role/publishable key)",
             "SUPABASE_SERVICE_ROLE_KEY": "Preferred Supabase service-role key for server-side writes",
-            "DATABASE_URL": "Supabase Postgres connection string for external tools/migrations",
+            "SUPABASE_DATABASE_URL": "Optional alias for DATABASE_URL",
             "BACKEND_URL": "Public URL of this server (used by Vercel proxy)",
             "STRIPE_SECRET_KEY": "Stripe secret key (required for billing)",
             "SMTP_HOST": "Default SMTP host (optional, can be set per-user)",
@@ -8819,6 +8825,10 @@ def create_app() -> FastAPI:
             raise RuntimeError(
                 "Supabase runtime is required. Set SUPABASE_URL plus SUPABASE_KEY "
                 "(or SUPABASE_SERVICE_ROLE_KEY / SUPABASE_PUBLISHABLE_KEY)."
+            )
+        if not supabase_settings.get("has_database_url"):
+            raise RuntimeError(
+                "Postgres runtime is required. Set DATABASE_URL or SUPABASE_DATABASE_URL to the Supabase Postgres connection string."
             )
 
         print("[startup] Initialising Supabase tables...")

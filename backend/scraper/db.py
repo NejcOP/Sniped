@@ -82,7 +82,7 @@ _SESSION_FACTORY_CACHE: dict[str, sessionmaker[Session]] = {}
 def _normalize_database_url(raw_url: str) -> str:
     url = str(raw_url or "").strip()
     if not url:
-        raise RuntimeError("SUPABASE_DATABASE_URL is required.")
+        raise RuntimeError("SUPABASE_DATABASE_URL or DATABASE_URL is required.")
     if url.startswith("postgres://"):
         return url.replace("postgres://", "postgresql+psycopg2://", 1)
     if url.startswith("postgresql://") and "+" not in url.split("://", 1)[0]:
@@ -92,10 +92,14 @@ def _normalize_database_url(raw_url: str) -> str:
 
 def get_database_url(db_path: Optional[str] = None) -> str:
     del db_path
-    configured = str(os.environ.get("SUPABASE_DATABASE_URL") or "").strip()
+    configured = str(
+        os.environ.get("SUPABASE_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or ""
+    ).strip()
     if configured:
         return _normalize_database_url(configured)
-    return _normalize_database_url(configured)
+    raise RuntimeError("SUPABASE_DATABASE_URL or DATABASE_URL is required.")
 
 
 def get_engine(db_path: Optional[str] = None) -> Any:
