@@ -15,7 +15,8 @@ import {
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import toast, { Toaster } from 'react-hot-toast'
-import { clearAuthSession, getRememberPreference, getStoredValue, setAuthSession } from './authStorage'
+import { useSearchParams } from 'react-router-dom'
+import { clearUserSession, getRememberPreference, getStoredValue, setAuthSession } from './authStorage'
 import { ALLOWED_NICHES, ACCOUNT_TYPE_OPTIONS } from './constants'
 import Footer from './Footer'
 
@@ -600,6 +601,7 @@ function DeleteAccountModal({ open, deleting, confirmText, password, onConfirmTe
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('profile')
+  const [searchParams, setSearchParams] = useSearchParams()
   const [configLoading, setConfigLoading] = useState(true)
   const [profileSaving, setProfileSaving] = useState(false)
   const [smtpSaving, setSmtpSaving] = useState(false)
@@ -633,6 +635,52 @@ export default function SettingsPage() {
   const hasToken = useMemo(() => Boolean(getStoredValue('lf_token')), [])
   const sessionToken = useMemo(() => getStoredValue('lf_token'), [])
 
+  const fetchUser = useCallback(async () => {
+    if (!sessionToken) return null
+
+    const profileData = await fetchJson('/api/auth/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sessionToken }),
+    })
+
+    setProfileForm((prev) => ({
+      ...prev,
+      email: profileData.email || '',
+      display_name: profileData.display_name || '',
+      niche: profileData.niche || 'B2B Service Provider',
+      account_type: profileData.account_type || 'entrepreneur',
+      average_deal_value: String(profileData.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
+      current_password: '',
+      new_password: '',
+      confirm_password: '',
+      delete_password: '',
+    }))
+
+    const normalizedSubscriptionStatus = String(profileData.subscriptionStatus || '').toLowerCase().trim()
+    const storedIsSubscribed = String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true'
+    const storedPlanName = String(getStoredValue('lf_plan_name') || '').trim()
+    const storedCredits = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
+    const storedCreditsLimit = Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT)
+    const isSubscribed = Boolean(profileData.isSubscribed)
+      || (normalizedSubscriptionStatus
+        ? ['active', 'paid', 'trialing'].includes(normalizedSubscriptionStatus)
+        : Boolean(profileData.subscription_active))
+      || storedIsSubscribed
+
+    setBillingSnapshot({
+      isSubscribed,
+      planName: String(profileData.currentPlanName || storedPlanName || (isSubscribed ? 'Pro Plan' : 'Free Plan')).trim(),
+      credits: Number(profileData.credits ?? profileData.credits_balance ?? storedCredits ?? 0),
+      creditsLimit: Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? storedCreditsLimit ?? DEFAULT_FREE_CREDIT_LIMIT),
+      subscriptionStatus: String(profileData.subscription_status || profileData.subscriptionStatus || '').trim().toLowerCase() || (storedIsSubscribed ? 'active' : ''),
+      subscriptionCancelAt: profileData.subscription_cancel_at || null,
+      subscriptionCancelAtPeriodEnd: Boolean(profileData.subscription_cancel_at_period_end),
+    })
+
+    return profileData
+  }, [sessionToken])
+
   useEffect(() => {
     if (!hasToken) {
       window.location.assign('/login')
@@ -645,11 +693,7 @@ export default function SettingsPage() {
       try {
         const [config, profileData] = await Promise.all([
           fetchJson('/api/config'),
-          fetchJson('/api/auth/profile', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: sessionToken }),
-          }),
+          fetchUser(),
         ])
 
         if (ignore) return
@@ -667,49 +711,7 @@ export default function SettingsPage() {
             : [createDefaultSmtp()],
         )
 
-        setProfileForm((prev) => ({
-          ...prev,
-          email: profileData.email || '',
-          display_name: profileData.display_name || '',
-          niche: profileData.niche || 'B2B Service Provider',
-          account_type: profileData.account_type || 'entrepreneur',
-          average_deal_value: String(profileData.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
-          current_password: '',
-          new_password: '',
-          confirm_password: '',
-          delete_password: '',
-        }))
-
-        const normalizedSubscriptionStatus = String(profileData.subscriptionStatus || '').toLowerCase().trim()
-        const storedIsSubscribed = String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true'
-        const storedPlanName = String(getStoredValue('lf_plan_name') || '').trim()
-        const storedCredits = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
-        const storedCreditsLimit = Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT)
-        const isSubscribed = Boolean(profileData.isSubscribed)
-          || (normalizedSubscriptionStatus
-            ? ['active', 'paid', 'trialing'].includes(normalizedSubscriptionStatus)
-            : Boolean(profileData.subscription_active))
-          || storedIsSubscribed
-
-        const backendPlanLooksFree = String(profileData.currentPlanName || '').trim().toLowerCase() === 'free plan'
-          || String(profileData.plan_key || '').trim().toLowerCase() === 'free'
-        const preferStoredPaidSnapshot = storedIsSubscribed && backendPlanLooksFree
-
-        setBillingSnapshot({
-          isSubscribed,
-          planName: preferStoredPaidSnapshot
-            ? (storedPlanName || 'Pro Plan')
-            : String(profileData.currentPlanName || storedPlanName || (isSubscribed ? 'Pro Plan' : 'Free Plan')).trim(),
-          credits: preferStoredPaidSnapshot
-            ? Math.max(storedCredits, Number(profileData.credits ?? profileData.credits_balance ?? 0))
-            : Number(profileData.credits ?? profileData.credits_balance ?? storedCredits ?? 0),
-          creditsLimit: preferStoredPaidSnapshot
-            ? Math.max(storedCreditsLimit, Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? 0))
-            : Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? storedCreditsLimit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          subscriptionStatus: String(profileData.subscription_status || profileData.subscriptionStatus || '').trim().toLowerCase() || (storedIsSubscribed ? 'active' : ''),
-          subscriptionCancelAt: profileData.subscription_cancel_at || null,
-          subscriptionCancelAtPeriodEnd: Boolean(profileData.subscription_cancel_at_period_end),
-        })
+        void profileData
       } catch (error) {
         if (!ignore) {
           toast.error(error.message || 'Failed to load settings')
@@ -724,7 +726,35 @@ export default function SettingsPage() {
     return () => {
       ignore = true
     }
-  }, [hasToken, sessionToken])
+  }, [fetchUser, hasToken, sessionToken])
+
+  useEffect(() => {
+    if (!sessionToken) return
+    if (String(searchParams.get('payment') || '').trim().toLowerCase() !== 'success') return
+
+    let cancelled = false
+
+    const refreshAfterPayment = async () => {
+      try {
+        await fetchUser()
+        if (cancelled) return
+        toast.success('Payment successful. Billing updated.')
+        const nextParams = new URLSearchParams(searchParams)
+        nextParams.delete('payment')
+        setSearchParams(nextParams, { replace: true })
+      } catch (error) {
+        if (!cancelled) {
+          toast.error(error.message || 'Failed to refresh billing data')
+        }
+      }
+    }
+
+    void refreshAfterPayment()
+
+    return () => {
+      cancelled = true
+    }
+  }, [fetchUser, searchParams, sessionToken, setSearchParams])
 
   const updateProfileField = useCallback((field, value) => {
     setProfileForm((prev) => ({ ...prev, [field]: value }))
@@ -746,7 +776,7 @@ export default function SettingsPage() {
   }, [])
 
   const signOut = useCallback(() => {
-    clearAuthSession()
+    clearUserSession()
     localStorage.removeItem('lf_pending_signup')
     window.location.assign('/login')
   }, [])
@@ -946,7 +976,7 @@ export default function SettingsPage() {
         }),
       })
 
-      clearAuthSession()
+      clearUserSession()
       localStorage.removeItem('lf_pending_signup')
       toast.success('Account deleted successfully.')
       window.setTimeout(() => {

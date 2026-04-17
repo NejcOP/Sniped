@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import { Zap, Copy, RefreshCw, LogOut, Sparkles, Info, Check } from 'lucide-react'
-import { clearAuthSession, getStoredValue, setAuthSession } from './authStorage'
+import { clearUserSession, getStoredValue, setAuthSession } from './authStorage'
 import { NICHE_HINTS } from './constants'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
@@ -64,7 +64,7 @@ export default function ColdEmailOpenerPage() {
   }, [token, pendingSignup, navigate])
 
   function handleLogout() {
-    clearAuthSession()
+    clearUserSession()
     localStorage.removeItem('lf_pending_signup')
     navigate('/login')
   }
@@ -138,6 +138,7 @@ export default function ColdEmailOpenerPage() {
         }
 
         // Step 2: store session
+        clearUserSession()
         setAuthSession({
           lf_token: regData.token,
           lf_niche: regData.niche,

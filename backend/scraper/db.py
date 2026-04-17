@@ -77,6 +77,9 @@ class LeadRecord(Base):
 
 _ENGINE_CACHE: dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: dict[str, sessionmaker[Session]] = {}
+DEFAULT_DB_POOL_SIZE = max(1, int(os.environ.get("DB_POOL_SIZE", "4")))
+DEFAULT_DB_MAX_OVERFLOW = max(0, int(os.environ.get("DB_MAX_OVERFLOW", "2")))
+DEFAULT_DB_POOL_RECYCLE = max(60, int(os.environ.get("DB_POOL_RECYCLE", "1800")))
 
 
 def _normalize_database_url(raw_url: str) -> str:
@@ -107,9 +110,27 @@ def get_engine(db_path: Optional[str] = None) -> Any:
     cached = _ENGINE_CACHE.get(database_url)
     if cached is not None:
         return cached
-    engine = create_engine(database_url, future=True, pool_pre_ping=True)
+    engine = create_engine(
+        database_url,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=DEFAULT_DB_POOL_SIZE,
+        max_overflow=DEFAULT_DB_MAX_OVERFLOW,
+        pool_recycle=DEFAULT_DB_POOL_RECYCLE,
+        pool_use_lifo=True,
+    )
     _ENGINE_CACHE[database_url] = engine
     return engine
+
+
+def dispose_cached_engines() -> None:
+    for engine in list(_ENGINE_CACHE.values()):
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+    _ENGINE_CACHE.clear()
+    _SESSION_FACTORY_CACHE.clear()
 
 
 def get_session_factory(db_path: Optional[str] = None) -> sessionmaker[Session]:

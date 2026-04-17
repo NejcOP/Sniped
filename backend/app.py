@@ -478,6 +478,9 @@ STRIPE_SUBSCRIPTION_PLANS: dict[str, dict[str, Any]] = {
         "display_name": "The Empire",
     },
 }
+
+STRIPE_SETTINGS_SUCCESS_URL = "https://sniped-one.vercel.app/app?tab=settings&payment=success"
+STRIPE_SETTINGS_CANCEL_URL = "https://sniped-one.vercel.app/app?tab=settings&payment=cancelled"
 STRIPE_PRICE_ID_TO_PLAN: dict[str, dict[str, Any]] = {
     str(config.get("price_id") or "").strip(): {"plan_key": key, **config}
     for key, config in STRIPE_SUBSCRIPTION_PLANS.items()
@@ -3488,6 +3491,7 @@ def recover_billing_snapshot_from_stripe(
     stripe_customer_id: Optional[str] = None,
     fallback_plan_key: str = "free",
     config_path: Path = DEFAULT_CONFIG_PATH,
+    allow_email_lookup: bool = False,
 ) -> dict[str, Any]:
     normalized_email = str(user_email or "").strip().lower()
     customer_id = str(stripe_customer_id or "").strip()
@@ -3495,7 +3499,7 @@ def recover_billing_snapshot_from_stripe(
     if not get_stripe_secret_key(config_path):
         return {}
 
-    if not customer_id and normalized_email:
+    if not customer_id and allow_email_lookup and normalized_email:
         customer_payload = _stripe_api_get_json(
             "customers",
             params={"email": normalized_email, "limit": 1},
@@ -3630,6 +3634,7 @@ def recover_pending_topup_credits_from_stripe(
     stripe_customer_id: Optional[str] = None,
     updated_at_raw: Optional[str] = None,
     config_path: Path = DEFAULT_CONFIG_PATH,
+    allow_email_lookup: bool = False,
 ) -> dict[str, Any]:
     normalized_user_id = str(user_id or "").strip()
     normalized_email = str(user_email or "").strip().lower()
@@ -3638,7 +3643,7 @@ def recover_pending_topup_credits_from_stripe(
     if not get_stripe_secret_key(config_path):
         return {}
 
-    if not customer_id and normalized_email:
+    if not customer_id and allow_email_lookup and normalized_email:
         customer_payload = _stripe_api_get_json(
             "customers",
             params={"email": normalized_email, "limit": 1},
@@ -4205,7 +4210,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         display_name TEXT NOT NULL DEFAULT '',
         contact_name TEXT NOT NULL DEFAULT '',
         token TEXT UNIQUE,
-        credits_balance BIGINT NOT NULL DEFAULT 0,
+        credits_balance BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         monthly_quota BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         credits_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         monthly_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
@@ -4231,7 +4236,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS contact_name TEXT NOT NULL DEFAULT '';
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS niche TEXT NOT NULL DEFAULT 'B2B Service Provider';
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS token TEXT;
-    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_balance BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_balance BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_quota BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
@@ -4250,6 +4255,11 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT NOW()::text;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TEXT;
+    ALTER TABLE public.users ALTER COLUMN credits_balance SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
+    ALTER TABLE public.users ALTER COLUMN monthly_quota SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
+    ALTER TABLE public.users ALTER COLUMN credits_limit SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
+    ALTER TABLE public.users ALTER COLUMN monthly_limit SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
+    ALTER TABLE public.users ALTER COLUMN plan_key SET DEFAULT 'free';
 
     UPDATE public.users
     SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})
@@ -4263,6 +4273,12 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     SET monthly_limit = monthly_quota,
         credits_limit = monthly_quota
     WHERE monthly_quota > 0;
+
+        UPDATE public.users
+        SET credits_balance = COALESCE(NULLIF(credits_balance, 0), NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})
+        WHERE COALESCE(NULLIF(plan_key, ''), 'free') = 'free'
+            AND COALESCE(subscription_active, FALSE) = FALSE
+            AND COALESCE(credits_balance, 0) <= 0;
 
     UPDATE public.users
     SET topup_credits_balance = COALESCE(topup_credits_balance, 0)
@@ -11579,11 +11595,13 @@ def create_app() -> FastAPI:
             extras_plan_key = _normalize_plan_key(extras.get("plan_key"), fallback="free")
             extras_is_paid = _coerce_subscription_active(extras.get("subscription_active")) or extras_plan_key != "free"
             if not extras_is_paid:
+                stripe_customer_id = str(extras.get("stripe_customer_id") or "").strip()
                 stripe_recovered = recover_billing_snapshot_from_stripe(
-                    user_email=base_row.get("email"),
-                    stripe_customer_id=extras.get("stripe_customer_id"),
+                    user_email=base_row.get("email") if stripe_customer_id else None,
+                    stripe_customer_id=stripe_customer_id,
                     fallback_plan_key="pro",
                     config_path=DEFAULT_CONFIG_PATH,
+                    allow_email_lookup=False,
                 )
                 if stripe_recovered and bool(stripe_recovered.get("subscription_active")):
                     recovered_limit = max(
@@ -11616,12 +11634,14 @@ def create_app() -> FastAPI:
                     except Exception:
                         pass
 
+            stripe_customer_id = str(extras.get("stripe_customer_id") or "").strip()
             pending_topup = recover_pending_topup_credits_from_stripe(
                 user_id=base_row.get("id"),
-                user_email=base_row.get("email"),
-                stripe_customer_id=extras.get("stripe_customer_id"),
+                user_email=base_row.get("email") if stripe_customer_id else None,
+                stripe_customer_id=stripe_customer_id,
                 updated_at_raw=extras.get("updated_at"),
                 config_path=DEFAULT_CONFIG_PATH,
+                allow_email_lookup=False,
             )
             recovered_topup_delta = max(0, _safe_int(pending_topup.get("credits_delta"), 0))
             if recovered_topup_delta > 0:
@@ -11753,11 +11773,13 @@ def create_app() -> FastAPI:
         stored_plan_key = _normalize_plan_key(row_data.get("plan_key"), fallback="free")
         stored_is_paid = _coerce_subscription_active(row_data.get("subscription_active")) or stored_plan_key != "free"
         if not stored_is_paid:
+            stripe_customer_id = str(row_data.get("stripe_customer_id") or "").strip()
             stripe_recovered = recover_billing_snapshot_from_stripe(
-                user_email=row_data.get("email"),
-                stripe_customer_id=row_data.get("stripe_customer_id"),
+                user_email=row_data.get("email") if stripe_customer_id else None,
+                stripe_customer_id=stripe_customer_id,
                 fallback_plan_key="pro",
                 config_path=DEFAULT_CONFIG_PATH,
+                allow_email_lookup=False,
             )
             if stripe_recovered and bool(stripe_recovered.get("subscription_active")):
                 recovered_limit = max(
@@ -11826,12 +11848,14 @@ def create_app() -> FastAPI:
                 )
                 store_runtime_billing_snapshot(row_data.get("id"), row_data.get("email"), row_data)
 
+        stripe_customer_id = str(row_data.get("stripe_customer_id") or "").strip()
         pending_topup = recover_pending_topup_credits_from_stripe(
             user_id=row_data.get("id"),
-            user_email=row_data.get("email"),
-            stripe_customer_id=row_data.get("stripe_customer_id"),
+            user_email=row_data.get("email") if stripe_customer_id else None,
+            stripe_customer_id=stripe_customer_id,
             updated_at_raw=row_data.get("updated_at"),
             config_path=DEFAULT_CONFIG_PATH,
+            allow_email_lookup=False,
         )
         recovered_topup_delta = max(0, _safe_int(pending_topup.get("credits_delta"), 0))
         if recovered_topup_delta > 0:
@@ -13480,17 +13504,8 @@ def create_app() -> FastAPI:
         if not plan:
             raise HTTPException(status_code=400, detail="Invalid subscription plan.")
 
-        checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
-        success_url = build_checkout_app_redirect_url(
-            checkout_app_base_url,
-            checkout_status="success",
-            plan_key=plan_key,
-        )
-        cancel_url = build_checkout_app_redirect_url(
-            checkout_app_base_url,
-            checkout_status="cancel",
-            plan_key=plan_key,
-        )
+        success_url = STRIPE_SETTINGS_SUCCESS_URL
+        cancel_url = STRIPE_SETTINGS_CANCEL_URL
 
         logging.info(
             "Creating Stripe subscription checkout session: user_id=%s plan_id=%s price_id=%s success_url=%s cancel_url=%s stripe_customer_id_present=%s",
@@ -13540,17 +13555,8 @@ def create_app() -> FastAPI:
         package = STRIPE_TOP_UP_PACKAGES.get(package_key, {})
         package_credits = max(0, int(package.get("credits") or 0))
 
-        checkout_app_base_url = get_stripe_checkout_app_base_url(DEFAULT_CONFIG_PATH, request=request)
-        success_url = build_checkout_app_redirect_url(
-            checkout_app_base_url,
-            topup_status="success",
-            package_key=package_key,
-            package_credits=package_credits,
-        )
-        cancel_url = build_checkout_app_redirect_url(
-            checkout_app_base_url,
-            topup_status="cancel",
-        )
+        success_url = STRIPE_SETTINGS_SUCCESS_URL
+        cancel_url = STRIPE_SETTINGS_CANCEL_URL
 
         checkout_url = create_stripe_topup_checkout_session(
             user_id=user_id,

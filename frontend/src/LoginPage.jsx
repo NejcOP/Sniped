@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Zap, Mail, Lock, LogIn, Eye, EyeOff } from 'lucide-react'
-import { getRememberPreference, getRememberedEmail, getStoredValue, setAuthSession, setRememberedEmail } from './authStorage'
+import { clearBillingCache, getRememberPreference, getRememberedEmail, getStoredValue, setAuthSession, setRememberedEmail } from './authStorage'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
 export default function LoginPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [email, setEmail] = useState(() => getRememberedEmail())
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -14,12 +15,30 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [loginError, setLoginError] = useState('')
 
+  const redirectTarget = (() => {
+    const rawRedirect = String(searchParams.get('redirect') || '').trim()
+    if (!rawRedirect.startsWith('/')) return '/app'
+    try {
+      const parsed = new URL(rawRedirect, window.location.origin)
+      if (parsed.pathname !== '/app') return '/app'
+      const nextParams = new URLSearchParams()
+      const tab = String(parsed.searchParams.get('tab') || '').trim().toLowerCase()
+      if (tab) {
+        nextParams.set('tab', tab)
+      }
+      const nextQuery = nextParams.toString()
+      return nextQuery ? `/app?${nextQuery}` : '/app'
+    } catch {
+      return '/app'
+    }
+  })()
+
   useEffect(() => {
     const existingToken = getStoredValue('lf_token')
     if (existingToken) {
-      navigate('/app', { replace: true })
+      navigate(redirectTarget, { replace: true })
     }
-  }, [navigate])
+  }, [navigate, redirectTarget])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -42,6 +61,7 @@ export default function LoginPage() {
         setLoginError('Wrong email or password.')
         return
       }
+      clearBillingCache()
       setAuthSession(
         {
           lf_token: data.token,
@@ -56,7 +76,7 @@ export default function LoginPage() {
       setRememberedEmail(data.email, rememberMe)
       // Clear any pending signup data to avoid auth race conditions
       localStorage.removeItem('lf_pending_signup')
-      navigate('/app')
+      navigate(redirectTarget, { replace: true })
     } catch {
       setLoginError('Could not connect to the server. Please try again.')
       return

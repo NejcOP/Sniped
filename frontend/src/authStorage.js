@@ -1,4 +1,14 @@
 const AUTH_KEYS = ['lf_token', 'lf_niche', 'lf_email', 'lf_display_name', 'lf_contact_name', 'lf_account_type', 'lf_average_deal_value']
+const BILLING_KEYS = [
+  'lf_credits',
+  'lf_credits_balance',
+  'lf_topup_credits_balance',
+  'lf_credits_limit',
+  'lf_is_subscribed',
+  'lf_plan_name',
+  'lf_plan_key',
+  'lf_pending_checkout_plan',
+]
 const REMEMBER_KEY = 'lf_remember_me'
 const REMEMBERED_EMAIL_KEY = 'lf_remembered_email'
 
@@ -41,6 +51,18 @@ export function clearAuthSession() {
     getStorage('local')?.removeItem(key)
     getStorage('session')?.removeItem(key)
   })
+}
+
+export function clearBillingCache() {
+  BILLING_KEYS.forEach((key) => {
+    getStorage('local')?.removeItem(key)
+    getStorage('session')?.removeItem(key)
+  })
+}
+
+export function clearUserSession() {
+  clearAuthSession()
+  clearBillingCache()
 }
 
 export function getRememberPreference() {

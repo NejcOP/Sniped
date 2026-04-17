@@ -12,7 +12,7 @@ executors write status + results back to the same table.
 
 Environment keys read:
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-  WORKER_CONCURRENCY  (default 5, max 10)
+    WORKER_CONCURRENCY  (default 3, max 6)
   WORKER_POLL_INTERVAL  (seconds between polls, default 2)
   WORKER_ID  (optional label, auto-generated if not set)
 """
@@ -20,6 +20,7 @@ Environment keys read:
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -48,7 +49,7 @@ from backend.app import (
     get_task_executor,
     is_supabase_primary_enabled,
 )
-from backend.scraper.db import get_engine
+from backend.scraper.db import dispose_cached_engines, get_engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +60,7 @@ log = logging.getLogger("worker")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MAX_CONCURRENT: int = max(1, min(10, int(os.environ.get("WORKER_CONCURRENCY", "5"))))
+MAX_CONCURRENT: int = max(1, min(6, int(os.environ.get("WORKER_CONCURRENCY", "3"))))
 POLL_INTERVAL: float = float(os.environ.get("WORKER_POLL_INTERVAL", "2"))
 WORKER_ID: str = os.environ.get("WORKER_ID", f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}")
 BACKOFF_BASE: float = 1.5        # exponential backoff base (seconds)
@@ -252,10 +253,12 @@ async def process_task(task: dict[str, Any], semaphore: asyncio.Semaphore) -> No
             log.error("System task %s crashed in worker", task_id, exc_info=True)
         finally:
             _record_task_outcome(task_id, task_type)
+            gc.collect()
 
 
 async def poll_loop() -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    in_flight_tasks: set[asyncio.Task[Any]] = set()
     consecutive_empty = 0
     log.info(
         "Worker %s started | concurrency=%d | poll_interval=%.1fs | primary_mode=%s",
@@ -271,31 +274,39 @@ async def poll_loop() -> None:
                 continue
 
             _update_worker_heartbeat()
-            # Only claim as many slots as are currently free
-            free_slots = MAX_CONCURRENT - (MAX_CONCURRENT - semaphore._value)  # noqa: SLF001
-            tasks = _claim_next_tasks_postgres(batch=max(1, free_slots)) if semaphore._value > 0 else []  # noqa: SLF001
+            in_flight_tasks = {task for task in in_flight_tasks if not task.done()}
+            free_slots = max(0, MAX_CONCURRENT - len(in_flight_tasks))
+            tasks = _claim_next_tasks_postgres(batch=free_slots) if free_slots > 0 else []
 
             if tasks:
                 consecutive_empty = 0
                 _runtime_upsert(f"worker:{WORKER_ID}:status", "busy")
                 for task in tasks:
-                    asyncio.create_task(process_task(task, semaphore))
+                    background_task = asyncio.create_task(process_task(task, semaphore))
+                    in_flight_tasks.add(background_task)
             else:
                 consecutive_empty += 1
                 _runtime_upsert(f"worker:{WORKER_ID}:status", "idle")
 
             # Exponential backoff when queue is consistently empty (up to BACKOFF_MAX)
             sleep_time = min(POLL_INTERVAL * (BACKOFF_BASE ** min(consecutive_empty, 8)), BACKOFF_MAX) if consecutive_empty > 3 else POLL_INTERVAL
+            gc.collect()
             await asyncio.sleep(sleep_time)
 
         except KeyboardInterrupt:
             _runtime_upsert(f"worker:{WORKER_ID}:status", "stopped")
             log.info("Worker %s shutting down.", WORKER_ID)
+            if in_flight_tasks:
+                await asyncio.gather(*in_flight_tasks, return_exceptions=True)
+            dispose_cached_engines()
             break
         except Exception as exc:
             log.error("Poll loop error: %s", exc, exc_info=True)
             _runtime_upsert(f"worker:{WORKER_ID}:status", "error")
+            gc.collect()
             await asyncio.sleep(POLL_INTERVAL * 2)
+
+    dispose_cached_engines()
 
 
 if __name__ == "__main__":

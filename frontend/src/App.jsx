@@ -1641,6 +1641,8 @@ function TaskManagerCard({
 }
 
 function App({ initialTab = 'leads' }) {
+  const sessionToken = getStoredValue('lf_token')
+  const hasSessionToken = Boolean(sessionToken)
   const displayName = getStoredValue('lf_display_name') || getStoredValue('lf_email') || 'there'
   const currentUserEmail = getStoredValue('lf_email') || ''
   const currentUserName = getStoredValue('lf_display_name') || getStoredValue('lf_contact_name') || ''
@@ -1953,6 +1955,15 @@ function App({ initialTab = 'leads' }) {
   const workflowRef = useRef(null)
   const mainPanelRef = useRef(null)
   const pendingDeletesRef = useRef({})
+
+  useEffect(() => {
+    if (hasSessionToken) return
+    const rawSearch = new URLSearchParams(window.location.search || '')
+    const activeTab = String(rawSearch.get('tab') || '').trim().toLowerCase()
+    const cleanAppTarget = activeTab ? `/app?tab=${encodeURIComponent(activeTab)}` : '/app'
+    const nextUrl = `/login?redirect=${encodeURIComponent(cleanAppTarget)}`
+    window.location.replace(nextUrl)
+  }, [hasSessionToken])
   const taskFetchFailCountRef = useRef(0)
   const taskFetchBackoffUntilRef = useRef(0)
 
@@ -5444,6 +5455,23 @@ function App({ initialTab = 'leads' }) {
     if (expectedReplyRate >= 3) return '$30k+'
     return '$15k+'
   }, [activeMarketPick?.expected_reply_rate, nicheAdvice.data?.top_pick?.expected_reply_rate])
+  if (!hasSessionToken) {
+    return (
+      <div className="app-root min-h-screen flex items-center justify-center bg-[#07111f] px-6 text-slate-100">
+        <Toaster
+          position="top-right"
+          toastOptions={{
+            duration: 3500,
+            style: { background: '#1e2a3a', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px' },
+          }}
+        />
+        <div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-5 text-center shadow-2xl backdrop-blur-sm">
+          <p className="text-sm font-medium text-white">Session required</p>
+          <p className="mt-1 text-sm text-slate-400">Redirecting to login…</p>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="app-root">
       <Toaster

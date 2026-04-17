@@ -1,7 +1,7 @@
 import { createElement, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Zap, Mail, Lock, UserPlus, Briefcase, User, Building2, ArrowLeft, Eye, EyeOff } from 'lucide-react'
-import { clearAuthSession, getStoredValue } from './authStorage'
+import { clearUserSession, getStoredValue } from './authStorage'
 import { ALLOWED_NICHES, NICHE_DESCRIPTIONS, ACCOUNT_TYPE_LABELS } from './constants'
 
 const NICHES = ALLOWED_NICHES
@@ -129,7 +129,7 @@ export default function SignupPage() {
         return
       }
 
-      clearAuthSession()
+      clearUserSession()
       localStorage.setItem(
         'lf_pending_signup',
         JSON.stringify({
