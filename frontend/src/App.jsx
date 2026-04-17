@@ -394,7 +394,6 @@ const TOP_UP_PACKAGE_OPTIONS = TOP_UP_PACKAGES.map((pkg) => ({
   ...pkg,
   label: `${pkg.credits.toLocaleString('en-US')} Credits - $${Number(pkg.priceUsd || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
 }))
-const TOPUP_SESSION_CACHE_TTL_MS = 8 * 60 * 1000
 const formatUsd = (value) => Number(value || 0).toLocaleString('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
@@ -1814,7 +1813,6 @@ function App({ initialTab = 'leads' }) {
   const [topUpLoadingPackageId, setTopUpLoadingPackageId] = useState('')
   const [topUpPreparingPackageId, setTopUpPreparingPackageId] = useState('')
   const [selectedTopUpPackageId, setSelectedTopUpPackageId] = useState(TOP_UP_PACKAGES[3]?.id || TOP_UP_PACKAGES[0]?.id || '')
-  const topUpCheckoutCacheRef = useRef({})
   const topUpCheckoutInFlightRef = useRef({})
   const [animatedCreditsPercent, setAnimatedCreditsPercent] = useState(0)
   const [showSaleModal, setShowSaleModal] = useState(false)
@@ -3356,15 +3354,9 @@ function App({ initialTab = 'leads' }) {
     user?.topup_credits_balance,
   ])
 
-  const requestTopUpCheckoutUrl = useCallback(async (rawPackageId, { markPreparing = false, allowCache = true } = {}) => {
+  const requestTopUpCheckoutUrl = useCallback(async (rawPackageId, { markPreparing = false } = {}) => {
     const packageId = String(rawPackageId || '').trim()
     if (!packageId) return ''
-
-    const now = Date.now()
-    const cached = topUpCheckoutCacheRef.current[packageId]
-    if (allowCache && cached && (now - Number(cached.ts || 0)) < TOPUP_SESSION_CACHE_TTL_MS && cached.url) {
-      return String(cached.url)
-    }
 
     const existingPromise = topUpCheckoutInFlightRef.current[packageId]
     if (existingPromise) {
@@ -3381,11 +3373,7 @@ function App({ initialTab = 'leads' }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ package_id: packageId }),
       })
-      const checkoutUrl = String(data?.url || '').trim()
-      if (checkoutUrl) {
-        topUpCheckoutCacheRef.current[packageId] = { url: checkoutUrl, ts: Date.now() }
-      }
-      return checkoutUrl
+      return String(data?.url || '').trim()
     })()
 
     topUpCheckoutInFlightRef.current[packageId] = sessionPromise
@@ -3402,7 +3390,7 @@ function App({ initialTab = 'leads' }) {
 
   const handleTopUpClick = useCallback(async () => {
     setShowTopUpModal(true)
-    void requestTopUpCheckoutUrl(selectedTopUpPackageId, { markPreparing: false, allowCache: true })
+    void requestTopUpCheckoutUrl(selectedTopUpPackageId, { markPreparing: false })
   }, [requestTopUpCheckoutUrl, selectedTopUpPackageId])
 
   const closeTopUpModal = useCallback(() => {
@@ -3416,7 +3404,7 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     if (!showTopUpModal || !selectedTopUpPackageId) return
     const timer = window.setTimeout(() => {
-      void requestTopUpCheckoutUrl(selectedTopUpPackageId, { markPreparing: false, allowCache: true })
+      void requestTopUpCheckoutUrl(selectedTopUpPackageId, { markPreparing: false })
     }, 120)
     return () => window.clearTimeout(timer)
   }, [showTopUpModal, selectedTopUpPackageId, requestTopUpCheckoutUrl])
@@ -3454,7 +3442,7 @@ function App({ initialTab = 'leads' }) {
     const normalizedPackageId = String(packageId || '').trim()
     setTopUpLoadingPackageId(normalizedPackageId)
     try {
-      const checkoutUrl = await requestTopUpCheckoutUrl(normalizedPackageId, { markPreparing: true, allowCache: true })
+      const checkoutUrl = await requestTopUpCheckoutUrl(normalizedPackageId, { markPreparing: true })
       if (checkoutUrl) {
         navigateToCheckoutWithFallback(checkoutUrl)
         return
