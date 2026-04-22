@@ -238,6 +238,8 @@ class GoogleMapsScraper:
         keyword: str,
         max_results: int,
         progress_callback: Optional[Callable[[int, int, int, Optional[Lead]], None]] = None,
+        max_runtime_seconds: int = 300,
+        stall_timeout_seconds: int = 45,
     ) -> List[Lead]:
         if not self.page:
             raise RuntimeError("Scraper not started. Use with-context or call start().")
@@ -247,8 +249,21 @@ class GoogleMapsScraper:
         seen_cards = set()
         stalled_rounds = 0
         scanned_count = 0
+        started_at = time.monotonic()
+        last_progress_at = started_at
 
         while len(leads) < max_results and stalled_rounds < 8:
+            elapsed_seconds = time.monotonic() - started_at
+            if elapsed_seconds >= max(30, int(max_runtime_seconds or 0)):
+                logging.warning(
+                    "Stopping Maps scrape after runtime limit: found=%s target=%s scanned=%s elapsed=%ss",
+                    len(leads),
+                    max_results,
+                    scanned_count,
+                    int(elapsed_seconds),
+                )
+                break
+
             cards = self.page.locator("div.Nv2PK, div[role='article']")
             count = cards.count()
             before_seen = len(seen_cards)
@@ -264,6 +279,7 @@ class GoogleMapsScraper:
 
                 seen_cards.add(card_key)
                 scanned_count += 1
+                last_progress_at = time.monotonic()
                 if progress_callback is not None:
                     try:
                         progress_callback(len(leads), max_results, scanned_count, None)
@@ -278,6 +294,7 @@ class GoogleMapsScraper:
 
                 if lead.business_name and lead.address:
                     leads.append(lead)
+                    last_progress_at = time.monotonic()
                     if progress_callback is not None:
                         try:
                             progress_callback(len(leads), max_results, scanned_count, lead)
@@ -289,6 +306,32 @@ class GoogleMapsScraper:
 
             if len(seen_cards) == before_seen:
                 stalled_rounds += 1
+                stall_elapsed = time.monotonic() - last_progress_at
+                logging.info(
+                    "Maps scrape stalled round=%s/%s found=%s target=%s scanned=%s idle=%ss",
+                    stalled_rounds,
+                    8,
+                    len(leads),
+                    max_results,
+                    scanned_count,
+                    int(stall_elapsed),
+                )
+
+                if progress_callback is not None:
+                    try:
+                        progress_callback(len(leads), max_results, scanned_count, None)
+                    except Exception:
+                        logging.debug("Progress callback failed during stalled round heartbeat.")
+
+                if stall_elapsed >= max(10, int(stall_timeout_seconds or 0)):
+                    logging.warning(
+                        "Stopping Maps scrape after stall timeout: found=%s target=%s scanned=%s idle=%ss",
+                        len(leads),
+                        max_results,
+                        scanned_count,
+                        int(stall_elapsed),
+                    )
+                    break
             else:
                 stalled_rounds = 0
 

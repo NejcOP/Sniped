@@ -7569,8 +7569,16 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             )
 
         def _scrape_once(headless_value: bool):
+            scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
+            scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
             logging.info("[scrape-task:%s] Navigating to Google Maps search...", task_id)
+            logging.info(
+                "[scrape-task:%s] Scrape limits | max_runtime_seconds=%s stall_timeout_seconds=%s",
+                task_id,
+                scrape_runtime_limit,
+                scrape_stall_limit,
+            )
             with GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
@@ -7582,6 +7590,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     keyword=str(payload_data.get("keyword", "")),
                     max_results=int(payload_data.get("results", 25)),
                     progress_callback=_on_progress,
+                    max_runtime_seconds=scrape_runtime_limit,
+                    stall_timeout_seconds=scrape_stall_limit,
                 )
 
         try:
