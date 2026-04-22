@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import re
 import time
@@ -59,6 +60,18 @@ class GoogleMapsScraper:
         self._browser = None
         self._context = None
         self.page: Optional[Page] = None
+
+    @staticmethod
+    def _should_abort_resource(request) -> bool:
+        resource_type = str(getattr(request, "resource_type", "") or "").lower()
+        if resource_type in {"image", "media", "font"}:
+            return True
+
+        if str(os.environ.get("SCRAPE_BLOCK_STYLESHEETS", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}:
+            if resource_type == "stylesheet":
+                return True
+
+        return False
 
     def _next_proxy(self) -> str:
         """Return the next proxy from the rotation pool (round-robin)."""
@@ -170,7 +183,15 @@ class GoogleMapsScraper:
             context_kwargs["proxy"] = proxy_config
 
         self._context = self._browser.new_context(**context_kwargs)
+        if self.headless:
+            # In headless mode, block heavy assets to reduce bandwidth and page load time.
+            self._context.route(
+                "**/*",
+                lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
+            )
         self.page = self._context.new_page()
+        self.page.set_default_timeout(6000)
+        self.page.set_default_navigation_timeout(12000)
         self._apply_stealth()
         self._handle_startup_consent()
 

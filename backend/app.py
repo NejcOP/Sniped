@@ -7626,7 +7626,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 progress_state["deep_total"] = len([lead for lead in leads if str(getattr(lead, "website_url", "") or "").strip() not in {"", "None", "none"}])
                 update_task_progress(db_path, task_id, progress_state)
 
-                deep_crawl_concurrency = max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "6") or "6"))
+                deep_crawl_concurrency = min(10, max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "8") or "8")))
                 deep_crawl_timeout = max(4, int(os.environ.get("SCRAPE_DEEP_CRAWL_TIMEOUT_SECONDS", "12") or "12"))
 
                 def _on_deep_crawl_progress(done_count: int, total_count: int, lead_name: Optional[str]) -> None:
