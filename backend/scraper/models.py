@@ -15,3 +15,10 @@ class Lead:
     linkedin_url: Optional[str] = None
     instagram_url: Optional[str] = None
     facebook_url: Optional[str] = None
+    tiktok_url: Optional[str] = None
+    ig_link: Optional[str] = None
+    fb_link: Optional[str] = None
+    has_pixel: Optional[bool] = None
+    tech_stack: Optional[str] = None
+    email: Optional[str] = None
+    qualification_score: Optional[float] = None

@@ -45,6 +45,11 @@ class LeadRecord(Base):
     linkedin_url: Mapped[Optional[str]] = mapped_column(Text)
     instagram_url: Mapped[Optional[str]] = mapped_column(Text)
     facebook_url: Mapped[Optional[str]] = mapped_column(Text)
+    tiktok_url: Mapped[Optional[str]] = mapped_column(Text)
+    ig_link: Mapped[Optional[str]] = mapped_column(Text)
+    fb_link: Mapped[Optional[str]] = mapped_column(Text)
+    has_pixel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    tech_stack: Mapped[Optional[str]] = mapped_column(Text)
     insecure_site: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     main_shortcoming: Mapped[Optional[str]] = mapped_column(Text)
     ai_description: Mapped[Optional[str]] = mapped_column(Text)
@@ -444,6 +449,11 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
         "linkedin_url": record.linkedin_url,
         "instagram_url": record.instagram_url,
         "facebook_url": record.facebook_url,
+        "tiktok_url": record.tiktok_url,
+        "ig_link": record.ig_link,
+        "fb_link": record.fb_link,
+        "has_pixel": bool(record.has_pixel) if record.has_pixel is not None else False,
+        "tech_stack": record.tech_stack,
         "rating": record.rating,
         "review_count": record.review_count,
         "address": record.address,
@@ -459,7 +469,7 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
 
 
 def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "user_id": user_id,
         "business_name": lead.business_name,
         "website_url": lead.website_url,
@@ -473,6 +483,21 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "address": lead.address,
         "search_keyword": lead.search_keyword,
     }
+
+    optional_fields = {
+        "tiktok_url": lead.tiktok_url,
+        "ig_link": lead.ig_link,
+        "fb_link": lead.fb_link,
+        "has_pixel": lead.has_pixel,
+        "tech_stack": lead.tech_stack,
+        "email": lead.email,
+        "qualification_score": lead.qualification_score,
+    }
+    for key, value in optional_fields.items():
+        if value is not None:
+            payload[key] = value
+
+    return payload
 
 
 def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:

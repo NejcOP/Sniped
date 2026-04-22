@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 import uuid
 import base64
+import asyncio
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from functools import wraps
@@ -50,6 +51,7 @@ except Exception:
 from backend.check_access import get_plan_feature_access, normalize_plan_key, require_feature_access
 from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, upsert_lead
 from backend.scraper.exporter import export_target_leads
+from backend.scraper.full_enrichment import enrich_leads_full_data
 from backend.scraper.google_maps import GoogleMapsScraper
 from backend.scraper.phone_extractor import PhoneExtractor
 from backend.services.ai_mailer_service import (
@@ -896,6 +898,11 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "linkedin_url": "ALTER TABLE leads ADD COLUMN linkedin_url TEXT",
         "instagram_url": "ALTER TABLE leads ADD COLUMN instagram_url TEXT",
         "facebook_url": "ALTER TABLE leads ADD COLUMN facebook_url TEXT",
+        "tiktok_url": "ALTER TABLE leads ADD COLUMN tiktok_url TEXT",
+        "ig_link": "ALTER TABLE leads ADD COLUMN ig_link TEXT",
+        "fb_link": "ALTER TABLE leads ADD COLUMN fb_link TEXT",
+        "has_pixel": "ALTER TABLE leads ADD COLUMN has_pixel INTEGER DEFAULT 0",
+        "tech_stack": "ALTER TABLE leads ADD COLUMN tech_stack TEXT",
         "insecure_site": "ALTER TABLE leads ADD COLUMN insecure_site INTEGER DEFAULT 0",
         "main_shortcoming": "ALTER TABLE leads ADD COLUMN main_shortcoming TEXT",
         "ai_description": "ALTER TABLE leads ADD COLUMN ai_description TEXT",
@@ -7614,31 +7621,47 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         if leads:
             try:
-                progress_state["phase"] = "social_discovery"
+                progress_state["phase"] = "deep_crawl"
+                progress_state["deep_crawled"] = 0
+                progress_state["deep_total"] = len([lead for lead in leads if str(getattr(lead, "website_url", "") or "").strip() not in {"", "None", "none"}])
                 update_task_progress(db_path, task_id, progress_state)
-                discovery_service = LeadEnricher(
-                    db_path=str(db_path),
-                    headless=True,
-                    config_path=str(DEFAULT_CONFIG_PATH),
-                    user_id=str(payload_data.get("user_id") or "legacy"),
+
+                deep_crawl_concurrency = max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "6") or "6"))
+                deep_crawl_timeout = max(4, int(os.environ.get("SCRAPE_DEEP_CRAWL_TIMEOUT_SECONDS", "12") or "12"))
+
+                def _on_deep_crawl_progress(done_count: int, total_count: int, lead_name: Optional[str]) -> None:
+                    progress_state["phase"] = "deep_crawl"
+                    progress_state["deep_crawled"] = int(done_count)
+                    progress_state["deep_total"] = int(total_count)
+                    progress_state["current_lead"] = str(lead_name or "")
+                    update_task_progress(db_path, task_id, progress_state)
+
+                logging.info(
+                    "[scrape-task:%s] Starting deep crawl enrichment | leads=%s concurrency=%s timeout=%ss",
+                    task_id,
+                    len(leads),
+                    deep_crawl_concurrency,
+                    deep_crawl_timeout,
                 )
-                for lead in leads:
-                    profiles = discovery_service._discover_social_profiles(
-                        business_name=str(getattr(lead, "business_name", "") or ""),
-                        website_url=str(getattr(lead, "website_url", "") or ""),
-                        address=str(getattr(lead, "address", "") or ""),
-                        existing_profiles={
-                            "linkedin": str(getattr(lead, "linkedin_url", "") or ""),
-                            "instagram": str(getattr(lead, "instagram_url", "") or ""),
-                            "facebook": str(getattr(lead, "facebook_url", "") or ""),
-                        },
-                        website_signals=None,
+                deep_crawl_result = asyncio.run(
+                    enrich_leads_full_data(
+                        leads,
+                        concurrency=deep_crawl_concurrency,
+                        timeout_seconds=deep_crawl_timeout,
+                        progress_callback=_on_deep_crawl_progress,
                     )
-                    lead.linkedin_url = str(profiles.get("linkedin") or "").strip() or None
-                    lead.instagram_url = str(profiles.get("instagram") or "").strip() or None
-                    lead.facebook_url = str(profiles.get("facebook") or "").strip() or None
-            except Exception as social_exc:
-                logging.warning("Social discovery during scrape failed; continuing with Maps-only leads: %s", social_exc)
+                )
+                progress_state["deep_crawled"] = int(deep_crawl_result.get("crawled") or 0)
+                progress_state["deep_total"] = int(deep_crawl_result.get("eligible") or 0)
+                update_task_progress(db_path, task_id, progress_state)
+                logging.info(
+                    "[scrape-task:%s] Deep crawl enrichment completed | crawled=%s eligible=%s",
+                    task_id,
+                    int(deep_crawl_result.get("crawled") or 0),
+                    int(deep_crawl_result.get("eligible") or 0),
+                )
+            except Exception as deep_crawl_exc:
+                logging.warning("Deep crawl enrichment failed; continuing with Maps-only leads: %s", deep_crawl_exc)
 
         # When Supabase is the primary DB, deduplicate against Supabase too.
         # The local legacy store may be missing leads from previous sessions, so we
@@ -9974,7 +9997,7 @@ def create_app() -> FastAPI:
 
             supabase_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,generated_email_body,crm_comment,status_updated_at,last_sender_email,"
                 "is_ads_client,is_website_client,worker_id,assigned_worker_at,paid_at,enrichment_data,pipeline_stage,client_folder_id,"
                 "open_tracking_token,open_count,first_opened_at,last_opened_at,"
@@ -9982,7 +10005,7 @@ def create_app() -> FastAPI:
             )
             legacy_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
@@ -10022,6 +10045,11 @@ def create_app() -> FastAPI:
                     row.setdefault("linkedin_url", None)
                     row.setdefault("instagram_url", None)
                     row.setdefault("facebook_url", None)
+                    row.setdefault("tiktok_url", None)
+                    row.setdefault("ig_link", row.get("instagram_url"))
+                    row.setdefault("fb_link", row.get("facebook_url"))
+                    row.setdefault("has_pixel", 0)
+                    row.setdefault("tech_stack", None)
                     row.setdefault("qualification_score", None)
                     row.setdefault("enrichment_status", "pending")
                     row.setdefault("generated_email_body", None)
@@ -10064,6 +10092,11 @@ def create_app() -> FastAPI:
                 linkedin_url,
                 instagram_url,
                 facebook_url,
+                tiktok_url,
+                ig_link,
+                fb_link,
+                has_pixel,
+                tech_stack,
                 rating,
                 review_count,
                 address,

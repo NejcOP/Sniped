@@ -1,0 +1,9 @@
+-- Full-data enrichment columns for lead scraping pipeline.
+-- Safe to run multiple times.
+
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS ig_link TEXT;
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS fb_link TEXT;
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS tiktok_url TEXT;
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS has_pixel BOOLEAN DEFAULT FALSE;
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS tech_stack TEXT;
+ALTER TABLE IF EXISTS leads ADD COLUMN IF NOT EXISTS qualification_score DOUBLE PRECISION;
