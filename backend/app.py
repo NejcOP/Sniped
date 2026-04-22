@@ -8946,7 +8946,10 @@ def create_app() -> FastAPI:
         if resolved_db_url:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
-            _, parsed_port = _extract_db_host_port(resolved_db_url)
+            parsed_host, parsed_port = _extract_db_host_port(resolved_db_url)
+
+            if parsed_host:
+                print(f"[startup] DATABASE_URL host: {parsed_host}")
 
             if parsed_port == 5432:
                 logging.warning(

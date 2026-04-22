@@ -7,7 +7,7 @@ import ipaddress
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint, asc, create_engine, desc, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -220,6 +220,10 @@ def _resolve_ipv4_hostaddr(hostname: str) -> str:
     return ""
 
 
+def _engine_connect_url(raw_url: str) -> str:
+    return unquote(str(raw_url or "").strip())
+
+
 def _prefer_supabase_pooler_url(raw_url: str) -> str:
     url = _sanitize_database_url(raw_url)
     if not url:
@@ -365,26 +369,36 @@ def get_engine(db_path: Optional[str] = None) -> Any:
     candidates = _build_database_url_candidates() or [primary_url]
 
     for candidate_url in candidates:
-        cached = _ENGINE_CACHE.get(candidate_url)
+        engine_url = _engine_connect_url(candidate_url)
+        cached = _ENGINE_CACHE.get(engine_url)
         if cached is not None:
             return cached
 
     last_error: Optional[Exception] = None
     for candidate_url in candidates:
         for attempt in range(1, DEFAULT_DB_CONNECT_RETRIES + 1):
+            engine_url = _engine_connect_url(candidate_url)
+            try:
+                parsed_engine_url = urlparse(engine_url)
+                db_host = str(parsed_engine_url.hostname or "").strip()
+            except ValueError:
+                db_host = ""
+            if db_host:
+                print(f"[db] SQLAlchemy engine target host: {db_host}")
             engine = create_engine(
-                candidate_url,
+                engine_url,
                 future=True,
                 pool_pre_ping=True,
                 pool_size=DEFAULT_DB_POOL_SIZE,
                 max_overflow=DEFAULT_DB_MAX_OVERFLOW,
                 pool_recycle=DEFAULT_DB_POOL_RECYCLE,
                 pool_use_lifo=True,
+                connect_args={"sslmode": "require"},
             )
             try:
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
-                _ENGINE_CACHE[candidate_url] = engine
+                _ENGINE_CACHE[engine_url] = engine
                 return engine
             except Exception as exc:
                 last_error = exc
