@@ -932,9 +932,16 @@ function normalizeLeadStatus(status) {
 async function fetchJson(path, options) {
   const apiBaseRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
   const apiBase = apiBaseRaw ? apiBaseRaw.replace(/\/$/, '') : ''
+  const normalizedPath = String(path || '')
+  const forceSameOriginApi =
+    normalizedPath.startsWith('/api')
+    && typeof window !== 'undefined'
+    && String(window.location?.hostname || '').toLowerCase().endsWith('.vercel.app')
   const requestUrl = /^https?:\/\//i.test(String(path || ''))
     ? String(path)
-    : apiBase && String(path || '').startsWith('/api')
+    : forceSameOriginApi
+      ? normalizedPath
+      : apiBase && normalizedPath.startsWith('/api')
       ? `${apiBase}${path}`
       : path
   const token = getStoredValue('lf_token')
@@ -957,8 +964,14 @@ async function fetchJson(path, options) {
 function buildApiUrl(path) {
   const apiBaseRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
   const apiBase = apiBaseRaw ? apiBaseRaw.replace(/\/$/, '') : ''
+  const normalizedPath = String(path || '')
+  const forceSameOriginApi =
+    normalizedPath.startsWith('/api')
+    && typeof window !== 'undefined'
+    && String(window.location?.hostname || '').toLowerCase().endsWith('.vercel.app')
   if (/^https?:\/\//i.test(String(path || ''))) return String(path)
-  return apiBase && String(path || '').startsWith('/api') ? `${apiBase}${path}` : String(path || '')
+  if (forceSameOriginApi) return normalizedPath
+  return apiBase && normalizedPath.startsWith('/api') ? `${apiBase}${path}` : normalizedPath
 }
 
 function isAiEndpoint(path) {

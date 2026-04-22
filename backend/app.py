@@ -86,10 +86,12 @@ TRACKING_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACA
 def get_allowed_cors_origins() -> list[str]:
     configured = str(os.environ.get("CORS_ALLOWED_ORIGINS", "") or "").strip()
     if configured:
-        return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+        origins = [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+        if "https://sniped-one.vercel.app" not in origins:
+            origins.append("https://sniped-one.vercel.app")
+        return origins
     return [
         "https://sniped-one.vercel.app",
-        "https://*.vercel.app",
         "http://localhost:5173",
         "http://localhost:3000",
         "http://localhost:8000",
@@ -8872,6 +8874,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_cors_origins,
+        allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^http:\/\/localhost(:\d+)?$",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
@@ -9377,18 +9380,33 @@ def create_app() -> FastAPI:
 
     @app.get("/api/recommend-niche")
     def recommend_niche(request: Request) -> dict:
-        session_token = require_authenticated_session(request)
-        user_id = resolve_user_id_from_session_token(session_token)
-        billing_context = load_user_billing_context(session_token)
-        credits_balance = int(billing_context.get("credits_balance") or 0)
-        credits_limit = int(
-            billing_context.get("monthly_quota")
-            or billing_context.get("monthly_limit")
-            or billing_context.get("credits_limit")
-            or DEFAULT_MONTHLY_CREDIT_LIMIT
-        )
-        plan_key = str(billing_context.get("plan_key") or DEFAULT_PLAN_KEY).strip().lower() or DEFAULT_PLAN_KEY
-        is_free_plan = plan_key == "free" and not bool(billing_context.get("subscription_active"))
+        session_token = ""
+        user_id = "anonymous"
+        billing_context: dict[str, Any] = {}
+        credits_balance = 0
+        credits_limit = DEFAULT_MONTHLY_CREDIT_LIMIT
+        plan_key = DEFAULT_PLAN_KEY
+        is_free_plan = True
+
+        # Keep Market Intelligence available even if session/billing lookup is temporarily failing.
+        try:
+            auth_header = str(request.headers.get("Authorization", "") or "").strip()
+            if auth_header.lower().startswith("bearer "):
+                session_token = auth_header[7:].strip()
+            if session_token and _session_token_exists(session_token):
+                user_id = resolve_user_id_from_session_token(session_token)
+                billing_context = load_user_billing_context(session_token)
+                credits_balance = int(billing_context.get("credits_balance") or 0)
+                credits_limit = int(
+                    billing_context.get("monthly_quota")
+                    or billing_context.get("monthly_limit")
+                    or billing_context.get("credits_limit")
+                    or DEFAULT_MONTHLY_CREDIT_LIMIT
+                )
+                plan_key = str(billing_context.get("plan_key") or DEFAULT_PLAN_KEY).strip().lower() or DEFAULT_PLAN_KEY
+                is_free_plan = plan_key == "free" and not bool(billing_context.get("subscription_active"))
+        except Exception as exc:
+            logging.warning("recommend-niche auth fallback activated: %s", exc)
         selected_country_code = normalize_country_value(
             request.query_params.get("country") or request.query_params.get("country_code"),
             None,
