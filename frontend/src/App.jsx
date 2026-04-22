@@ -2423,7 +2423,7 @@ function App({ initialTab = 'leads' }) {
     const inserted = Number(result.inserted || (status === 'completed' ? result.scraped || 0 : 0))
     const phase = String(result.phase || '')
     // isLoading = scraper launched but Maps hasn't returned any card yet
-    const isLoading = status === 'running' && currentFound === 0 && scannedCount === 0
+    const isLoading = (status === 'running' || status === 'queued') && currentFound === 0 && scannedCount === 0
 
     let percent = 0
     if (totalToFind > 0) {
@@ -2440,7 +2440,7 @@ function App({ initialTab = 'leads' }) {
       percent,
       phase,
       isLoading,
-      isVisible: ['running', 'completed', 'failed'].includes(status),
+      isVisible: ['queued', 'running', 'completed', 'failed'].includes(status),
     }
   }, [scrapeTask, scrapeForm.results])
 
@@ -4133,7 +4133,7 @@ function App({ initialTab = 'leads' }) {
     void Promise.allSettled(initialRequests)
 
     const fastId = window.setInterval(() => {
-      if (activeTab === 'tasks' || activeTab === 'history') {
+      if (activeTab === 'leads' || activeTab === 'tasks' || activeTab === 'history') {
         void fetchTaskState()
       }
     }, 3000)
@@ -4142,7 +4142,7 @@ function App({ initialTab = 'leads' }) {
       const requests = [checkHealth(), refreshConfigHealth(), refreshStats()]
 
       if (activeTab === 'leads') {
-        requests.push(refreshLeads({ silent: true }), refreshSavedSegments({ silent: true }))
+        requests.push(fetchTaskState(), refreshLeads({ silent: true }), refreshSavedSegments({ silent: true }))
       }
       if (activeTab === 'tasks' || activeTab === 'history' || activeTab === 'workers') {
         requests.push(fetchTaskState(), fetchRevenueLog(), refreshWorkers(), refreshDeliveryTasks())
@@ -6042,6 +6042,11 @@ function App({ initialTab = 'leads' }) {
                       style={scrapeProgress.isLoading ? {} : { width: `${scrapeProgress.percent}%` }}
                     />
                   </div>
+                  {scrapeProgress.status === 'queued' ? (
+                    <p className="scrape-progress-copy">
+                      ⏳ Scrape queued, waiting for worker slot...
+                    </p>
+                  ) : null}
                   {scrapeProgress.isLoading ? (
                     <p className="scrape-progress-copy">
                       🌐 Opening Google Maps… brace yourself
