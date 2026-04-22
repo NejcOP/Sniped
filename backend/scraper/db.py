@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import socket
+import ipaddress
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -102,6 +103,52 @@ def _with_default_query_params(url: str, params: dict[str, str]) -> str:
             query[key] = value
     return urlunparse(parsed._replace(query=urlencode(query)))
 
+def _sanitize_database_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
+        return ""
+
+    # Remove accidental whitespace/newlines from copied env values.
+    value = value.replace("\n", "").replace("\r", "")
+    value = value.replace(":// ", "://").replace(" @", "@").replace("@ ", "@")
+
+    parsed = urlparse(value)
+    netloc = str(parsed.netloc or "").strip()
+    if not netloc:
+        return value
+
+    if "@" in netloc:
+        creds, host_port = netloc.rsplit("@", 1)
+        host_port = host_port.strip()
+        if host_port.startswith("[") and "]" in host_port:
+            inside = host_port[1:host_port.index("]")]
+            tail = host_port[host_port.index("]") + 1 :]
+            # Unwrap brackets only for non-IPv6 hosts.
+            if ":" not in inside:
+                host_port = f"{inside}{tail}"
+        netloc = f"{creds}@{host_port}"
+    else:
+        host_port = netloc
+        if host_port.startswith("[") and "]" in host_port:
+            inside = host_port[1:host_port.index("]")]
+            tail = host_port[host_port.index("]") + 1 :]
+            if ":" not in inside:
+                host_port = f"{inside}{tail}"
+        netloc = host_port
+
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _is_ip_literal(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
 
 def _with_port(url: str, new_port: int) -> str:
     parsed = urlparse(url)
@@ -129,7 +176,7 @@ def _resolve_ipv4_hostaddr(hostname: str) -> str:
 
 
 def _prefer_supabase_pooler_url(raw_url: str) -> str:
-    url = str(raw_url or "").strip()
+    url = _sanitize_database_url(raw_url)
     if not url:
         return url
 
@@ -226,7 +273,7 @@ def _build_database_url_candidates() -> list[str]:
 
 
 def _normalize_database_url(raw_url: str) -> str:
-    url = str(raw_url or "").strip()
+    url = _sanitize_database_url(raw_url)
     if not url:
         raise RuntimeError("SUPABASE_DATABASE_URL or DATABASE_URL is required.")
     if url.startswith("postgres://"):
@@ -266,6 +313,9 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                 pool_use_lifo=True,
             )
             try:
+                if configured_hostaddr and not _is_ip_literal(configured_hostaddr):
+                    logging.warning("Ignoring DB_HOSTADDR_IPV4/SUPABASE_DB_HOSTADDR because value is not an IP address.")
+                    configured_hostaddr = ""
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
                 _ENGINE_CACHE[candidate_url] = engine

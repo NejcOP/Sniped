@@ -8910,7 +8910,13 @@ def create_app() -> FastAPI:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
             parsed_db = urlparse(resolved_db_url)
-            if parsed_db.port == 5432:
+            try:
+                parsed_port = parsed_db.port
+            except ValueError:
+                parsed_port = None
+                logging.warning("[startup] DATABASE_URL has malformed port component; check env formatting.")
+
+            if parsed_port == 5432:
                 logging.warning(
                     "[startup] DATABASE_URL is using port 5432 (direct). Prefer Supabase pooler transaction mode on port 6543."
                 )
@@ -8977,6 +8983,10 @@ def create_app() -> FastAPI:
         settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         resolved_db_url = str(settings.get("resolved_database_url") or settings.get("database_url") or "").strip()
         parsed_db = urlparse(resolved_db_url) if resolved_db_url else None
+        try:
+            parsed_port = int(parsed_db.port) if parsed_db and parsed_db.port else None
+        except ValueError:
+            parsed_port = None
         return {
             "ok": True,
             "database": "supabase",
@@ -8984,7 +8994,7 @@ def create_app() -> FastAPI:
             "supabase_primary": bool(settings.get("primary_mode")),
             "has_database_url": bool(settings.get("has_database_url")),
             "db_host": str(parsed_db.hostname or "") if parsed_db else "",
-            "db_port": int(parsed_db.port) if parsed_db and parsed_db.port else None,
+            "db_port": parsed_port,
         }
 
     @app.get("/api/system-status")
