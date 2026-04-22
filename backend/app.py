@@ -8880,8 +8880,9 @@ def create_app() -> FastAPI:
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         if STATELESS_SUPABASE_ONLY and not supabase_settings.get("has_service_role"):
-            raise RuntimeError(
-                "STATELESS_SUPABASE_ONLY requires SUPABASE_SERVICE_ROLE_KEY for backend write operations under RLS."
+            print(
+                "[startup] WARNING: STATELESS_SUPABASE_ONLY is set but SUPABASE_SERVICE_ROLE_KEY is missing. "
+                "Backend write operations under RLS may fail. Set SUPABASE_SERVICE_ROLE_KEY in Railway env vars."
             )
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {

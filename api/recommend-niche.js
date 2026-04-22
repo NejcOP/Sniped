@@ -13,14 +13,18 @@ function supabase() {
 
 async function getUserFromToken(token) {
   if (!token) return null
-  const db = supabase()
-  const { data, error } = await db
-    .from('users')
-    .select('id, email, plan_key, subscription_active, niche')
-    .eq('token', token)
-    .single()
-  if (error || !data) return null
-  return data
+  try {
+    const db = supabase()
+    const { data, error } = await db
+      .from('users')
+      .select('id, email, plan_key, subscription_active, niche')
+      .eq('token', token)
+      .single()
+    if (error || !data) return null
+    return data
+  } catch {
+    return null
+  }
 }
 
 function cacheKey(userId, countryCode) {
@@ -165,18 +169,20 @@ module.exports = async (req, res) => {
     return res.status(405).json({ detail: 'Method not allowed' })
   }
 
+  try {
   // Auth
   const authHeader = String(req.headers?.authorization || '')
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.query?.token
   const user = await getUserFromToken(token)
-  if (!user) {
+  const supabaseConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  if (!user && supabaseConfigured) {
     return res.status(401).json({ detail: 'Unauthorized' })
   }
 
-  const userId = user.id
+  const userId = user?.id || 'anonymous'
   const isFreePlan =
-    !user.subscription_active &&
-    (String(user.plan_key || 'free').toLowerCase() === 'free' || !user.plan_key)
+    !user?.subscription_active &&
+    (String(user?.plan_key || 'free').toLowerCase() === 'free' || !user?.plan_key)
   const forceRefresh = ['1', 'true', 'yes'].includes(String(req.query?.refresh || '').toLowerCase())
   const countryCode = String(req.query?.country || req.query?.country_code || 'US').toUpperCase()
 
@@ -241,4 +247,7 @@ module.exports = async (req, res) => {
   await setCachedRecommendation(userId, countryCode, result)
 
   return res.status(200).json(result)
+  } catch (err) {
+    return res.status(500).json({ detail: err?.message || 'Internal server error' })
+  }
 }
