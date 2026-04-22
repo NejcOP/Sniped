@@ -4070,9 +4070,9 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function fetchTaskState() {
+  async function fetchTaskState(force = false) {
     // Exponential backoff — skip if we are in a cooldown period
-    if (Date.now() < taskFetchBackoffUntilRef.current) return
+    if (!force && Date.now() < taskFetchBackoffUntilRef.current) return
     try {
       const data = await fetchJson('/api/tasks')
       taskFetchFailCountRef.current = 0
@@ -5094,8 +5094,30 @@ function App({ initialTab = 'leads' }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyword, results: Number(scrapeForm.results), country: scrapeForm.country, headless: Boolean(scrapeForm.headless), export_targets: Boolean(scrapeForm.exportTargets), min_rating: 3.5 }),
       })
+      setTasks((prev) => ({
+        ...prev,
+        scrape: {
+          ...(prev?.scrape || getIdleTask('scrape')),
+          status: 'queued',
+          running: true,
+          last_request: {
+            ...(prev?.scrape?.last_request || {}),
+            keyword,
+            results: Number(scrapeForm.results),
+            country: scrapeForm.country,
+          },
+          result: {
+            phase: 'queued',
+            total_to_find: Number(scrapeForm.results || 0),
+            current_found: 0,
+            scanned_count: 0,
+            inserted: 0,
+          },
+          error: null,
+        },
+      }))
       toast('Scrape started', { icon: '⏳' })
-      void Promise.allSettled([fetchTaskState(), refreshStats()])
+      void Promise.allSettled([fetchTaskState(true), refreshStats()])
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'Unknown API error')
     } finally {
