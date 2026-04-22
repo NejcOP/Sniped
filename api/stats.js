@@ -1,85 +1,55 @@
 const { handleCors } = require('./_cors')
-function getSupabaseUrl() { return process.env.SUPABASE_URL || '' }
-function getSupabaseKey() { return process.env.SUPABASE_SERVICE_ROLE_KEY || '' }
 
-function getToken(req) {
-  const auth = String(req.headers.authorization || '')
-  if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
-  return ''
+function normalizeBaseUrl(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const withScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(raw)
+    ? raw
+    : /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/.test(raw)
+      ? `http://${raw}`
+      : `https://${raw}`
+  return withScheme.replace(/\/$/, '')
+}
+
+function setNoStore(res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
 }
 
 module.exports = async (req, res) => {
   if (handleCors(req, res)) return
-  res.setHeader('Content-Type', 'application/json')
+  setNoStore(res)
 
-  const token = getToken(req)
-  const supabaseUrl = getSupabaseUrl()
-  const supabaseKey = getSupabaseKey()
-
-  const empty = {
-    total_leads: 0, emails_sent: 0, opened_count: 0, opens_total: 0,
-    open_rate: 0, paid_count: 0, total_revenue: 0, setup_revenue: 0,
-    setup_milestone: 10000, milestone_progress_pct: 0,
-    monthly_recurring_revenue: 0, website_clients: 0, ads_clients: 0,
-    ads_and_website_clients: 0, mrr_goal: 5000, queued_mail_count: 0,
-    next_drip_at: null, reply_rate: 0, replies_count: 0,
-    found_this_month: 0, contacted_this_month: 0, replied_this_month: 0, won_this_month: 0,
-    found_this_week: 0, contacted_this_week: 0, replied_this_week: 0, won_this_week: 0,
-    client_folder_count: 0,
-    pipeline: { scraped: 0, contacted: 0, replied: 0, won_paid: 0 },
+  const isDev = process.env.VERCEL_ENV !== 'production'
+  const devFallback = isDev ? 'http://localhost:8000' : ''
+  const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || devFallback)
+  if (!backendBase) {
+    return res.status(503).json({ detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.' })
   }
 
-  if (!token || !supabaseUrl || !supabaseKey) {
-    return res.status(200).json(empty)
+  const headers = {}
+  for (const [key, value] of Object.entries(req.headers || {})) {
+    const lower = String(key || '').toLowerCase()
+    if (lower === 'host' || lower === 'connection' || lower === 'if-none-match' || lower === 'if-modified-since') continue
+    if (value === undefined) continue
+    headers[key] = Array.isArray(value) ? value.join(', ') : String(value)
   }
 
   try {
-    const dbHeaders = {
-      apikey: supabaseKey,
-      Authorization: `Bearer ${supabaseKey}`,
-    }
-
-    // Get user id from token
-    const userRes = await fetch(
-      `${supabaseUrl}/rest/v1/users?token=eq.${encodeURIComponent(token)}&select=id&limit=1`,
-      { headers: dbHeaders }
-    )
-    if (!userRes.ok) return res.status(200).json(empty)
-    const users = await userRes.json()
-    if (!Array.isArray(users) || users.length === 0) return res.status(200).json(empty)
-    const userId = users[0].id
-
-    // Count leads
-    const leadsRes = await fetch(
-      `${supabaseUrl}/rest/v1/leads?user_id=eq.${encodeURIComponent(userId)}&select=id,status,email_sent,opened`,
-      { headers: dbHeaders }
-    )
-    let leads = []
-    if (leadsRes.ok) {
-      try { leads = await leadsRes.json() } catch { leads = [] }
-    }
-
-    const total_leads = leads.length
-    const emails_sent = leads.filter(l => l.email_sent).length
-    const opened_count = leads.filter(l => l.opened).length
-    const paid_count = leads.filter(l => String(l.status || '').toLowerCase() === 'won').length
-    const open_rate = emails_sent > 0 ? Math.round((opened_count / emails_sent) * 100) : 0
-    const contacted = leads.filter(l => ['contacted', 'replied', 'won'].includes(String(l.status || '').toLowerCase())).length
-    const replied = leads.filter(l => ['replied', 'won'].includes(String(l.status || '').toLowerCase())).length
-    const reply_rate = emails_sent > 0 ? Math.round((replied / emails_sent) * 100) : 0
-
-    return res.status(200).json({
-      ...empty,
-      total_leads,
-      emails_sent,
-      opened_count,
-      open_rate,
-      paid_count,
-      reply_rate,
-      replies_count: replied,
-      pipeline: { scraped: total_leads, contacted, replied, won_paid: paid_count },
+    const upstream = await fetch(`${backendBase}/api/stats`, {
+      method: req.method,
+      headers,
+      redirect: 'manual',
     })
-  } catch {
-    return res.status(200).json(empty)
+
+    const text = await upstream.text()
+    res.status(upstream.status)
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json')
+    return res.send(text)
+  } catch (error) {
+    return res.status(502).json({
+      detail: `Backend request failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    })
   }
 }

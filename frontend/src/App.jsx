@@ -949,7 +949,19 @@ async function fetchJson(path, options) {
     ...(options?.headers || {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
-  const response = await fetch(requestUrl, { ...(options || {}), headers })
+  const method = String(options?.method || 'GET').toUpperCase()
+  const isDynamicPollingEndpoint =
+    method === 'GET' && (
+      normalizedPath === '/api/tasks'
+      || normalizedPath === '/api/task'
+      || normalizedPath === '/api/stats'
+    )
+
+  const response = await fetch(requestUrl, {
+    ...(options || {}),
+    headers,
+    ...(isDynamicPollingEndpoint ? { cache: 'no-store' } : {}),
+  })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
     const detail = typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`
