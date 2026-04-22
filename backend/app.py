@@ -11486,7 +11486,11 @@ def create_app() -> FastAPI:
     @app.post("/api/scrape")
     def run_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
         print(f"[scrape] POST /api/scrape â€” keyword={payload.keyword!r} results={payload.results}")
-        _, billing, access = resolve_plan_access_context(request, feature_key="basic_search")
+        _, billing, access = resolve_plan_access_context(
+            request,
+            feature_key="basic_search",
+            allow_stripe_recovery=False,
+        )
         user_id = require_current_user_id(request)
         print(f"[scrape] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
@@ -11680,9 +11684,10 @@ def create_app() -> FastAPI:
         fallback_token: Optional[str] = None,
         *,
         feature_key: Optional[str] = None,
+        allow_stripe_recovery: bool = True,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         session_token = require_authenticated_session(request, fallback_token=fallback_token)
-        billing = load_user_billing_context(session_token)
+        billing = load_user_billing_context(session_token, allow_stripe_recovery=allow_stripe_recovery)
         plan_key = _normalize_plan_key(billing.get("plan_key"), fallback=DEFAULT_PLAN_KEY)
         access = require_feature_access(plan_key, feature_key) if feature_key else get_plan_feature_access(plan_key)
         return session_token, billing, access
@@ -11735,7 +11740,7 @@ def create_app() -> FastAPI:
         now = datetime.now(timezone.utc)
         return max(0, (next_dt.date() - now.date()).days)
 
-    def load_user_billing_context(session_token: str) -> dict:
+    def load_user_billing_context(session_token: str, *, allow_stripe_recovery: bool = True) -> dict:
         token = str(session_token or "").strip()
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required.")
@@ -11776,7 +11781,7 @@ def create_app() -> FastAPI:
 
             extras_plan_key = _normalize_plan_key(extras.get("plan_key"), fallback="free")
             extras_is_paid = _coerce_subscription_active(extras.get("subscription_active")) or extras_plan_key != "free"
-            if not extras_is_paid:
+            if allow_stripe_recovery and not extras_is_paid:
                 stripe_customer_id = str(extras.get("stripe_customer_id") or "").strip()
                 stripe_recovered = recover_billing_snapshot_from_stripe(
                     user_email=base_row.get("email") if stripe_customer_id else None,
@@ -11817,14 +11822,16 @@ def create_app() -> FastAPI:
                         pass
 
             stripe_customer_id = str(extras.get("stripe_customer_id") or "").strip()
-            pending_topup = recover_pending_topup_credits_from_stripe(
-                user_id=base_row.get("id"),
-                user_email=base_row.get("email") if stripe_customer_id else None,
-                stripe_customer_id=stripe_customer_id,
-                updated_at_raw=extras.get("updated_at"),
-                config_path=DEFAULT_CONFIG_PATH,
-                allow_email_lookup=False,
-            )
+            pending_topup = {}
+            if allow_stripe_recovery:
+                pending_topup = recover_pending_topup_credits_from_stripe(
+                    user_id=base_row.get("id"),
+                    user_email=base_row.get("email") if stripe_customer_id else None,
+                    stripe_customer_id=stripe_customer_id,
+                    updated_at_raw=extras.get("updated_at"),
+                    config_path=DEFAULT_CONFIG_PATH,
+                    allow_email_lookup=False,
+                )
             recovered_topup_delta = max(0, _safe_int(pending_topup.get("credits_delta"), 0))
             if recovered_topup_delta > 0:
                 current_topup_balance = max(0, _safe_int(extras.get("topup_credits_balance"), 0))
@@ -12507,6 +12514,7 @@ def create_app() -> FastAPI:
             request,
             fallback_token=payload_data.get("token"),
             feature_key="deep_analysis",
+            allow_stripe_recovery=False,
         )
         user_id = require_current_user_id(request, fallback_token=payload_data.get("token"), db_path=db_path)
         session_token = require_authenticated_session(request, fallback_token=payload_data.pop("token", ""))
@@ -12570,7 +12578,7 @@ def create_app() -> FastAPI:
     @app.post("/api/mailer/send")
     def run_mailer(payload: MailerRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
         print(f"[mailer] POST /api/mailer/send â€” limit={payload.limit}")
-        session_token, billing, access = resolve_plan_access_context(request)
+        session_token, billing, access = resolve_plan_access_context(request, allow_stripe_recovery=False)
         user_id = require_current_user_id(request)
         print(f"[mailer] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
