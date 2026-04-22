@@ -41,6 +41,8 @@ WHERE id IN (
 );
 
 -- Drop legacy global unique key if it exists.
+ALTER TABLE IF EXISTS leads DROP CONSTRAINT IF EXISTS leads_business_name_address_key;
+ALTER TABLE IF EXISTS leads DROP CONSTRAINT IF EXISTS uq_leads_business_name_address;
 DROP INDEX IF EXISTS uq_leads_business_name_address;
 DROP INDEX IF EXISTS leads_business_name_address_key;
 
