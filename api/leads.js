@@ -1,5 +1,5 @@
 // Native Vercel function — Lead Management
-const { handleCors } = require('../_cors')
+const { handleCors } = require('./_cors')
 // Reads leads from Supabase with filtering, sorting, search, and pagination.
 
 const SUPABASE_COLUMNS = [

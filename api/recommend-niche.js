@@ -176,10 +176,6 @@ module.exports = async (req, res) => {
   const authHeader = String(req.headers?.authorization || '')
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : req.query?.token
   const user = await getUserFromToken(token)
-  const supabaseConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
-  if (!user && supabaseConfigured) {
-    return res.status(401).json({ detail: 'Unauthorized' })
-  }
 
   const userId = user?.id || 'anonymous'
   const isFreePlan =

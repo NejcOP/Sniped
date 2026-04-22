@@ -5,10 +5,10 @@
 //   GET  /api/mailer/templates
 //   POST /api/mailer/templates
 
+const { handleCors } = require('../_cors')
+
 function getTokenFromReq(req) {
   const auth = String(req.headers?.authorization || '')
-
-const { handleCors } = require('../_cors')
   if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
   return String(req.query?.token || '').trim()
 }
