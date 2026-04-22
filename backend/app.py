@@ -157,6 +157,7 @@ APP_THREADPOOL_WORKERS = _read_env_int("APP_THREADPOOL_WORKERS", 2)
 SCHEDULER_MAX_WORKERS = _read_env_int("SCHEDULER_MAX_WORKERS", 1)
 RUN_STARTUP_JOBS = _env_flag("RUN_STARTUP_JOBS", default=False)
 STATELESS_SUPABASE_ONLY = _env_flag("STATELESS_SUPABASE_ONLY", default=False)
+FORCE_IN_PROCESS_SCRAPE = _env_flag("FORCE_IN_PROCESS_SCRAPE", default=True)
 MRR_GOAL = 16000
 SETUP_MILESTONE = 6500
 SETUP_FEE_WEBSITE = 1300
@@ -3300,6 +3301,12 @@ def _has_live_external_worker(max_age_seconds: int = 120) -> bool:
     return age_seconds <= max_age_seconds
 
 
+def _should_use_external_worker(task_type: str) -> bool:
+    if task_type == "scrape" and FORCE_IN_PROCESS_SCRAPE:
+        return False
+    return _is_postgres_task_store_enabled() and _has_live_external_worker()
+
+
 def get_runtime_value(db_path: Path, key: str) -> Optional[str]:
     if _is_postgres_runtime_store_enabled():
         try:
@@ -4249,6 +4256,11 @@ def get_supabase_client(config_path: Path) -> Optional[Any]:
     settings = load_supabase_settings(config_path)
     if not settings["enabled"]:
         return None
+    if STATELESS_SUPABASE_ONLY and not settings.get("has_service_role"):
+        logging.warning(
+            "Supabase client initialized without service-role key while STATELESS_SUPABASE_ONLY=1; "
+            "writes can fail under RLS."
+        )
     try:
         return create_supabase_client(settings["url"], settings["key"])
     except Exception as exc:
@@ -6759,16 +6771,35 @@ def enqueue_task(
     with task_lock:
         if task_is_active(db_path, task_type, user_id=user_id):
             running_task = fetch_latest_task(db_path, task_type, user_id=user_id)
+            logging.info(
+                "Task enqueue skipped because task is already active | type=%s user_id=%s task_id=%s",
+                task_type,
+                user_id,
+                running_task.get("id"),
+            )
             return {"status": "running", "task_id": running_task.get("id")}
 
         task_id = create_task_record(db_path, user_id, task_type, "queued", request_payload, source=source)
+        logging.info(
+            "Task queued | type=%s user_id=%s task_id=%s source=%s",
+            task_type,
+            user_id,
+            task_id,
+            source,
+        )
 
     payload_data = dict(request_payload)
     payload_data["task_id"] = task_id
     payload_data["task_type"] = task_type
     payload_data["user_id"] = user_id
 
-    if _is_postgres_task_store_enabled() and _has_live_external_worker():
+    if _should_use_external_worker(task_type):
+        logging.info(
+            "Delegating task to external worker | type=%s user_id=%s task_id=%s",
+            task_type,
+            user_id,
+            task_id,
+        )
         return {
             "status": "started",
             "task_id": task_id,
@@ -6777,6 +6808,8 @@ def enqueue_task(
         }
     if _is_postgres_task_store_enabled():
         logging.warning("No live worker heartbeat detected; falling back to in-process task execution.")
+    if task_type == "scrape" and FORCE_IN_PROCESS_SCRAPE:
+        logging.info("Scrape task configured for in-process execution | task_id=%s", task_id)
 
     executor = get_task_executor(task_type)
     if background_tasks is not None:
@@ -6785,7 +6818,7 @@ def enqueue_task(
     else:
         launch_detached_task(executor, app, payload_data)
 
-    return {"status": "started", "task_id": task_id, "job_status": "processing"}
+    return {"status": "started", "task_id": task_id, "job_status": "processing", "execution_mode": "in-process"}
 
 
 def get_dashboard_stats(db_path: Path, user_id: Optional[str] = None) -> dict:
@@ -7468,7 +7501,13 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
     keyword = str(payload_data.get("keyword", "") or "").strip()
-    print(f"[scrape-task:{task_id}] Starting scrape task | keyword='{keyword}' | results={int(payload_data.get('results', 25))} | country={country_value}")
+    logging.info(
+        "[scrape-task:%s] Starting scrape task | keyword=%r | results=%s | country=%s",
+        task_id,
+        keyword,
+        int(payload_data.get("results", 25)),
+        country_value,
+    )
 
     default_profile = f"{DEFAULT_PROFILE_DIR}_{country_value.lower()}"
     user_data_dir = (
@@ -7479,7 +7518,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
     try:
         mark_task_running(db_path, task_id)
-        print(f"[scrape-task:{task_id}] Marked task as running")
+        logging.info("[scrape-task:%s] Marked task as running", task_id)
         requested_total = int(payload_data.get("results", 25))
         progress_state = {
             "phase": "scraping",
@@ -7489,7 +7528,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             "inserted": 0,
         }
         update_task_progress(db_path, task_id, progress_state)
-        print(f"[scrape-task:{task_id}] Initial progress state saved")
+        logging.info("[scrape-task:%s] Initial progress state saved", task_id)
 
         requested_headless = bool(payload_data.get("headless", False))
 
@@ -7521,13 +7560,17 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["total_to_find"] = int(total_to_find or requested_total)
             progress_state["scanned_count"] = int(scanned_count)
             update_task_progress(db_path, task_id, progress_state)
-            print(
-                f"[scrape-task:{task_id}] Progress | found={int(current_found)} | "
-                f"target={int(total_to_find or requested_total)} | scanned={int(scanned_count)}"
+            logging.info(
+                "[scrape-task:%s] Progress | found=%s | target=%s | scanned=%s",
+                task_id,
+                int(current_found),
+                int(total_to_find or requested_total),
+                int(scanned_count),
             )
 
         def _scrape_once(headless_value: bool):
-            print(f"[scrape-task:{task_id}] Starting Google Maps search... headless={bool(headless_value)}")
+            logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
+            logging.info("[scrape-task:%s] Navigating to Google Maps search...", task_id)
             with GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
@@ -7557,7 +7600,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             leads = [lead for lead in leads if not is_slovenia_address(getattr(lead, "address", None))]
 
         total_scraped_from_maps = len(leads)
-        print(f"[scrape-task:{task_id}] Google Maps search finished | leads_found={total_scraped_from_maps}")
+        logging.info("[scrape-task:%s] Google Maps search finished | leads_found=%s", task_id, total_scraped_from_maps)
 
         if leads:
             try:
@@ -7614,7 +7657,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 logging.warning("Supabase dedup check failed (will rely on DB constraints): %s", dedup_exc)
 
         inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=str(payload_data.get("user_id") or "legacy"))
-        print(f"[scrape-task:{task_id}] Saving to DB complete | inserted={int(inserted)}")
+        logging.info("[scrape-task:%s] Saving to DB complete | inserted=%s", task_id, int(inserted))
 
         progress_state["phase"] = "post_process"
         progress_state["inserted"] = inserted
@@ -7696,10 +7739,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 "billing_warning": billing_warning,
             },
         )
-        print(f"[scrape-task:{task_id}] Task completed successfully")
+        logging.info("[scrape-task:%s] Task completed successfully", task_id)
     except Exception as exc:
         logging.exception("Background scrape failed")
-        print(f"[scrape-task:{task_id}] Task failed: {exc}")
+        logging.error("[scrape-task:%s] Task failed: %s", task_id, exc)
         requested_total = int(payload_data.get("results", 25))
         fail_payload = {
             "phase": "failed",
@@ -8979,6 +9022,21 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    def _log_playwright_runtime_diagnostics() -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:
+            logging.exception("[startup] Playwright import failed: %s", exc)
+            return
+
+        try:
+            with sync_playwright() as playwright:
+                chromium_path = playwright.chromium.executable_path
+            exists = Path(chromium_path).exists() if chromium_path else False
+            logging.info("[startup] Playwright Chromium executable ready=%s path=%s", exists, chromium_path)
+        except Exception as exc:
+            logging.exception("[startup] Playwright runtime check failed: %s", exc)
+
     @app.on_event("startup")
     def startup_tasks() -> None:
         logging.basicConfig(
@@ -9005,6 +9063,9 @@ def create_app() -> FastAPI:
                 "[startup] WARNING: STATELESS_SUPABASE_ONLY is set but SUPABASE_SERVICE_ROLE_KEY is missing. "
                 "Backend write operations under RLS may fail. Set SUPABASE_SERVICE_ROLE_KEY in Railway env vars."
             )
+        else:
+            logging.info("[startup] Supabase service-role key detected for server-side writes.")
+        _log_playwright_runtime_diagnostics()
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
@@ -11533,19 +11594,19 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scrape")
     def run_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
-        print(f"[scrape] POST /api/scrape â€” keyword={payload.keyword!r} results={payload.results}")
+        logging.info("[scrape] POST /api/scrape | keyword=%r results=%s", payload.keyword, payload.results)
         _, billing, access = resolve_plan_access_context(
             request,
             feature_key="basic_search",
             allow_stripe_recovery=False,
         )
         user_id = require_current_user_id(request)
-        print(f"[scrape] user_id={user_id}")
+        logging.info("[scrape] request user_id=%s", user_id)
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
         try:
             ensure_scrape_tables(db_path)
         except Exception as _db_exc:
-            print(f"[scrape] DB init error: {_db_exc}")
+            logging.exception("[scrape] DB init error: %s", _db_exc)
             raise HTTPException(status_code=500, detail=f"Database offline: {_db_exc}")
 
         available_credits = max(0, int(billing.get("credits_balance") or 0))
@@ -11560,6 +11621,14 @@ def create_app() -> FastAPI:
         payload_data["country"] = normalize_country_value(payload.country, payload.country_code)
         payload_data["results"] = min(requested_results, available_credits)
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))
+        logging.info(
+            "[scrape] enqueueing task | user_id=%s keyword=%r results=%s headless=%s country=%s",
+            user_id,
+            payload.keyword,
+            payload_data["results"],
+            bool(payload.headless),
+            payload_data["country"],
+        )
         return enqueue_task(
             app,
             background_tasks,
