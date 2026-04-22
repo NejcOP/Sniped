@@ -98,6 +98,22 @@ def get_allowed_cors_origins() -> list[str]:
     ]
 
 
+def _safe_parse_db_url(raw_url: str):
+    value = str(raw_url or "").strip()
+    if not value:
+        return None
+    try:
+        return urlparse(value)
+    except ValueError:
+        # Handle malformed copied URLs where domain host is wrapped in []
+        # (e.g. user:pass@[db.project.supabase.co]:6543/postgres).
+        normalized = re.sub(r"@\[([A-Za-z0-9.-]+)\](:\d+)?", r"@\1\2", value)
+        try:
+            return urlparse(normalized)
+        except ValueError:
+            return None
+
+
 def _read_env_int(name: str, default: int, minimum: int = 1) -> int:
     raw_value = str(os.environ.get(name, default) or default).strip()
     try:
@@ -8909,9 +8925,9 @@ def create_app() -> FastAPI:
         if resolved_db_url:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
-            parsed_db = urlparse(resolved_db_url)
+            parsed_db = _safe_parse_db_url(resolved_db_url)
             try:
-                parsed_port = parsed_db.port
+                parsed_port = parsed_db.port if parsed_db else None
             except ValueError:
                 parsed_port = None
                 logging.warning("[startup] DATABASE_URL has malformed port component; check env formatting.")
@@ -8982,7 +8998,7 @@ def create_app() -> FastAPI:
     def health() -> dict:
         settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         resolved_db_url = str(settings.get("resolved_database_url") or settings.get("database_url") or "").strip()
-        parsed_db = urlparse(resolved_db_url) if resolved_db_url else None
+        parsed_db = _safe_parse_db_url(resolved_db_url)
         try:
             parsed_port = int(parsed_db.port) if parsed_db and parsed_db.port else None
         except ValueError:
