@@ -267,20 +267,19 @@ def _is_supabase_host(url: str) -> bool:
 
 
 def _build_database_url_candidates() -> list[str]:
-    # Prefer explicit pooler URLs first.
-    raw_pooler = str(
-        os.environ.get("SUPABASE_DB_POOLER_URL")
-        or os.environ.get("SUPABASE_POOLER_URL")
-        or ""
-    ).strip()
     raw_primary = str(
         os.environ.get("DATABASE_URL")
         or os.environ.get("SUPABASE_DATABASE_URL")
         or ""
     ).strip()
+    raw_pooler = str(
+        os.environ.get("SUPABASE_DB_POOLER_URL")
+        or os.environ.get("SUPABASE_POOLER_URL")
+        or ""
+    ).strip()
     raw_config = _load_database_url_from_config_file()
 
-    raw_candidates = [c for c in [raw_pooler, raw_primary, raw_config] if c]
+    raw_candidates = [c for c in [raw_primary, raw_pooler, raw_config] if c]
     if not raw_candidates:
         return []
 
