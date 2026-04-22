@@ -7604,14 +7604,41 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     stall_timeout_seconds=scrape_stall_limit,
                 )
 
+        def _scrape_with_boot_timeout(headless_value: bool):
+            boot_timeout_seconds = max(20, int(os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS", "75") or "75"))
+            done = Event()
+            result_box: dict[str, Any] = {}
+            error_box: dict[str, Exception] = {}
+
+            def _target() -> None:
+                try:
+                    result_box["leads"] = _scrape_once(headless_value)
+                except Exception as exc:
+                    error_box["exc"] = exc
+                finally:
+                    done.set()
+
+            worker = Thread(target=_target, daemon=True)
+            worker.start()
+
+            if not done.wait(timeout=boot_timeout_seconds):
+                raise TimeoutError(
+                    f"Scrape startup timeout after {boot_timeout_seconds}s while opening browser/Maps."
+                )
+
+            if "exc" in error_box:
+                raise error_box["exc"]
+
+            return result_box.get("leads") or []
+
         try:
-            leads = _scrape_once(requested_headless)
+            leads = _scrape_with_boot_timeout(requested_headless)
         except Exception as scrape_exc:
             # Non-headless sessions can be interrupted by consent/ad popups or manual window close.
             msg = str(scrape_exc).lower()
             if (not requested_headless) and ("has been closed" in msg or "target page" in msg):
                 logging.warning("Scrape interrupted in visible browser; retrying once in headless mode.")
-                leads = _scrape_once(True)
+                leads = _scrape_with_boot_timeout(True)
             else:
                 raise
 
