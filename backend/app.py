@@ -48,7 +48,7 @@ except Exception:
     _HAS_SUPABASE = False
 
 from backend.check_access import get_plan_feature_access, normalize_plan_key, require_feature_access
-from backend.scraper.db import batch_upsert_leads, get_engine as pg_get_engine, init_db, upsert_lead
+from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, upsert_lead
 from backend.scraper.exporter import export_target_leads
 from backend.scraper.google_maps import GoogleMapsScraper
 from backend.scraper.phone_extractor import PhoneExtractor
@@ -4109,9 +4109,15 @@ def load_supabase_settings(config_path: Path) -> dict:
     database_url = str(
         os.environ.get("DATABASE_URL")
         or os.environ.get("SUPABASE_DATABASE_URL")
+        or os.environ.get("SUPABASE_DB_POOLER_URL")
+        or os.environ.get("SUPABASE_POOLER_URL")
         or ("" if env_only else supabase_cfg.get("database_url", ""))
         or ""
     ).strip()
+    try:
+        resolved_database_url = pg_get_database_url()
+    except Exception:
+        resolved_database_url = database_url
     shared_key = str(os.environ.get("SUPABASE_KEY") or ("" if env_only else supabase_cfg.get("key", "")) or "").strip()
     service_role_key = str(
         os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -4144,7 +4150,8 @@ def load_supabase_settings(config_path: Path) -> dict:
         "url": url,
         "key": key,
         "database_url": database_url,
-        "has_database_url": bool(database_url),
+        "resolved_database_url": resolved_database_url,
+        "has_database_url": bool(resolved_database_url or database_url),
         "has_service_role": bool(service_role_key),
         "has_publishable": bool(publishable_key),
         "primary_mode": primary_mode,
@@ -8898,6 +8905,13 @@ def create_app() -> FastAPI:
         )
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+        resolved_db_url = str(supabase_settings.get("resolved_database_url") or supabase_settings.get("database_url") or "").strip()
+        if resolved_db_url:
+            parsed_db = urlparse(resolved_db_url)
+            if parsed_db.port == 5432:
+                logging.warning(
+                    "[startup] DATABASE_URL is using port 5432 (direct). Prefer Supabase pooler transaction mode on port 6543."
+                )
         if STATELESS_SUPABASE_ONLY and not supabase_settings.get("has_service_role"):
             print(
                 "[startup] WARNING: STATELESS_SUPABASE_ONLY is set but SUPABASE_SERVICE_ROLE_KEY is missing. "
