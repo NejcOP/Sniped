@@ -3434,10 +3434,6 @@ function App({ initialTab = 'leads' }) {
     return () => window.clearTimeout(timer)
   }, [showTopUpModal, selectedTopUpPackageId, requestTopUpCheckoutUrl])
 
-  const handleTopUpProceed = useCallback((packageId) => {
-    void startTopUpCheckout(packageId)
-  }, [startTopUpCheckout])
-
   const navigateToCheckoutWithFallback = useCallback((checkoutUrl) => {
     const targetUrl = String(checkoutUrl || '').trim()
     if (!targetUrl) return
@@ -3481,6 +3477,10 @@ function App({ initialTab = 'leads' }) {
       setTopUpLoadingPackageId('')
     }
   }, [navigateToCheckoutWithFallback, requestTopUpCheckoutUrl])
+
+  const handleTopUpProceed = useCallback((packageId) => {
+    void startTopUpCheckout(packageId)
+  }, [startTopUpCheckout])
 
   async function saveConfig(e) {
     e.preventDefault()
