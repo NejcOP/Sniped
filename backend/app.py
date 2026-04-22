@@ -9075,7 +9075,7 @@ def create_app() -> FastAPI:
             logging.exception("[startup] Playwright runtime check failed: %s", exc)
 
     def _prewarm_scraper_browser() -> None:
-        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         if not warm_enabled:
             logging.info("[startup] SCRAPE_WARM_BROWSER disabled; skipping browser warm-up.")
             return

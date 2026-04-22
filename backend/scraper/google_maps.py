@@ -170,14 +170,13 @@ class GoogleMapsScraper:
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
-            "--single-process",
         ]
         proxy_config = None
         if self.proxy_url:
             proxy_config = {"server": self.proxy_url}
             logging.info("Scraper: using proxy %s", self.proxy_url.split("@")[-1])
 
-        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         can_use_shared = bool(self.headless and warm_enabled and proxy_config is None)
 
         if can_use_shared:
@@ -248,7 +247,6 @@ class GoogleMapsScraper:
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
-            "--single-process",
         ]
         cls._acquire_shared_browser(headless=headless, launch_args=launch_args)
 
