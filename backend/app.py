@@ -8907,6 +8907,8 @@ def create_app() -> FastAPI:
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         resolved_db_url = str(supabase_settings.get("resolved_database_url") or supabase_settings.get("database_url") or "").strip()
         if resolved_db_url:
+            os.environ["DATABASE_URL"] = resolved_db_url
+            os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
             parsed_db = urlparse(resolved_db_url)
             if parsed_db.port == 5432:
                 logging.warning(
@@ -8973,12 +8975,16 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict:
         settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+        resolved_db_url = str(settings.get("resolved_database_url") or settings.get("database_url") or "").strip()
+        parsed_db = urlparse(resolved_db_url) if resolved_db_url else None
         return {
             "ok": True,
             "database": "supabase",
             "supabase_enabled": bool(settings.get("enabled")),
             "supabase_primary": bool(settings.get("primary_mode")),
             "has_database_url": bool(settings.get("has_database_url")),
+            "db_host": str(parsed_db.hostname or "") if parsed_db else "",
+            "db_port": int(parsed_db.port) if parsed_db and parsed_db.port else None,
         }
 
     @app.get("/api/system-status")

@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import socket
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -102,6 +103,31 @@ def _with_default_query_params(url: str, params: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
+def _with_port(url: str, new_port: int) -> str:
+    parsed = urlparse(url)
+    replacement_netloc = parsed.netloc
+    if "@" in replacement_netloc:
+        credentials, host_port = replacement_netloc.rsplit("@", 1)
+        host_only = host_port.split(":", 1)[0]
+        replacement_netloc = f"{credentials}@{host_only}:{new_port}"
+    else:
+        host_only = replacement_netloc.split(":", 1)[0]
+        replacement_netloc = f"{host_only}:{new_port}"
+    return urlunparse(parsed._replace(netloc=replacement_netloc))
+
+
+def _resolve_ipv4_hostaddr(hostname: str) -> str:
+    try:
+        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
+        for info in infos:
+            sockaddr = info[4]
+            if isinstance(sockaddr, tuple) and sockaddr and sockaddr[0]:
+                return str(sockaddr[0])
+    except Exception:
+        return ""
+    return ""
+
+
 def _prefer_supabase_pooler_url(raw_url: str) -> str:
     url = str(raw_url or "").strip()
     if not url:
@@ -130,6 +156,75 @@ def _prefer_supabase_pooler_url(raw_url: str) -> str:
     return url
 
 
+def _is_supabase_host(url: str) -> bool:
+    host = str(urlparse(url).hostname or "").strip().lower()
+    return host.endswith(".supabase.co") or host.endswith(".pooler.supabase.com")
+
+
+def _build_database_url_candidates() -> list[str]:
+    # Prefer explicit pooler URLs first.
+    raw_pooler = str(
+        os.environ.get("SUPABASE_DB_POOLER_URL")
+        or os.environ.get("SUPABASE_POOLER_URL")
+        or ""
+    ).strip()
+    raw_primary = str(
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("SUPABASE_DATABASE_URL")
+        or ""
+    ).strip()
+
+    raw_candidates = [c for c in [raw_pooler, raw_primary] if c]
+    if not raw_candidates:
+        return []
+
+    query_defaults = {
+        "sslmode": "require",
+        "connect_timeout": str(DEFAULT_DB_CONNECT_TIMEOUT),
+        "application_name": "sniped-backend",
+        "keepalives": "1",
+        "keepalives_idle": "30",
+        "keepalives_interval": "10",
+        "keepalives_count": "5",
+    }
+
+    configured_hostaddr = str(os.environ.get("DB_HOSTADDR_IPV4") or os.environ.get("SUPABASE_DB_HOSTADDR") or "").strip()
+    force_ipv4 = str(os.environ.get("DB_FORCE_IPV4") or "1").strip().lower() in {"1", "true", "yes", "on"}
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _push(url_value: str) -> None:
+        if url_value and url_value not in seen:
+            seen.add(url_value)
+            candidates.append(url_value)
+
+    for raw in raw_candidates:
+        normalized = _normalize_database_url(raw)
+        pooler_candidate = _prefer_supabase_pooler_url(normalized)
+
+        parsed = urlparse(pooler_candidate)
+        host = str(parsed.hostname or "").strip()
+
+        base_with_defaults = _with_default_query_params(pooler_candidate, query_defaults)
+        _push(base_with_defaults)
+
+        # Try transaction pooler port for direct Supabase host fallback.
+        if host.lower().startswith("db.") and host.lower().endswith(".supabase.co") and (parsed.port in (None, 5432)):
+            pooled = _with_default_query_params(_with_port(pooler_candidate, 6543), query_defaults)
+            _push(pooled)
+
+        # Prefer IPv4 hostaddr when runtime has IPv6 routing issues.
+        hostaddr = configured_hostaddr
+        if not hostaddr and force_ipv4 and _is_supabase_host(pooler_candidate):
+            hostaddr = _resolve_ipv4_hostaddr(host)
+        if hostaddr:
+            with_ipv4 = _with_default_query_params(base_with_defaults, {"hostaddr": hostaddr})
+            _push(with_ipv4)
+
+    return candidates
+
+
 def _normalize_database_url(raw_url: str) -> str:
     url = str(raw_url or "").strip()
     if not url:
@@ -143,73 +238,53 @@ def _normalize_database_url(raw_url: str) -> str:
 
 def get_database_url(db_path: Optional[str] = None) -> str:
     del db_path
-    configured = str(
-        os.environ.get("DATABASE_URL")
-        or os.environ.get("SUPABASE_DATABASE_URL")
-        or os.environ.get("SUPABASE_DB_POOLER_URL")
-        or os.environ.get("SUPABASE_POOLER_URL")
-        or ""
-    ).strip()
-    if configured:
-        url = _normalize_database_url(configured)
-        url = _prefer_supabase_pooler_url(url)
-
-        # For managed/containerized runtimes, ensure SSL and finite connect timeout.
-        query_defaults = {
-            "sslmode": "require",
-            "connect_timeout": str(DEFAULT_DB_CONNECT_TIMEOUT),
-            "application_name": "sniped-backend",
-            "keepalives": "1",
-            "keepalives_idle": "30",
-            "keepalives_interval": "10",
-            "keepalives_count": "5",
-        }
-
-        # Optional explicit IPv4 override when runtime cannot route IPv6.
-        hostaddr = str(os.environ.get("DB_HOSTADDR_IPV4") or os.environ.get("SUPABASE_DB_HOSTADDR") or "").strip()
-        if hostaddr:
-            query_defaults["hostaddr"] = hostaddr
-
-        return _with_default_query_params(url, query_defaults)
+    candidates = _build_database_url_candidates()
+    if candidates:
+        return candidates[0]
     raise RuntimeError("SUPABASE_DATABASE_URL or DATABASE_URL is required.")
 
 
 def get_engine(db_path: Optional[str] = None) -> Any:
-    database_url = get_database_url(db_path)
-    cached = _ENGINE_CACHE.get(database_url)
-    if cached is not None:
-        return cached
+    primary_url = get_database_url(db_path)
+    candidates = _build_database_url_candidates() or [primary_url]
+
+    for candidate_url in candidates:
+        cached = _ENGINE_CACHE.get(candidate_url)
+        if cached is not None:
+            return cached
 
     last_error: Optional[Exception] = None
-    for attempt in range(1, DEFAULT_DB_CONNECT_RETRIES + 1):
-        engine = create_engine(
-            database_url,
-            future=True,
-            pool_pre_ping=True,
-            pool_size=DEFAULT_DB_POOL_SIZE,
-            max_overflow=DEFAULT_DB_MAX_OVERFLOW,
-            pool_recycle=DEFAULT_DB_POOL_RECYCLE,
-            pool_use_lifo=True,
-        )
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            _ENGINE_CACHE[database_url] = engine
-            return engine
-        except Exception as exc:
-            last_error = exc
+    for candidate_url in candidates:
+        for attempt in range(1, DEFAULT_DB_CONNECT_RETRIES + 1):
+            engine = create_engine(
+                candidate_url,
+                future=True,
+                pool_pre_ping=True,
+                pool_size=DEFAULT_DB_POOL_SIZE,
+                max_overflow=DEFAULT_DB_MAX_OVERFLOW,
+                pool_recycle=DEFAULT_DB_POOL_RECYCLE,
+                pool_use_lifo=True,
+            )
             try:
-                engine.dispose()
-            except Exception:
-                pass
-            if attempt < DEFAULT_DB_CONNECT_RETRIES:
-                logging.warning(
-                    "DB connect attempt %s/%s failed: %s",
-                    attempt,
-                    DEFAULT_DB_CONNECT_RETRIES,
-                    exc,
-                )
-                time.sleep(DEFAULT_DB_CONNECT_RETRY_DELAY)
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                _ENGINE_CACHE[candidate_url] = engine
+                return engine
+            except Exception as exc:
+                last_error = exc
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+                if attempt < DEFAULT_DB_CONNECT_RETRIES:
+                    logging.warning(
+                        "DB connect attempt %s/%s failed for candidate %s: %s",
+                        attempt,
+                        DEFAULT_DB_CONNECT_RETRIES,
+                        urlparse(candidate_url).netloc,
+                        exc,
+                    )
+                    time.sleep(DEFAULT_DB_CONNECT_RETRY_DELAY)
 
     raise RuntimeError(
         "Database connection failed after retries. Check DATABASE_URL (Supabase pooler on port 6543), "
