@@ -24,7 +24,7 @@ class Base(DeclarativeBase):
 class LeadRecord(Base):
     __tablename__ = "leads"
     __table_args__ = (
-        UniqueConstraint("business_name", "address", name="uq_leads_business_name_address"),
+        UniqueConstraint("user_id", "business_name", "address", name="uq_leads_user_business_address"),
         Index("idx_leads_user_created_at", "user_id", "created_at", "id"),
     )
 
@@ -516,6 +516,7 @@ def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "runtime-db"
     with session_factory() as session:
         existing = session.execute(
             select(LeadRecord).where(
+                LeadRecord.user_id == str(user_id),
                 LeadRecord.business_name == lead.business_name,
                 LeadRecord.address == lead.address,
             )
@@ -569,6 +570,7 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
     with session_factory() as session:
         existing = session.execute(
             select(LeadRecord.id).where(
+                LeadRecord.user_id == str(user_id),
                 LeadRecord.business_name == lead.business_name,
                 LeadRecord.address == lead.address,
             )
@@ -587,7 +589,9 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
-        existing_records = session.execute(select(LeadRecord.business_name, LeadRecord.address)).all()
+        existing_records = session.execute(
+            select(LeadRecord.business_name, LeadRecord.address).where(LeadRecord.user_id == str(user_id))
+        ).all()
         existing_keys = {(row[0], row[1]) for row in existing_records}
         inserted = 0
         for lead in leads:

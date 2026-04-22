@@ -7507,6 +7507,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     db_path = resolve_path(payload_data.get("db_path"), DEFAULT_DB_PATH)
     ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
+    task_user_id = str(payload_data.get("user_id") or "").strip()
+    if not task_user_id:
+        raise RuntimeError("Missing user_id in scrape task payload. Refusing to write unscoped leads.")
     keyword = str(payload_data.get("keyword", "") or "").strip()
     logging.info(
         "[scrape-task:%s] Starting scrape task | keyword=%r | results=%s | country=%s",
@@ -7673,6 +7676,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     existing_rows = supabase_select_rows(
                         sb_client, "leads",
                         columns="business_name,address",
+                        filters={"user_id": task_user_id},
                     )
                     existing_keys: set[tuple[str, str]] = {
                         (str(r.get("business_name", "") or "").strip().lower(),
@@ -7689,7 +7693,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             except Exception as dedup_exc:
                 logging.warning("Supabase dedup check failed (will rely on DB constraints): %s", dedup_exc)
 
-        inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=str(payload_data.get("user_id") or "legacy"))
+        inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=task_user_id)
         logging.info("[scrape-task:%s] Saving to DB complete | inserted=%s", task_id, int(inserted))
 
         progress_state["phase"] = "post_process"
@@ -7710,7 +7714,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 """,
                 (
                     str(payload_data.get("keyword", "")).strip(),
-                    str(payload_data.get("user_id") or "legacy"),
+                    task_user_id,
                 ),
             )
             conn.commit()
@@ -7727,7 +7731,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 db_path=str(db_path),
                 output_csv=str(output_path),
                 min_score=HIGH_AI_SCORE_THRESHOLD,
-                user_id=str(payload_data.get("user_id") or "legacy"),
+                user_id=task_user_id,
             )
             output_csv = str(output_path)
 
