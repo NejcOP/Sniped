@@ -103,6 +103,15 @@ def _with_default_query_params(url: str, params: dict[str, str]) -> str:
             query[key] = value
     return urlunparse(parsed._replace(query=urlencode(query)))
 
+
+def _strip_invalid_hostaddr_query(url: str) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    hostaddr = str(query.get("hostaddr") or "").strip()
+    if hostaddr and not _is_ip_literal(hostaddr):
+        query.pop("hostaddr", None)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
 def _sanitize_database_url(raw_url: str) -> str:
     value = str(raw_url or "").strip()
     if not value:
@@ -182,7 +191,10 @@ def _prefer_supabase_pooler_url(raw_url: str) -> str:
 
     parsed = urlparse(url)
     host = str(parsed.hostname or "").strip().lower()
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return url
 
     # If the standard Supabase direct host/port is used, switch to pooler port.
     if host.startswith("db.") and host.endswith(".supabase.co") and (port in (None, 5432)):
@@ -236,6 +248,9 @@ def _build_database_url_candidates() -> list[str]:
     }
 
     configured_hostaddr = str(os.environ.get("DB_HOSTADDR_IPV4") or os.environ.get("SUPABASE_DB_HOSTADDR") or "").strip()
+    if configured_hostaddr and not _is_ip_literal(configured_hostaddr):
+        logging.warning("Ignoring DB_HOSTADDR_IPV4/SUPABASE_DB_HOSTADDR because value is not an IP address.")
+        configured_hostaddr = ""
     force_ipv4 = str(os.environ.get("DB_FORCE_IPV4") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
     candidates: list[str] = []
@@ -248,16 +263,20 @@ def _build_database_url_candidates() -> list[str]:
 
     for raw in raw_candidates:
         normalized = _normalize_database_url(raw)
-        pooler_candidate = _prefer_supabase_pooler_url(normalized)
+        pooler_candidate = _strip_invalid_hostaddr_query(_prefer_supabase_pooler_url(normalized))
 
         parsed = urlparse(pooler_candidate)
         host = str(parsed.hostname or "").strip()
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            parsed_port = None
 
         base_with_defaults = _with_default_query_params(pooler_candidate, query_defaults)
         _push(base_with_defaults)
 
         # Try transaction pooler port for direct Supabase host fallback.
-        if host.lower().startswith("db.") and host.lower().endswith(".supabase.co") and (parsed.port in (None, 5432)):
+        if host.lower().startswith("db.") and host.lower().endswith(".supabase.co") and (parsed_port in (None, 5432)):
             pooled = _with_default_query_params(_with_port(pooler_candidate, 6543), query_defaults)
             _push(pooled)
 
@@ -313,9 +332,6 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                 pool_use_lifo=True,
             )
             try:
-                if configured_hostaddr and not _is_ip_literal(configured_hostaddr):
-                    logging.warning("Ignoring DB_HOSTADDR_IPV4/SUPABASE_DB_HOSTADDR because value is not an IP address.")
-                    configured_hostaddr = ""
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
                 _ENGINE_CACHE[candidate_url] = engine

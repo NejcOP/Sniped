@@ -98,20 +98,41 @@ def get_allowed_cors_origins() -> list[str]:
     ]
 
 
-def _safe_parse_db_url(raw_url: str):
+def _extract_db_host_port(raw_url: str) -> tuple[str, Optional[int]]:
     value = str(raw_url or "").strip()
     if not value:
-        return None
-    try:
-        return urlparse(value)
-    except ValueError:
-        # Handle malformed copied URLs where domain host is wrapped in []
-        # (e.g. user:pass@[db.project.supabase.co]:6543/postgres).
-        normalized = re.sub(r"@\[([A-Za-z0-9.-]+)\](:\d+)?", r"@\1\2", value)
-        try:
-            return urlparse(normalized)
-        except ValueError:
-            return None
+        return "", None
+
+    cleaned = value.replace("\n", "").replace("\r", "").strip()
+    if "://" in cleaned:
+        cleaned = cleaned.split("://", 1)[1]
+    authority = cleaned.split("/", 1)[0].strip()
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1].strip()
+
+    host = authority
+    port: Optional[int] = None
+
+    if authority.startswith("[") and "]" in authority:
+        inside = authority[1:authority.index("]")]
+        tail = authority[authority.index("]") + 1 :]
+        host = inside
+        if tail.startswith(":"):
+            try:
+                port = int(tail[1:])
+            except ValueError:
+                port = None
+    else:
+        if authority.count(":") == 1:
+            candidate_host, candidate_port = authority.rsplit(":", 1)
+            host = candidate_host
+            try:
+                port = int(candidate_port)
+            except ValueError:
+                port = None
+
+    host = host.strip().strip("[]")
+    return host, port
 
 
 def _read_env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -8925,12 +8946,7 @@ def create_app() -> FastAPI:
         if resolved_db_url:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
-            parsed_db = _safe_parse_db_url(resolved_db_url)
-            try:
-                parsed_port = parsed_db.port if parsed_db else None
-            except ValueError:
-                parsed_port = None
-                logging.warning("[startup] DATABASE_URL has malformed port component; check env formatting.")
+            _, parsed_port = _extract_db_host_port(resolved_db_url)
 
             if parsed_port == 5432:
                 logging.warning(
@@ -8998,18 +9014,14 @@ def create_app() -> FastAPI:
     def health() -> dict:
         settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         resolved_db_url = str(settings.get("resolved_database_url") or settings.get("database_url") or "").strip()
-        parsed_db = _safe_parse_db_url(resolved_db_url)
-        try:
-            parsed_port = int(parsed_db.port) if parsed_db and parsed_db.port else None
-        except ValueError:
-            parsed_port = None
+        db_host, parsed_port = _extract_db_host_port(resolved_db_url)
         return {
             "ok": True,
             "database": "supabase",
             "supabase_enabled": bool(settings.get("enabled")),
             "supabase_primary": bool(settings.get("primary_mode")),
             "has_database_url": bool(settings.get("has_database_url")),
-            "db_host": str(parsed_db.hostname or "") if parsed_db else "",
+            "db_host": db_host,
             "db_port": parsed_port,
         }
 
