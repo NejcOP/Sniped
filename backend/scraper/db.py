@@ -105,12 +105,25 @@ def _with_default_query_params(url: str, params: dict[str, str]) -> str:
 
 
 def _strip_invalid_hostaddr_query(url: str) -> str:
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    value = str(url or "").strip()
+    if not value or "?" not in value:
+        return value
+
+    base, query_part = value.split("?", 1)
+    fragment = ""
+    if "#" in query_part:
+        query_part, fragment = query_part.split("#", 1)
+
+    query = dict(parse_qsl(query_part, keep_blank_values=True))
     hostaddr = str(query.get("hostaddr") or "").strip()
     if hostaddr and not _is_ip_literal(hostaddr):
         query.pop("hostaddr", None)
-    return urlunparse(parsed._replace(query=urlencode(query)))
+
+    encoded = urlencode(query)
+    rebuilt = f"{base}?{encoded}" if encoded else base
+    if fragment:
+        rebuilt = f"{rebuilt}#{fragment}"
+    return rebuilt
 
 def _sanitize_database_url(raw_url: str) -> str:
     value = str(raw_url or "").strip()
@@ -121,31 +134,38 @@ def _sanitize_database_url(raw_url: str) -> str:
     value = value.replace("\n", "").replace("\r", "")
     value = value.replace(":// ", "://").replace(" @", "@").replace("@ ", "@")
 
-    parsed = urlparse(value)
-    netloc = str(parsed.netloc or "").strip()
-    if not netloc:
+    if "://" not in value:
         return value
 
-    if "@" in netloc:
-        creds, host_port = netloc.rsplit("@", 1)
+    scheme, rest = value.split("://", 1)
+    authority, sep, path_tail = rest.partition("/")
+    authority = authority.strip()
+    if not authority:
+        return value
+
+    if "@" in authority:
+        creds, host_port = authority.rsplit("@", 1)
         host_port = host_port.strip()
         if host_port.startswith("[") and "]" in host_port:
             inside = host_port[1:host_port.index("]")]
-            tail = host_port[host_port.index("]") + 1 :]
+            host_suffix = host_port[host_port.index("]") + 1 :]
             # Unwrap brackets only for non-IPv6 hosts.
             if ":" not in inside:
-                host_port = f"{inside}{tail}"
-        netloc = f"{creds}@{host_port}"
+                host_port = f"{inside}{host_suffix}"
+        authority = f"{creds}@{host_port}"
     else:
-        host_port = netloc
+        host_port = authority
         if host_port.startswith("[") and "]" in host_port:
             inside = host_port[1:host_port.index("]")]
-            tail = host_port[host_port.index("]") + 1 :]
+            host_suffix = host_port[host_port.index("]") + 1 :]
             if ":" not in inside:
-                host_port = f"{inside}{tail}"
-        netloc = host_port
+                host_port = f"{inside}{host_suffix}"
+        authority = host_port
 
-    return urlunparse(parsed._replace(netloc=netloc))
+    rebuilt = f"{scheme}://{authority}"
+    if sep:
+        rebuilt = f"{rebuilt}/{path_tail}"
+    return rebuilt
 
 
 def _is_ip_literal(value: str) -> bool:
@@ -189,7 +209,10 @@ def _prefer_supabase_pooler_url(raw_url: str) -> str:
     if not url:
         return url
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
     host = str(parsed.hostname or "").strip().lower()
     try:
         port = parsed.port
@@ -216,7 +239,10 @@ def _prefer_supabase_pooler_url(raw_url: str) -> str:
 
 
 def _is_supabase_host(url: str) -> bool:
-    host = str(urlparse(url).hostname or "").strip().lower()
+    try:
+        host = str(urlparse(url).hostname or "").strip().lower()
+    except ValueError:
+        return False
     return host.endswith(".supabase.co") or host.endswith(".pooler.supabase.com")
 
 
@@ -265,7 +291,11 @@ def _build_database_url_candidates() -> list[str]:
         normalized = _normalize_database_url(raw)
         pooler_candidate = _strip_invalid_hostaddr_query(_prefer_supabase_pooler_url(normalized))
 
-        parsed = urlparse(pooler_candidate)
+        try:
+            parsed = urlparse(pooler_candidate)
+        except ValueError:
+            logging.warning("Skipping malformed DATABASE_URL candidate")
+            continue
         host = str(parsed.hostname or "").strip()
         try:
             parsed_port = parsed.port
@@ -343,11 +373,15 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                 except Exception:
                     pass
                 if attempt < DEFAULT_DB_CONNECT_RETRIES:
+                    try:
+                        candidate_netloc = urlparse(candidate_url).netloc
+                    except ValueError:
+                        candidate_netloc = "<malformed-url>"
                     logging.warning(
                         "DB connect attempt %s/%s failed for candidate %s: %s",
                         attempt,
                         DEFAULT_DB_CONNECT_RETRIES,
-                        urlparse(candidate_url).netloc,
+                        candidate_netloc,
                         exc,
                     )
                     time.sleep(DEFAULT_DB_CONNECT_RETRY_DELAY)
