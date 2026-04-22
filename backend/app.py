@@ -7467,6 +7467,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     db_path = resolve_path(payload_data.get("db_path"), DEFAULT_DB_PATH)
     ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
+    keyword = str(payload_data.get("keyword", "") or "").strip()
+    print(f"[scrape-task:{task_id}] Starting scrape task | keyword='{keyword}' | results={int(payload_data.get('results', 25))} | country={country_value}")
 
     default_profile = f"{DEFAULT_PROFILE_DIR}_{country_value.lower()}"
     user_data_dir = (
@@ -7477,6 +7479,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
     try:
         mark_task_running(db_path, task_id)
+        print(f"[scrape-task:{task_id}] Marked task as running")
         requested_total = int(payload_data.get("results", 25))
         progress_state = {
             "phase": "scraping",
@@ -7486,6 +7489,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             "inserted": 0,
         }
         update_task_progress(db_path, task_id, progress_state)
+        print(f"[scrape-task:{task_id}] Initial progress state saved")
 
         requested_headless = bool(payload_data.get("headless", False))
 
@@ -7517,8 +7521,13 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["total_to_find"] = int(total_to_find or requested_total)
             progress_state["scanned_count"] = int(scanned_count)
             update_task_progress(db_path, task_id, progress_state)
+            print(
+                f"[scrape-task:{task_id}] Progress | found={int(current_found)} | "
+                f"target={int(total_to_find or requested_total)} | scanned={int(scanned_count)}"
+            )
 
         def _scrape_once(headless_value: bool):
+            print(f"[scrape-task:{task_id}] Starting Google Maps search... headless={bool(headless_value)}")
             with GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
@@ -7548,6 +7557,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             leads = [lead for lead in leads if not is_slovenia_address(getattr(lead, "address", None))]
 
         total_scraped_from_maps = len(leads)
+        print(f"[scrape-task:{task_id}] Google Maps search finished | leads_found={total_scraped_from_maps}")
 
         if leads:
             try:
@@ -7604,6 +7614,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 logging.warning("Supabase dedup check failed (will rely on DB constraints): %s", dedup_exc)
 
         inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=str(payload_data.get("user_id") or "legacy"))
+        print(f"[scrape-task:{task_id}] Saving to DB complete | inserted={int(inserted)}")
 
         progress_state["phase"] = "post_process"
         progress_state["inserted"] = inserted
@@ -7685,8 +7696,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 "billing_warning": billing_warning,
             },
         )
+        print(f"[scrape-task:{task_id}] Task completed successfully")
     except Exception as exc:
         logging.exception("Background scrape failed")
+        print(f"[scrape-task:{task_id}] Task failed: {exc}")
         requested_total = int(payload_data.get("results", 25))
         fail_payload = {
             "phase": "failed",
