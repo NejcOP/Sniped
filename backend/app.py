@@ -24,7 +24,7 @@ from functools import wraps
 from pathlib import Path
 from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Callable, List, Optional
-from urllib.parse import quote_plus, urlencode, urlparse
+from urllib.parse import quote_plus, unquote, urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -8942,14 +8942,14 @@ def create_app() -> FastAPI:
         )
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
-        resolved_db_url = str(supabase_settings.get("resolved_database_url") or supabase_settings.get("database_url") or "").strip()
+        resolved_db_url = unquote(str(supabase_settings.get("resolved_database_url") or supabase_settings.get("database_url") or "").strip())
         if resolved_db_url:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
             parsed_host, parsed_port = _extract_db_host_port(resolved_db_url)
 
             if parsed_host:
-                print(f"[startup] DATABASE_URL host: {parsed_host}")
+                print(f"Attempting connection to: {parsed_host}")
 
             if parsed_port == 5432:
                 logging.warning(

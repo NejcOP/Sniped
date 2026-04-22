@@ -2,8 +2,6 @@ import os
 import time
 import json
 import logging
-import socket
-import ipaddress
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
@@ -120,27 +118,6 @@ def _with_default_query_params(url: str, params: dict[str, str]) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-def _strip_invalid_hostaddr_query(url: str) -> str:
-    value = str(url or "").strip()
-    if not value or "?" not in value:
-        return value
-
-    base, query_part = value.split("?", 1)
-    fragment = ""
-    if "#" in query_part:
-        query_part, fragment = query_part.split("#", 1)
-
-    query = dict(parse_qsl(query_part, keep_blank_values=True))
-    hostaddr = str(query.get("hostaddr") or "").strip()
-    if hostaddr and not _is_ip_literal(hostaddr):
-        query.pop("hostaddr", None)
-
-    encoded = urlencode(query)
-    rebuilt = f"{base}?{encoded}" if encoded else base
-    if fragment:
-        rebuilt = f"{rebuilt}#{fragment}"
-    return rebuilt
-
 def _sanitize_database_url(raw_url: str) -> str:
     value = str(raw_url or "").strip()
     if not value:
@@ -182,19 +159,6 @@ def _sanitize_database_url(raw_url: str) -> str:
     if sep:
         rebuilt = f"{rebuilt}/{path_tail}"
     return rebuilt
-
-
-def _is_ip_literal(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-    try:
-        ipaddress.ip_address(text)
-        return True
-    except ValueError:
-        return False
-
-
 def _with_port(url: str, new_port: int) -> str:
     parsed = urlparse(url)
     replacement_netloc = parsed.netloc
@@ -206,20 +170,6 @@ def _with_port(url: str, new_port: int) -> str:
         host_only = replacement_netloc.split(":", 1)[0]
         replacement_netloc = f"{host_only}:{new_port}"
     return urlunparse(parsed._replace(netloc=replacement_netloc))
-
-
-def _resolve_ipv4_hostaddr(hostname: str) -> str:
-    try:
-        infos = socket.getaddrinfo(hostname, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
-        for info in infos:
-            sockaddr = info[4]
-            if isinstance(sockaddr, tuple) and sockaddr and sockaddr[0]:
-                return str(sockaddr[0])
-    except Exception:
-        return ""
-    return ""
-
-
 def _engine_connect_url(raw_url: str) -> str:
     return unquote(str(raw_url or "").strip())
 
@@ -256,16 +206,6 @@ def _prefer_supabase_pooler_url(raw_url: str) -> str:
         url = urlunparse(parsed._replace(netloc=replacement_netloc))
 
     return url
-
-
-def _is_supabase_host(url: str) -> bool:
-    try:
-        host = str(urlparse(url).hostname or "").strip().lower()
-    except ValueError:
-        return False
-    return host.endswith(".supabase.co") or host.endswith(".pooler.supabase.com")
-
-
 def _build_database_url_candidates() -> list[str]:
     raw_primary = str(
         os.environ.get("DATABASE_URL")
@@ -293,12 +233,6 @@ def _build_database_url_candidates() -> list[str]:
         "keepalives_count": "5",
     }
 
-    configured_hostaddr = str(os.environ.get("DB_HOSTADDR_IPV4") or os.environ.get("SUPABASE_DB_HOSTADDR") or "").strip()
-    if configured_hostaddr and not _is_ip_literal(configured_hostaddr):
-        logging.warning("Ignoring DB_HOSTADDR_IPV4/SUPABASE_DB_HOSTADDR because value is not an IP address.")
-        configured_hostaddr = ""
-    force_ipv4 = str(os.environ.get("DB_FORCE_IPV4") or "1").strip().lower() in {"1", "true", "yes", "on"}
-
     candidates: list[str] = []
     seen: set[str] = set()
 
@@ -309,7 +243,7 @@ def _build_database_url_candidates() -> list[str]:
 
     for raw in raw_candidates:
         normalized = _normalize_database_url(raw)
-        pooler_candidate = _strip_invalid_hostaddr_query(_prefer_supabase_pooler_url(normalized))
+        pooler_candidate = _prefer_supabase_pooler_url(normalized)
 
         try:
             parsed = urlparse(pooler_candidate)
@@ -329,14 +263,6 @@ def _build_database_url_candidates() -> list[str]:
         if host.lower().startswith("db.") and host.lower().endswith(".supabase.co") and (parsed_port in (None, 5432)):
             pooled = _with_default_query_params(_with_port(pooler_candidate, 6543), query_defaults)
             _push(pooled)
-
-        # Prefer IPv4 hostaddr when runtime has IPv6 routing issues.
-        hostaddr = configured_hostaddr
-        if not hostaddr and force_ipv4 and _is_supabase_host(pooler_candidate):
-            hostaddr = _resolve_ipv4_hostaddr(host)
-        if hostaddr:
-            with_ipv4 = _with_default_query_params(base_with_defaults, {"hostaddr": hostaddr})
-            _push(with_ipv4)
 
     return candidates
 
@@ -383,7 +309,7 @@ def get_engine(db_path: Optional[str] = None) -> Any:
             except ValueError:
                 db_host = ""
             if db_host:
-                print(f"[db] SQLAlchemy engine target host: {db_host}")
+                print(f"Attempting connection to: {db_host}")
             engine = create_engine(
                 engine_url,
                 future=True,
