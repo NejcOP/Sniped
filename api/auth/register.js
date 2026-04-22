@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { handleCors } = require('../_cors')
 
 function getSupabaseUrl() {
   return process.env.SUPABASE_URL || ''
@@ -20,6 +21,7 @@ function utcNowIso() {
 const FREE_QUOTA = 50
 
 module.exports = async (req, res) => {
+  if (handleCors(req, res)) return
   res.setHeader('Content-Type', 'application/json')
 
   if (req.method !== 'POST') {

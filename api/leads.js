@@ -1,4 +1,5 @@
 // Native Vercel function — Lead Management
+const { handleCors } = require('../_cors')
 // Reads leads from Supabase with filtering, sorting, search, and pagination.
 
 const SUPABASE_COLUMNS = [
@@ -25,6 +26,7 @@ function getTokenFromReq(req) {
 }
 
 module.exports = async (req, res) => {
+  if (handleCors(req, res)) return
   res.setHeader('Content-Type', 'application/json')
 
   if (req.method !== 'GET') {

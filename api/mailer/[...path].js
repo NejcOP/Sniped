@@ -7,6 +7,8 @@
 
 function getTokenFromReq(req) {
   const auth = String(req.headers?.authorization || '')
+
+const { handleCors } = require('../_cors')
   if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
   return String(req.query?.token || '').trim()
 }
@@ -119,6 +121,7 @@ async function handleCampaignStats(supabaseUrl, supabaseKey, userId) {
 }
 
 module.exports = async (req, res) => {
+  if (handleCors(req, res)) return
   res.setHeader('Content-Type', 'application/json')
 
   const supabaseUrl = process.env.SUPABASE_URL || ''

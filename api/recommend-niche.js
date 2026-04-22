@@ -1,4 +1,5 @@
 // Native Vercel function — Market Intelligence / Niche Recommendation
+const { handleCors } = require('./_cors')
 // Calls OpenAI directly and caches results in Supabase runtime_kv.
 // Mirrors the Python backend /api/recommend-niche endpoint.
 
@@ -164,6 +165,7 @@ Rules:
 }
 
 module.exports = async (req, res) => {
+  if (handleCors(req, res)) return
   // Only GET
   if (req.method !== 'GET') {
     return res.status(405).json({ detail: 'Method not allowed' })

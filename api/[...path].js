@@ -204,7 +204,24 @@ async function handleBlacklist(req, res, supabaseUrl, supabaseKey) {
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
+function setCorsHeaders(req, res) {
+  const origin = req.headers?.origin || ''
+  // Allow any vercel.app subdomain or localhost
+  if (origin && (origin.endsWith('.vercel.app') || origin.startsWith('http://localhost'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', 'https://sniped-one.vercel.app')
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type')
+}
+
 module.exports = async (req, res) => {
+  setCorsHeaders(req, res)
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end()
+  }
   const pathParts = resolveCatchAllPathParts(req)
   const nativePath = pathParts.join('/')
 
@@ -213,17 +230,17 @@ module.exports = async (req, res) => {
 
   // saved-segments
   if (nativePath === 'saved-segments') {
-    if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured' })
+     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
     return handleSavedSegments(req, res, supabaseUrl, supabaseKey)
   }
   // saved-segments/:id DELETE
   if (pathParts[0] === 'saved-segments' && pathParts.length === 2 && req.method === 'DELETE') {
-    if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured' })
+     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
     return handleSavedSegmentsDelete(req, res, supabaseUrl, supabaseKey, pathParts[1])
   }
   // blacklist
   if (nativePath === 'blacklist') {
-    if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured' })
+     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
     return handleBlacklist(req, res, supabaseUrl, supabaseKey)
   }
 

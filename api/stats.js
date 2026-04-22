@@ -1,3 +1,4 @@
+const { handleCors } = require('./_cors')
 function getSupabaseUrl() { return process.env.SUPABASE_URL || '' }
 function getSupabaseKey() { return process.env.SUPABASE_SERVICE_ROLE_KEY || '' }
 
@@ -8,6 +9,7 @@ function getToken(req) {
 }
 
 module.exports = async (req, res) => {
+  if (handleCors(req, res)) return
   res.setHeader('Content-Type', 'application/json')
 
   const token = getToken(req)

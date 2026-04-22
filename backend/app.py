@@ -87,7 +87,13 @@ def get_allowed_cors_origins() -> list[str]:
     configured = str(os.environ.get("CORS_ALLOWED_ORIGINS", "") or "").strip()
     if configured:
         return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
-    return ["https://sniped-one.vercel.app"]
+    return [
+        "https://sniped-one.vercel.app",
+        "https://*.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ]
 
 
 def _read_env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -8921,8 +8927,8 @@ def create_app() -> FastAPI:
             ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
             print("[startup] Supabase users table OK")
         except Exception as exc:
-            logging.error("[startup] Supabase table init failed (fatal): %s", exc)
-            raise RuntimeError(f"Supabase table init failed: {exc}") from exc
+            logging.warning("[startup] Supabase table init skipped (non-fatal): %s", exc)
+            print(f"[startup] WARNING: Supabase table init skipped: {exc}")
         start_scheduler(app)
         if RUN_STARTUP_JOBS:
             launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
