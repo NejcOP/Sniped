@@ -193,7 +193,7 @@ class GoogleMapsScraper:
         self.page.set_default_timeout(6000)
         self.page.set_default_navigation_timeout(12000)
         self._apply_stealth()
-        self._handle_startup_consent()
+        # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
     def _restart_with_new_identity(self) -> None:
         """Close the current session and open a fresh one with a new UA and next proxy.
@@ -384,12 +384,18 @@ class GoogleMapsScraper:
         ]
         return any(block_signals)
 
-    def _goto_with_retry(self, url: str, wait_until: str = "domcontentloaded", max_retries: int = 2) -> None:
+    def _goto_with_retry(
+        self,
+        url: str,
+        wait_until: str = "domcontentloaded",
+        max_retries: int = 1,
+        timeout_ms: int = 15000,
+    ) -> None:
         """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
         assert self.page is not None
         for attempt in range(max_retries + 1):
             try:
-                self.page.goto(url, wait_until=wait_until)
+                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 15000)))
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
@@ -399,7 +405,7 @@ class GoogleMapsScraper:
             if attempt < max_retries:
                 logging.warning("Block detected on %s — restarting session (attempt %d/%d)", url, attempt + 1, max_retries)
                 self._restart_with_new_identity()
-                time.sleep(2 * (attempt + 1))
+                time.sleep(1.2 * (attempt + 1))
             else:
                 logging.error("Still blocked after %d retries for %s — continuing anyway.", max_retries, url)
 

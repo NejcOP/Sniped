@@ -6083,7 +6083,7 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                   {scrapeProgress.isLoading ? (
                     <p className="scrape-progress-copy">
-                      🌐 Opening Google Maps… brace yourself
+                      🌐 Launching browser and opening Google Maps... (cold start can take up to ~30s)
                     </p>
                   ) : null}
                   {scrapeProgress.status === 'running' && !scrapeProgress.isLoading ? (
