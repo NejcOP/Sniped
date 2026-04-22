@@ -3270,6 +3270,36 @@ def _is_postgres_runtime_store_enabled() -> bool:
     return True
 
 
+def _has_live_external_worker(max_age_seconds: int = 120) -> bool:
+    if not _is_postgres_runtime_store_enabled():
+        return False
+    try:
+        with pg_get_engine().begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT value
+                    FROM system_runtime
+                    WHERE key LIKE 'worker:%:last_heartbeat_at'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                )
+            ).fetchone()
+    except Exception:
+        return False
+
+    if not row:
+        return False
+
+    heartbeat = parse_iso_datetime(row[0])
+    if heartbeat is None:
+        return False
+
+    age_seconds = (datetime.now(timezone.utc) - heartbeat).total_seconds()
+    return age_seconds <= max_age_seconds
+
+
 def get_runtime_value(db_path: Path, key: str) -> Optional[str]:
     if _is_postgres_runtime_store_enabled():
         try:
@@ -6738,13 +6768,15 @@ def enqueue_task(
     payload_data["task_type"] = task_type
     payload_data["user_id"] = user_id
 
-    if _is_postgres_task_store_enabled():
+    if _is_postgres_task_store_enabled() and _has_live_external_worker():
         return {
             "status": "started",
             "task_id": task_id,
             "job_status": "queued",
             "execution_mode": "worker",
         }
+    if _is_postgres_task_store_enabled():
+        logging.warning("No live worker heartbeat detected; falling back to in-process task execution.")
 
     executor = get_task_executor(task_type)
     if background_tasks is not None:
