@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
 from urllib.parse import quote_plus
@@ -30,6 +31,12 @@ from .anti_bot import (
     random_user_agent,
 )
 from .models import Lead
+
+
+_SHARED_BROWSER_LOCK = Lock()
+_SHARED_PLAYWRIGHT = None
+_SHARED_BROWSER = None
+_SHARED_BROWSER_HEADLESS: Optional[bool] = None
 
 
 class GoogleMapsScraper:
@@ -60,6 +67,7 @@ class GoogleMapsScraper:
         self._browser = None
         self._context = None
         self.page: Optional[Page] = None
+        self._using_shared_browser = False
 
     @staticmethod
     def _should_abort_resource(request) -> bool:
@@ -154,25 +162,36 @@ class GoogleMapsScraper:
         self.close()
 
     def start(self) -> None:
-        self._playwright = sync_playwright().start()
-
         # Rotate UA on every fresh session
         self.user_agent = random_user_agent()
 
         launch_args = [
             "--disable-blink-features=AutomationControlled",
             "--no-default-browser-check",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--single-process",
         ]
         proxy_config = None
         if self.proxy_url:
             proxy_config = {"server": self.proxy_url}
             logging.info("Scraper: using proxy %s", self.proxy_url.split("@")[-1])
 
-        self._browser = self._playwright.chromium.launch(
-            headless=self.headless,
-            args=launch_args,
-            proxy=proxy_config,
-        )
+        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        can_use_shared = bool(self.headless and warm_enabled and proxy_config is None)
+
+        if can_use_shared:
+            self._browser = self._acquire_shared_browser(headless=self.headless, launch_args=launch_args)
+            self._using_shared_browser = self._browser is not None
+
+        if self._browser is None:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(
+                headless=self.headless,
+                args=launch_args,
+                proxy=proxy_config,
+            )
+            self._using_shared_browser = False
 
         context_kwargs: dict = {
             "user_agent": self.user_agent,
@@ -194,6 +213,44 @@ class GoogleMapsScraper:
         self.page.set_default_navigation_timeout(12000)
         self._apply_stealth()
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
+
+    @classmethod
+    def _acquire_shared_browser(cls, *, headless: bool, launch_args: list[str]):
+        global _SHARED_PLAYWRIGHT, _SHARED_BROWSER, _SHARED_BROWSER_HEADLESS
+        with _SHARED_BROWSER_LOCK:
+            if _SHARED_BROWSER is not None and _SHARED_BROWSER_HEADLESS == headless:
+                return _SHARED_BROWSER
+
+            try:
+                if _SHARED_BROWSER is not None:
+                    _SHARED_BROWSER.close()
+            except Exception:
+                pass
+            try:
+                if _SHARED_PLAYWRIGHT is not None:
+                    _SHARED_PLAYWRIGHT.stop()
+            except Exception:
+                pass
+
+            _SHARED_PLAYWRIGHT = sync_playwright().start()
+            _SHARED_BROWSER = _SHARED_PLAYWRIGHT.chromium.launch(
+                headless=headless,
+                args=launch_args,
+            )
+            _SHARED_BROWSER_HEADLESS = headless
+            logging.info("Warm shared scraper browser initialized.")
+            return _SHARED_BROWSER
+
+    @classmethod
+    def warm_browser(cls, *, headless: bool = True) -> None:
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-default-browser-check",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--single-process",
+        ]
+        cls._acquire_shared_browser(headless=headless, launch_args=launch_args)
 
     def _restart_with_new_identity(self) -> None:
         """Close the current session and open a fresh one with a new UA and next proxy.
@@ -219,12 +276,12 @@ class GoogleMapsScraper:
             finally:
                 self._context = None
         if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                logging.debug("Browser already closed during cleanup.")
-            finally:
-                self._browser = None
+            if not self._using_shared_browser:
+                try:
+                    self._browser.close()
+                except Exception:
+                    logging.debug("Browser already closed during cleanup.")
+            self._browser = None
         if self._playwright:
             try:
                 self._playwright.stop()
@@ -444,7 +501,7 @@ class GoogleMapsScraper:
 
         # If a business profile opens directly, we can still parse it.
         try:
-            self.page.locator("div[role='feed']").first.wait_for(state="visible", timeout=8000)
+            self.page.wait_for_selector("div.Nv2PK, div[role='article']", timeout=9000)
         except PlaywrightTimeoutError:
             logging.info("Results feed not visible yet, trying direct search URL fallback.")
             self._search_via_fallback_url(search_query)
@@ -458,7 +515,7 @@ class GoogleMapsScraper:
         random_delay(1000, 1800)
 
         try:
-            self.page.locator("div[role='feed']").first.wait_for(state="visible", timeout=9000)
+            self.page.wait_for_selector("div.Nv2PK, div[role='article']", timeout=10000)
             return True
         except PlaywrightTimeoutError:
             return False

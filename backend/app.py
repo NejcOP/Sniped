@@ -9074,6 +9074,17 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logging.exception("[startup] Playwright runtime check failed: %s", exc)
 
+    def _prewarm_scraper_browser() -> None:
+        warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        if not warm_enabled:
+            logging.info("[startup] SCRAPE_WARM_BROWSER disabled; skipping browser warm-up.")
+            return
+        try:
+            GoogleMapsScraper.warm_browser(headless=True)
+            logging.info("[startup] Warm scraper browser ready.")
+        except Exception as exc:
+            logging.warning("[startup] Warm scraper browser init failed: %s", exc)
+
     @app.on_event("startup")
     def startup_tasks() -> None:
         logging.basicConfig(
@@ -9103,6 +9114,7 @@ def create_app() -> FastAPI:
         else:
             logging.info("[startup] Supabase service-role key detected for server-side writes.")
         _log_playwright_runtime_diagnostics()
+        _prewarm_scraper_browser()
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
