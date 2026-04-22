@@ -946,7 +946,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         conn.execute(
             """
             UPDATE leads
-            SET created_at = COALESCE(scraped_at, CURRENT_TIMESTAMP)
+            SET created_at = COALESCE(NULLIF(CAST(scraped_at AS TEXT), ''), CAST(CURRENT_TIMESTAMP AS TEXT))
             WHERE created_at IS NULL
             """
         )
