@@ -1744,6 +1744,40 @@ function App({ initialTab = 'leads' }) {
   })
   const [savedSegments, setSavedSegments] = useState([])
   const [loadingSavedSegments, setLoadingSavedSegments] = useState(false)
+
+  const refreshLeads = useCallback(async (options = {}) => {
+    const silent = options?.silent !== undefined ? options.silent : true
+    if (!silent) {
+      setLoadingLeads(true)
+    }
+    try {
+      const params = new URLSearchParams({
+        limit: String(LEADS_PAGE_SIZE),
+        page: String(leadPage + 1),
+        sort: String(leadSortMode || 'recent'),
+        include_blacklisted: showBlacklisted ? '1' : '0',
+      })
+      if (leadStatusFilter !== 'all') {
+        params.set('status', leadStatusFilter)
+      }
+      if (leadQuickFilter !== 'all') {
+        params.set('quick_filter', leadQuickFilter)
+      }
+      if (debouncedLeadSearch.trim()) {
+        params.set('search', debouncedLeadSearch.trim())
+      }
+      const data = await fetchJson(`/api/leads?${params.toString()}`)
+      const items = Array.isArray(data?.items) ? data.items : []
+      setLeads(items)
+      setLeadServerTotal(Number(data?.total || data?.count || items.length || 0))
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : 'Unknown error while loading leads')
+    } finally {
+      if (!silent) {
+        setLoadingLeads(false)
+      }
+    }
+  }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, showBlacklisted])
   const [savingSegment, setSavingSegment] = useState(false)
   const [segmentNameDraft, setSegmentNameDraft] = useState('')
   const [deletingSegmentId, setDeletingSegmentId] = useState(null)
@@ -4041,40 +4075,6 @@ function App({ initialTab = 'leads' }) {
       setLastError(error instanceof Error ? error.message : 'Unknown error while loading tasks')
     }
   }
-
-  const refreshLeads = useCallback(async (options = {}) => {
-    const silent = options?.silent !== undefined ? options.silent : true
-    if (!silent) {
-      setLoadingLeads(true)
-    }
-    try {
-      const params = new URLSearchParams({
-        limit: String(LEADS_PAGE_SIZE),
-        page: String(leadPage + 1),
-        sort: String(leadSortMode || 'recent'),
-        include_blacklisted: showBlacklisted ? '1' : '0',
-      })
-      if (leadStatusFilter !== 'all') {
-        params.set('status', leadStatusFilter)
-      }
-      if (leadQuickFilter !== 'all') {
-        params.set('quick_filter', leadQuickFilter)
-      }
-      if (debouncedLeadSearch.trim()) {
-        params.set('search', debouncedLeadSearch.trim())
-      }
-      const data = await fetchJson(`/api/leads?${params.toString()}`)
-      const items = Array.isArray(data?.items) ? data.items : []
-      setLeads(items)
-      setLeadServerTotal(Number(data?.total || data?.count || items.length || 0))
-    } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Unknown error while loading leads')
-    } finally {
-      if (!silent) {
-        setLoadingLeads(false)
-      }
-    }
-  }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, showBlacklisted])
 
   async function refreshSavedSegments({ silent = false } = {}) {
     if (!silent) {
