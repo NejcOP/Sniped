@@ -1984,6 +1984,16 @@ def ensure_system_tables(db_path: Path) -> None:
     ensure_client_success_tables(db_path)
 
 
+def ensure_scrape_tables(db_path: Path) -> None:
+    # Scrape flow needs core lead/task/runtime tables only.
+    # Keep this narrower than ensure_system_tables so unrelated schema drifts
+    # (for dashboards/mailer/client success) do not block launching scrape jobs.
+    ensure_dashboard_columns(db_path)
+    ensure_system_task_table(db_path)
+    ensure_runtime_table(db_path)
+    ensure_blacklist_table(db_path)
+
+
 def ensure_client_success_tables(db_path: Path) -> None:
     with pgdb.connect(db_path) as conn:
         conn.execute(
@@ -7379,7 +7389,7 @@ def _promote_alternate_niche_choice(result: dict[str, Any], previous_result: Opt
 def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     country_value = normalize_country_value(payload_data.get("country"), payload_data.get("country_code"))
     db_path = resolve_path(payload_data.get("db_path"), DEFAULT_DB_PATH)
-    ensure_system_tables(db_path)
+    ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
 
     default_profile = f"{DEFAULT_PROFILE_DIR}_{country_value.lower()}"
@@ -11423,10 +11433,10 @@ def create_app() -> FastAPI:
         print(f"[scrape] user_id={user_id}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
         try:
-            ensure_system_tables(db_path)
+            ensure_scrape_tables(db_path)
         except Exception as _db_exc:
             print(f"[scrape] DB init error: {_db_exc}")
-            raise HTTPException(status_code=500, detail="Database offline")
+            raise HTTPException(status_code=500, detail=f"Database offline: {_db_exc}")
 
         available_credits = max(0, int(billing.get("credits_balance") or 0))
         if available_credits <= 0:
