@@ -1,8 +1,10 @@
 import os
 import time
+import json
 import logging
 import socket
 import ipaddress
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -93,6 +95,20 @@ DEFAULT_DB_POOL_RECYCLE = max(60, int(os.environ.get("DB_POOL_RECYCLE", "1800"))
 DEFAULT_DB_CONNECT_TIMEOUT = max(3, int(os.environ.get("DB_CONNECT_TIMEOUT", "10")))
 DEFAULT_DB_CONNECT_RETRIES = max(1, int(os.environ.get("DB_CONNECT_RETRIES", "4")))
 DEFAULT_DB_CONNECT_RETRY_DELAY = max(1, int(os.environ.get("DB_CONNECT_RETRY_DELAY", "2")))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_FILE = ROOT_DIR / "environment settings"
+
+
+def _load_database_url_from_config_file() -> str:
+    config_path = str(os.environ.get("SNIPED_CONFIG_PATH") or "").strip()
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_FILE
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            cfg = json.load(handle)
+    except Exception:
+        return ""
+    supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
+    return str(supabase_cfg.get("database_url", "") or "").strip()
 
 
 def _with_default_query_params(url: str, params: dict[str, str]) -> str:
@@ -258,8 +274,9 @@ def _build_database_url_candidates() -> list[str]:
         or os.environ.get("SUPABASE_DATABASE_URL")
         or ""
     ).strip()
+    raw_config = _load_database_url_from_config_file()
 
-    raw_candidates = [c for c in [raw_pooler, raw_primary] if c]
+    raw_candidates = [c for c in [raw_pooler, raw_primary, raw_config] if c]
     if not raw_candidates:
         return []
 
@@ -337,7 +354,10 @@ def get_database_url(db_path: Optional[str] = None) -> str:
     candidates = _build_database_url_candidates()
     if candidates:
         return candidates[0]
-    raise RuntimeError("SUPABASE_DATABASE_URL or DATABASE_URL is required.")
+    raise RuntimeError(
+        "Database URL is missing. Set SUPABASE_DB_POOLER_URL or SUPABASE_POOLER_URL "
+        "(preferred), or DATABASE_URL / SUPABASE_DATABASE_URL."
+    )
 
 
 def get_engine(db_path: Optional[str] = None) -> Any:
@@ -387,8 +407,9 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                     time.sleep(DEFAULT_DB_CONNECT_RETRY_DELAY)
 
     raise RuntimeError(
-        "Database connection failed after retries. Check DATABASE_URL (Supabase pooler on port 6543), "
-        f"network routing, and credentials. Last error: {last_error}"
+        "Database connection failed after retries. Check SUPABASE_DB_POOLER_URL/SUPABASE_POOLER_URL "
+        "(port 6543) or DATABASE_URL/SUPABASE_DATABASE_URL, plus network routing and credentials. "
+        f"Last error: {last_error}"
     )
 
 
