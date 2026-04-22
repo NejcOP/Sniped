@@ -386,6 +386,12 @@ class GoogleMapsScraper:
         assert self.page is not None
         search_query = self._compose_search_query(keyword)
 
+        # Fast path: direct maps search URL is usually more reliable in headless environments
+        # and avoids waiting on the homepage search box render.
+        if self._search_via_fallback_url(search_query):
+            logging.info("Direct Maps search URL opened successfully.")
+            return
+
         base_url = f"https://{self.google_domain}/maps"
         self._goto_with_retry(base_url)
         self._accept_consent_if_present()
@@ -395,7 +401,7 @@ class GoogleMapsScraper:
         search_box = self._get_search_box()
         if search_box is None:
             logging.warning("Search box not found on base maps URL, trying direct search URL fallback.")
-            if self._search_via_fallback_url(keyword):
+            if self._search_via_fallback_url(search_query):
                 return
             raise RuntimeError("Google Maps search box was not found after consent handling.")
 
@@ -435,6 +441,7 @@ class GoogleMapsScraper:
 
         selectors = [
             "input#searchboxinput",
+            "input[name='q']",
             "input[aria-label*='Search Google Maps']",
             "input[aria-label*='Search']",
             "input[placeholder*='Search']",
@@ -443,7 +450,7 @@ class GoogleMapsScraper:
         for selector in selectors:
             locator = self.page.locator(selector).first
             try:
-                locator.wait_for(state="visible", timeout=6000)
+                locator.wait_for(state="visible", timeout=2500)
                 return locator
             except PlaywrightTimeoutError:
                 continue
@@ -506,14 +513,14 @@ class GoogleMapsScraper:
             "[role='button']:has-text('Sprejmi vse')",
         ]
 
-        for _ in range(5):
+        for _ in range(2):
             scopes = [self.page.main_frame, *self.page.frames]
             for scope in scopes:
                 for selector in selectors:
                     try:
                         button = scope.locator(selector).first
-                        if button.count() > 0 and button.is_visible(timeout=700):
-                            button.click(timeout=1800)
+                        if button.count() > 0 and button.is_visible(timeout=200):
+                            button.click(timeout=1200)
                             random_delay(350, 900)
                             logging.info("Accepted Google consent prompt via selector.")
                             return True
@@ -523,8 +530,8 @@ class GoogleMapsScraper:
                 for pattern in text_patterns:
                     try:
                         button = scope.get_by_role("button", name=re.compile(pattern, re.IGNORECASE)).first
-                        if button.count() > 0 and button.is_visible(timeout=700):
-                            button.click(timeout=1800)
+                        if button.count() > 0 and button.is_visible(timeout=200):
+                            button.click(timeout=1200)
                             random_delay(350, 900)
                             logging.info("Accepted Google consent prompt via button role.")
                             return True
@@ -533,8 +540,8 @@ class GoogleMapsScraper:
 
                     try:
                         link_button = scope.get_by_role("link", name=re.compile(pattern, re.IGNORECASE)).first
-                        if link_button.count() > 0 and link_button.is_visible(timeout=700):
-                            link_button.click(timeout=1800)
+                        if link_button.count() > 0 and link_button.is_visible(timeout=200):
+                            link_button.click(timeout=1200)
                             random_delay(350, 900)
                             logging.info("Accepted Google consent prompt via link role.")
                             return True
@@ -544,8 +551,8 @@ class GoogleMapsScraper:
                 for pattern in text_patterns:
                     try:
                         generic = scope.locator(f"text=/{pattern}/i").first
-                        if generic.count() > 0 and generic.is_visible(timeout=700):
-                            generic.click(timeout=1800)
+                        if generic.count() > 0 and generic.is_visible(timeout=200):
+                            generic.click(timeout=1200)
                             random_delay(350, 900)
                             logging.info("Accepted Google consent prompt via text locator.")
                             return True
