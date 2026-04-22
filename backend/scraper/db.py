@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
-from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint, asc, create_engine, desc, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -174,6 +174,66 @@ def _engine_connect_url(raw_url: str) -> str:
     return unquote(str(raw_url or "").strip())
 
 
+def _project_ref_from_supabase_url() -> str:
+    raw = str(os.environ.get("SUPABASE_URL") or "").strip()
+    if not raw:
+        return ""
+    try:
+        host = str(urlparse(raw).hostname or "").strip().lower()
+    except ValueError:
+        return ""
+    if not host.endswith(".supabase.co"):
+        return ""
+    return host.split(".", 1)[0].strip()
+
+
+def _ensure_pooler_tenant_username(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+
+    host = str(parsed.hostname or "").strip().lower()
+    username = str(parsed.username or "").strip()
+    if not host.endswith(".pooler.supabase.com"):
+        return url
+    if not username or "." in username:
+        return url
+
+    project_ref = _project_ref_from_supabase_url()
+    if not project_ref:
+        return url
+
+    tenant_username = f"{username}.{project_ref}"
+    raw_password = ""
+    raw_netloc = str(parsed.netloc or "")
+    if "@" in raw_netloc:
+        raw_credentials = raw_netloc.rsplit("@", 1)[0]
+        if ":" in raw_credentials:
+            raw_password = raw_credentials.split(":", 1)[1]
+
+    host_only = str(parsed.hostname or "")
+    if not host_only:
+        return url
+    if ":" in host_only and not host_only.startswith("["):
+        host_only = f"[{host_only}]"
+
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        parsed_port = None
+
+    userinfo = quote(tenant_username, safe="")
+    if raw_password:
+        userinfo = f"{userinfo}:{raw_password}"
+    netloc = f"{userinfo}@{host_only}"
+    if parsed_port:
+        netloc = f"{netloc}:{parsed_port}"
+
+    logging.warning("Rewriting pooler username to tenant format for Supabase shared pooler host.")
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
 def _prefer_supabase_pooler_url(raw_url: str) -> str:
     url = _sanitize_database_url(raw_url)
     if not url:
@@ -243,7 +303,7 @@ def _build_database_url_candidates() -> list[str]:
 
     for raw in raw_candidates:
         normalized = _normalize_database_url(raw)
-        pooler_candidate = _prefer_supabase_pooler_url(normalized)
+        pooler_candidate = _ensure_pooler_tenant_username(_prefer_supabase_pooler_url(normalized))
 
         try:
             parsed = urlparse(pooler_candidate)
