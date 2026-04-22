@@ -11,3 +11,7 @@ class Lead:
     review_count: Optional[int]
     address: str
     search_keyword: str
+    google_claimed: Optional[bool] = None
+    linkedin_url: Optional[str] = None
+    instagram_url: Optional[str] = None
+    facebook_url: Optional[str] = None

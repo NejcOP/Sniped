@@ -36,6 +36,10 @@ class LeadRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     contact_name: Mapped[Optional[str]] = mapped_column(Text)
     email: Mapped[Optional[str]] = mapped_column(Text)
+    google_claimed: Mapped[Optional[bool]] = mapped_column(Boolean)
+    linkedin_url: Mapped[Optional[str]] = mapped_column(Text)
+    instagram_url: Mapped[Optional[str]] = mapped_column(Text)
+    facebook_url: Mapped[Optional[str]] = mapped_column(Text)
     insecure_site: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     main_shortcoming: Mapped[Optional[str]] = mapped_column(Text)
     ai_description: Mapped[Optional[str]] = mapped_column(Text)
@@ -73,12 +77,13 @@ class LeadRecord(Base):
     phone_type: Mapped[Optional[str]] = mapped_column(Text)
     pipeline_stage: Mapped[str] = mapped_column(Text, nullable=False, default="Scraped", server_default="Scraped")
     client_folder_id: Mapped[Optional[int]] = mapped_column(Integer)
+    qualification_score: Mapped[Optional[float]] = mapped_column(Float)
 
 
 _ENGINE_CACHE: dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: dict[str, sessionmaker[Session]] = {}
-DEFAULT_DB_POOL_SIZE = max(1, int(os.environ.get("DB_POOL_SIZE", "4")))
-DEFAULT_DB_MAX_OVERFLOW = max(0, int(os.environ.get("DB_MAX_OVERFLOW", "2")))
+DEFAULT_DB_POOL_SIZE = max(1, int(os.environ.get("DB_POOL_SIZE", "1")))
+DEFAULT_DB_MAX_OVERFLOW = max(0, int(os.environ.get("DB_MAX_OVERFLOW", "0")))
 DEFAULT_DB_POOL_RECYCLE = max(60, int(os.environ.get("DB_POOL_RECYCLE", "1800")))
 
 
@@ -151,6 +156,10 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
         "website_url": record.website_url,
         "phone_number": record.phone_number,
         "email": record.email,
+        "google_claimed": record.google_claimed,
+        "linkedin_url": record.linkedin_url,
+        "instagram_url": record.instagram_url,
+        "facebook_url": record.facebook_url,
         "rating": record.rating,
         "review_count": record.review_count,
         "address": record.address,
@@ -159,6 +168,7 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "main_shortcoming": record.main_shortcoming or "",
         "ai_score": float(record.ai_score or 0),
+        "qualification_score": float(record.qualification_score or 0),
         "status": record.status or "",
         "enriched_at": record.enriched_at.isoformat() if record.enriched_at else "",
     }
@@ -170,6 +180,10 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "business_name": lead.business_name,
         "website_url": lead.website_url,
         "phone_number": lead.phone_number,
+        "google_claimed": lead.google_claimed,
+        "linkedin_url": lead.linkedin_url,
+        "instagram_url": lead.instagram_url,
+        "facebook_url": lead.facebook_url,
         "rating": lead.rating,
         "review_count": lead.review_count,
         "address": lead.address,

@@ -28,6 +28,7 @@ from urllib.parse import quote_plus, urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
@@ -88,11 +89,29 @@ def get_allowed_cors_origins() -> list[str]:
         return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
     return ["https://sniped-one.vercel.app"]
 
+
+def _read_env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw_value = str(os.environ.get(name, default) or default).strip()
+    try:
+        return max(minimum, int(raw_value))
+    except (TypeError, ValueError):
+        return max(minimum, default)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = str(os.environ.get(name, "1" if default else "0") or "").strip().lower()
+    return raw_value in {"1", "true", "yes", "on"}
+
 AUTOPILOT_ENRICH_LIMIT = 150
 HIGH_AI_SCORE_THRESHOLD = 7.0
 DRIP_MINUTES_MIN = 10
 DRIP_MINUTES_MAX = 15
 AUTO_DRIP_DISPATCH_ENABLED = False
+DEFAULT_LOG_LEVEL = str(os.environ.get("LOG_LEVEL", "WARNING") or "WARNING").strip().upper() or "WARNING"
+APP_THREADPOOL_WORKERS = _read_env_int("APP_THREADPOOL_WORKERS", 2)
+SCHEDULER_MAX_WORKERS = _read_env_int("SCHEDULER_MAX_WORKERS", 1)
+RUN_STARTUP_JOBS = _env_flag("RUN_STARTUP_JOBS", default=False)
+STATELESS_SUPABASE_ONLY = _env_flag("STATELESS_SUPABASE_ONLY", default=False)
 MRR_GOAL = 16000
 SETUP_MILESTONE = 6500
 SETUP_FEE_WEBSITE = 1300
@@ -120,7 +139,7 @@ HARDCODED_PROXY_URLS: List[str] = []
 # Per-user AI usage guardrail (units/day). Enrichment consumes units ~= lead limit.
 AI_DAILY_USAGE_LIMIT = int(os.environ.get("SNIPED_AI_DAILY_USAGE_LIMIT", os.environ.get("LEADFLOW_AI_DAILY_USAGE_LIMIT", "1000")))
 _AI_USAGE_LOCK = Lock()
-ENRICH_CONCURRENCY_LIMIT = 5
+ENRICH_CONCURRENCY_LIMIT = _read_env_int("ENRICH_CONCURRENCY_LIMIT", 2)
 ENRICH_SEMAPHORE_TIMEOUT_SECONDS = 30
 ENRICH_CAPACITY_ERROR_MESSAGE = "Server is currently at capacity. Please try again in a few minutes."
 
@@ -827,6 +846,10 @@ def ensure_dashboard_columns(db_path: Path) -> None:
     optional_columns = {
         "contact_name": "ALTER TABLE leads ADD COLUMN contact_name TEXT",
         "email": "ALTER TABLE leads ADD COLUMN email TEXT",
+        "google_claimed": "ALTER TABLE leads ADD COLUMN google_claimed INTEGER",
+        "linkedin_url": "ALTER TABLE leads ADD COLUMN linkedin_url TEXT",
+        "instagram_url": "ALTER TABLE leads ADD COLUMN instagram_url TEXT",
+        "facebook_url": "ALTER TABLE leads ADD COLUMN facebook_url TEXT",
         "insecure_site": "ALTER TABLE leads ADD COLUMN insecure_site INTEGER DEFAULT 0",
         "main_shortcoming": "ALTER TABLE leads ADD COLUMN main_shortcoming TEXT",
         "ai_description": "ALTER TABLE leads ADD COLUMN ai_description TEXT",
@@ -862,6 +885,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "bounce_reason": "ALTER TABLE leads ADD COLUMN bounce_reason TEXT",
         "phone_formatted": "ALTER TABLE leads ADD COLUMN phone_formatted TEXT",
         "phone_type": "ALTER TABLE leads ADD COLUMN phone_type TEXT",
+        "qualification_score": "ALTER TABLE leads ADD COLUMN qualification_score REAL",
         "pipeline_stage": "ALTER TABLE leads ADD COLUMN pipeline_stage TEXT DEFAULT 'Scraped'",
         "client_folder_id": "ALTER TABLE leads ADD COLUMN client_folder_id INTEGER",
         "user_id": "ALTER TABLE leads ADD COLUMN user_id TEXT",
@@ -4062,31 +4086,34 @@ def load_supabase_settings(config_path: Path) -> dict:
         cfg = {}
 
     supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
-    url = str(os.environ.get("SUPABASE_URL") or supabase_cfg.get("url", "") or "").strip()
+    env_only = STATELESS_SUPABASE_ONLY
+    url = str(os.environ.get("SUPABASE_URL") or ("" if env_only else supabase_cfg.get("url", "")) or "").strip()
     database_url = str(
         os.environ.get("DATABASE_URL")
         or os.environ.get("SUPABASE_DATABASE_URL")
-        or supabase_cfg.get("database_url", "")
+        or ("" if env_only else supabase_cfg.get("database_url", ""))
         or ""
     ).strip()
-    shared_key = str(os.environ.get("SUPABASE_KEY") or supabase_cfg.get("key", "") or "").strip()
+    shared_key = str(os.environ.get("SUPABASE_KEY") or ("" if env_only else supabase_cfg.get("key", "")) or "").strip()
     service_role_key = str(
         os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         or shared_key
-        or supabase_cfg.get("service_role_key", "")
-        or supabase_cfg.get("serviceRoleKey", "")
+        or ("" if env_only else supabase_cfg.get("service_role_key", ""))
+        or ("" if env_only else supabase_cfg.get("serviceRoleKey", ""))
         or ""
     ).strip()
     publishable_key = str(
         os.environ.get("SUPABASE_PUBLISHABLE_KEY")
         or shared_key
-        or supabase_cfg.get("publishable_key", "")
-        or supabase_cfg.get("publishableKey", "")
+        or ("" if env_only else supabase_cfg.get("publishable_key", ""))
+        or ("" if env_only else supabase_cfg.get("publishableKey", ""))
         or ""
     ).strip()
     primary_mode_raw = os.environ.get("SUPABASE_PRIMARY_DB")
 
-    if primary_mode_raw is None:
+    if env_only:
+        primary_mode = _env_flag("SUPABASE_PRIMARY_DB", default=True)
+    elif primary_mode_raw is None:
         # Default to True when credentials are present, unless explicitly disabled
         has_credentials = bool(url and (service_role_key or publishable_key))
         primary_mode = bool(supabase_cfg.get("primary_mode", has_credentials))
@@ -4138,6 +4165,9 @@ def get_supabase_client(config_path: Path) -> Optional[Any]:
 
 
 def set_supabase_primary_mode(config_path: Path, enabled: bool) -> None:
+    if STATELESS_SUPABASE_ONLY:
+        return
+
     cfg: dict = {}
     try:
         with config_path.open("r", encoding="utf-8") as handle:
@@ -7425,6 +7455,34 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         total_scraped_from_maps = len(leads)
 
+        if leads:
+            try:
+                progress_state["phase"] = "social_discovery"
+                update_task_progress(db_path, task_id, progress_state)
+                discovery_service = LeadEnricher(
+                    db_path=str(db_path),
+                    headless=True,
+                    config_path=str(DEFAULT_CONFIG_PATH),
+                    user_id=str(payload_data.get("user_id") or "legacy"),
+                )
+                for lead in leads:
+                    profiles = discovery_service._discover_social_profiles(
+                        business_name=str(getattr(lead, "business_name", "") or ""),
+                        website_url=str(getattr(lead, "website_url", "") or ""),
+                        address=str(getattr(lead, "address", "") or ""),
+                        existing_profiles={
+                            "linkedin": str(getattr(lead, "linkedin_url", "") or ""),
+                            "instagram": str(getattr(lead, "instagram_url", "") or ""),
+                            "facebook": str(getattr(lead, "facebook_url", "") or ""),
+                        },
+                        website_signals=None,
+                    )
+                    lead.linkedin_url = str(profiles.get("linkedin") or "").strip() or None
+                    lead.instagram_url = str(profiles.get("instagram") or "").strip() or None
+                    lead.facebook_url = str(profiles.get("facebook") or "").strip() or None
+            except Exception as social_exc:
+                logging.warning("Social discovery during scrape failed; continuing with Maps-only leads: %s", social_exc)
+
         # When Supabase is the primary DB, deduplicate against Supabase too.
         # The local legacy store may be missing leads from previous sessions, so we
         # must check the remote before inserting.
@@ -8205,7 +8263,11 @@ def start_scheduler(app: FastAPI) -> None:
     if existing is not None:
         return
 
-    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler = BackgroundScheduler(
+        timezone="UTC",
+        daemon=True,
+        executors={"default": APSchedulerThreadPoolExecutor(max_workers=SCHEDULER_MAX_WORKERS)},
+    )
     scheduler.add_job(
         lambda: run_autopilot_cycle(app),
         trigger=IntervalTrigger(minutes=30),
@@ -8786,8 +8848,7 @@ def _qualifier_pain_point(
 
 def create_app() -> FastAPI:
     from concurrent.futures import ThreadPoolExecutor as _TPE
-    # Concurrency limit: max 10 worker threads for AI/scrape calls
-    _thread_pool = _TPE(max_workers=10, thread_name_prefix="lf-worker")
+    _thread_pool = _TPE(max_workers=APP_THREADPOOL_WORKERS, thread_name_prefix="lf-worker")
     allowed_cors_origins = get_allowed_cors_origins()
 
     app = FastAPI(title="LeadGen Full Stack API", version="1.1.0")
@@ -8812,9 +8873,16 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_tasks() -> None:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+        logging.basicConfig(
+            level=getattr(logging, DEFAULT_LOG_LEVEL, logging.WARNING),
+            format="%(asctime)s | %(levelname)s | %(message)s",
+        )
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+        if STATELESS_SUPABASE_ONLY and not supabase_settings.get("has_service_role"):
+            raise RuntimeError(
+                "STATELESS_SUPABASE_ONLY requires SUPABASE_SERVICE_ROLE_KEY for backend write operations under RLS."
+            )
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
@@ -8855,12 +8923,18 @@ def create_app() -> FastAPI:
             logging.error("[startup] Supabase table init failed (fatal): %s", exc)
             raise RuntimeError(f"Supabase table init failed: {exc}") from exc
         start_scheduler(app)
+        if RUN_STARTUP_JOBS:
+            launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
+            launch_detached_task(lambda _app, _payload: run_monthly_credit_reset_cycle(_app), app, {})
+            if AUTO_DRIP_DISPATCH_ENABLED:
+                launch_detached_task(lambda _app, _payload: run_drip_dispatch_cycle(_app), app, {})
         print("[startup] Scheduler started â€” app ready")
 
     @app.on_event("shutdown")
     def shutdown_tasks() -> None:
+        app.state.mailer_stop_event.set()
         stop_scheduler(app)
-        _thread_pool.shutdown(wait=False)
+        _thread_pool.shutdown(wait=False, cancel_futures=True)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -8935,7 +9009,7 @@ def create_app() -> FastAPI:
         mailer_cfg = cfg.get("mailer", {}) if isinstance(cfg, dict) else {}
         safe_accounts = _safe_smtp_accounts(smtp_accounts)
         first_smtp = smtp_accounts[0] if smtp_accounts else {}
-        supabase_cfg = cfg.get("supabase", {}) if isinstance(cfg, dict) else {}
+        supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         return {
             "openai_api_key": "***" if openai_key and openai_key != "YOUR_OPENAI_API_KEY" else "",
             "smtp_host": first_smtp.get("host", ""),
@@ -8960,10 +9034,10 @@ def create_app() -> FastAPI:
             "auto_monthly_report_email": bool(cfg.get("auto_monthly_report_email", True)),
             "proxy_url": str(cfg.get("proxy_url", "") or ""),
             "proxy_urls": "\n".join(cfg.get("proxy_urls") or []),
-            "supabase_url": str(supabase_cfg.get("url", "") or ""),
-            "supabase_publishable_key": str(supabase_cfg.get("publishable_key", "") or ""),
-            "supabase_service_role_key_set": bool(str(supabase_cfg.get("service_role_key", "") or "").strip()),
-            "supabase_primary_mode": bool(supabase_cfg.get("primary_mode", False)),
+            "supabase_url": str(supabase_settings.get("url", "") or ""),
+            "supabase_publishable_key": "" if STATELESS_SUPABASE_ONLY else str((cfg.get("supabase", {}) if isinstance(cfg, dict) else {}).get("publishable_key", "") or ""),
+            "supabase_service_role_key_set": bool(supabase_settings.get("has_service_role")),
+            "supabase_primary_mode": bool(supabase_settings.get("primary_mode", False)),
         }
 
     @app.put("/api/config")
@@ -9058,6 +9132,11 @@ def create_app() -> FastAPI:
             cfg["proxy_urls"] = parsed
 
         if any(v is not None for v in [payload.supabase_url, payload.supabase_publishable_key, payload.supabase_service_role_key, payload.supabase_primary_mode]):
+            if STATELESS_SUPABASE_ONLY:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Supabase connection settings are managed by Railway environment variables in stateless mode.",
+                )
             supabase_cfg = dict(cfg.get("supabase", {}))
             if payload.supabase_url is not None:
                 supabase_cfg["url"] = payload.supabase_url.strip()
@@ -9683,7 +9762,7 @@ def create_app() -> FastAPI:
 
             supabase_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,insecure_site,main_shortcoming,ai_description,ai_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,generated_email_body,crm_comment,status_updated_at,last_sender_email,"
                 "is_ads_client,is_website_client,worker_id,assigned_worker_at,paid_at,enrichment_data,pipeline_stage,client_folder_id,"
                 "open_tracking_token,open_count,first_opened_at,last_opened_at,"
@@ -9691,7 +9770,7 @@ def create_app() -> FastAPI:
             )
             legacy_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,insecure_site,main_shortcoming,ai_score,client_tier,status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
@@ -9727,6 +9806,11 @@ def create_app() -> FastAPI:
                     )
                 for row in rows:
                     row.setdefault("ai_description", None)
+                    row.setdefault("google_claimed", None)
+                    row.setdefault("linkedin_url", None)
+                    row.setdefault("instagram_url", None)
+                    row.setdefault("facebook_url", None)
+                    row.setdefault("qualification_score", None)
                     row.setdefault("enrichment_status", "pending")
                     row.setdefault("generated_email_body", None)
                     row.setdefault("is_ads_client", 0)
@@ -9764,6 +9848,10 @@ def create_app() -> FastAPI:
                 email,
                 website_url,
                 phone_number,
+                google_claimed,
+                linkedin_url,
+                instagram_url,
+                facebook_url,
                 rating,
                 review_count,
                 address,
@@ -9772,6 +9860,7 @@ def create_app() -> FastAPI:
                 main_shortcoming,
                 ai_description,
                 ai_score,
+                qualification_score,
                 client_tier,
                 status,
                 enrichment_status,

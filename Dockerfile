@@ -2,7 +2,20 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHON_ENV=production \
+    APP_ENV=production \
+    NODE_ENV=production \
+    STATELESS_SUPABASE_ONLY=1 \
+    SUPABASE_PRIMARY_DB=1 \
+    MALLOC_ARENA_MAX=2 \
+    LOG_LEVEL=warning \
+    DB_POOL_SIZE=1 \
+    DB_MAX_OVERFLOW=0 \
+    APP_THREADPOOL_WORKERS=2 \
+    SCHEDULER_MAX_WORKERS=1 \
+    ENRICH_CONCURRENCY_LIMIT=2 \
+    RUN_STARTUP_JOBS=0
 
 WORKDIR /app
 
@@ -45,4 +58,4 @@ RUN mkdir -p /app/profiles/maps_profile
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "exec uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level ${LOG_LEVEL:-warning} --no-access-log --timeout-keep-alive 5 --timeout-graceful-shutdown 15"]

@@ -6,8 +6,11 @@ import logging
 import os
 import re
 import time
+import urllib.request
+from datetime import datetime, timezone
+from html import unescape
 from typing import Any, Callable, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import aiohttp
 from sqlalchemy import text
@@ -137,10 +140,25 @@ class LeadEnricher:
                         email = None
                         insecure_site = False
                         website_excerpt = ""
+                        website_signals: dict[str, Any] = {}
+                        social_profiles: dict[str, str] = {
+                            "linkedin": str(lead.get("linkedin_url") or "").strip(),
+                            "instagram": str(lead.get("instagram_url") or "").strip(),
+                            "facebook": str(lead.get("facebook_url") or "").strip(),
+                        }
+                        social_metrics: dict[str, dict[str, Any]] = {}
 
                         website_url = self._normalize_website(lead["website_url"])
                         if website_url:
-                            email, insecure_site, website_excerpt = self._find_email_on_website(page=page, website_url=website_url)
+                            email, insecure_site, website_excerpt, website_signals = self._audit_website(page=page, website_url=website_url)
+                            social_profiles = self._discover_social_profiles(
+                                business_name=str(lead.get("business_name") or ""),
+                                website_url=website_url,
+                                address=str(lead.get("address") or ""),
+                                existing_profiles=social_profiles,
+                                website_signals=website_signals,
+                            )
+                            social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
                             city = self._extract_city(lead["address"])
                             email = self._find_email_via_google(
@@ -149,6 +167,14 @@ class LeadEnricher:
                                 business_name=lead["business_name"],
                                 city=city,
                             )
+                            social_profiles = self._discover_social_profiles(
+                                business_name=str(lead.get("business_name") or ""),
+                                website_url=website_url,
+                                address=str(lead.get("address") or ""),
+                                existing_profiles=social_profiles,
+                                website_signals=website_signals,
+                            )
+                            social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
 
                         shortcoming = self._infer_main_shortcoming(
                             website_url=lead["website_url"],
@@ -178,6 +204,10 @@ class LeadEnricher:
                             has_email=bool(email),
                             address=lead["address"] or "",
                             search_keyword=lead["search_keyword"] or "",
+                            google_claimed=lead.get("google_claimed"),
+                            website_signals=website_signals,
+                            social_profiles=social_profiles,
+                            social_metrics=social_metrics,
                         )
 
                         if not website_url:
@@ -218,6 +248,10 @@ class LeadEnricher:
                             invalid_email=email_invalid,
                             phone_number=lead["phone_number"],
                             address=lead["address"],
+                            linkedin_url=social_profiles.get("linkedin"),
+                            instagram_url=social_profiles.get("instagram"),
+                            facebook_url=social_profiles.get("facebook"),
+                            qualification_score=deep_intelligence.get("qualification_score"),
                         )
 
                         processed += 1
@@ -279,12 +313,17 @@ class LeadEnricher:
     def _ensure_enrichment_columns(self) -> None:
         statements = [
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS email text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS google_claimed bigint',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_url text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS insecure_site bigint DEFAULT 0',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS main_shortcoming text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_at text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS status text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS status_updated_at text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_score double precision',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS qualification_score double precision',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_description text',
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS client_tier text DEFAULT 'standard'",
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enrichment_data text',
@@ -303,6 +342,10 @@ class LeadEnricher:
                     website_url,
                     rating,
                     review_count,
+                    google_claimed,
+                    linkedin_url,
+                    instagram_url,
+                    facebook_url,
                     address,
                     search_keyword,
                     phone_number
@@ -374,6 +417,10 @@ class LeadEnricher:
         invalid_email: bool = False,
         phone_number: Optional[str] = None,
         address: Optional[str] = None,
+        linkedin_url: Optional[str] = None,
+        instagram_url: Optional[str] = None,
+        facebook_url: Optional[str] = None,
+        qualification_score: Optional[float] = None,
     ) -> None:
         new_status = "invalid_email" if invalid_email else "enriched"
 
@@ -397,6 +444,7 @@ class LeadEnricher:
                     insecure_site = :insecure_site,
                     main_shortcoming = :main_shortcoming,
                     ai_score = :ai_score,
+                    qualification_score = COALESCE(:qualification_score, qualification_score),
                     ai_description = :ai_description,
                     client_tier = :client_tier,
                     enrichment_data = COALESCE(:enrichment_data, enrichment_data),
@@ -404,6 +452,9 @@ class LeadEnricher:
                     status = :new_status,
                     status_updated_at = CURRENT_TIMESTAMP::text,
                     enriched_at = CURRENT_TIMESTAMP::text,
+                    linkedin_url = COALESCE(:linkedin_url, linkedin_url),
+                    instagram_url = COALESCE(:instagram_url, instagram_url),
+                    facebook_url = COALESCE(:facebook_url, facebook_url),
                     phone_formatted = COALESCE(:phone_formatted, phone_formatted),
                     phone_type = COALESCE(:phone_type, phone_type)
                 WHERE id = :lead_id
@@ -414,10 +465,14 @@ class LeadEnricher:
                 "insecure_site": 1 if insecure_site else 0,
                 "main_shortcoming": main_shortcoming,
                 "ai_score": ai_score,
+                "qualification_score": float(qualification_score) if qualification_score is not None else None,
                 "ai_description": ai_description,
                 "client_tier": client_tier,
                 "enrichment_data": enrichment_data,
                 "new_status": new_status,
+                "linkedin_url": linkedin_url,
+                "instagram_url": instagram_url,
+                "facebook_url": facebook_url,
                 "phone_formatted": phone_formatted,
                 "phone_type": phone_type,
                 "lead_id": int(lead_id),
@@ -447,15 +502,15 @@ class LeadEnricher:
         query += " ORDER BY business_name ASC"
         return self._fetchall(text(query), params)
 
-    def _find_email_on_website(self, page, website_url: str) -> tuple[Optional[str], bool, str]:
+    def _audit_website(self, page, website_url: str) -> tuple[Optional[str], bool, str, dict[str, Any]]:
         try:
             page.goto(website_url, wait_until="domcontentloaded", timeout=15000)
         except PlaywrightTimeoutError:
             logging.warning("Timeout while loading website: %s", website_url)
-            return None, not website_url.lower().startswith("https://"), ""
+            return None, not website_url.lower().startswith("https://"), "", {}
         except Exception as exc:
             logging.warning("Could not load website %s (%s)", website_url, exc)
-            return None, not website_url.lower().startswith("https://"), ""
+            return None, not website_url.lower().startswith("https://"), "", {}
 
         random_mouse_movements(page, count=3)
         random_delay(250, 700)
@@ -471,9 +526,11 @@ class LeadEnricher:
             except Exception:
                 page_html = ""
 
+        website_signals = self._extract_website_signals(page_html=page_html, base_url=final_url, website_url=website_url)
+
         emails = self._extract_emails(page_html)
         if emails:
-            return self._pick_best_email(emails), insecure_site, self._extract_page_excerpt(page_html)
+            return self._pick_best_email(emails), insecure_site, self._extract_page_excerpt(page_html), website_signals
 
         contact_page = self._discover_contact_page(page=page, base_url=final_url)
         if contact_page:
@@ -489,12 +546,280 @@ class LeadEnricher:
                     except Exception:
                         contact_html = ""
                 emails = self._extract_emails(contact_html)
+                website_signals = self._merge_website_signals(
+                    website_signals,
+                    self._extract_website_signals(page_html=contact_html, base_url=contact_page, website_url=website_url),
+                )
                 if emails:
-                    return self._pick_best_email(emails), insecure_site, self._extract_page_excerpt(contact_html)
+                    return self._pick_best_email(emails), insecure_site, self._extract_page_excerpt(contact_html), website_signals
             except Exception:
-                return None, insecure_site, self._extract_page_excerpt(page_html)
+                return None, insecure_site, self._extract_page_excerpt(page_html), website_signals
 
-        return None, insecure_site, self._extract_page_excerpt(page_html)
+        return None, insecure_site, self._extract_page_excerpt(page_html), website_signals
+
+    def _extract_website_signals(self, page_html: str, base_url: str, website_url: Optional[str]) -> dict[str, Any]:
+        blob = str(page_html or "")
+        lower_blob = blob.lower()
+        tech_stack = self._detect_tech_stack(website_url, self._extract_page_excerpt(blob))
+        social_links = self._extract_social_links_from_html(blob, base_url)
+        has_meta_pixel = any(token in lower_blob for token in ["connect.facebook.net/en_us/fbevents", "fbq(", "meta pixel", "facebook pixel"])
+        has_google_analytics = any(token in lower_blob for token in ["googletagmanager", "google-analytics", "gtag(", "gtm.js"])
+        has_contact_form = (
+            ("<form" in lower_blob and ("contact" in lower_blob or 'type="email"' in lower_blob or "textarea" in lower_blob))
+            or "contact us" in lower_blob
+        )
+        modern_design = bool(
+            "viewport" in lower_blob
+            and any(token in lower_blob for token in ["tailwind", "bootstrap", "react", "next.js", "vite", "webflow", "framer"])
+        ) or (lower_blob.count("<section") >= 2 and lower_blob.count("<img") >= 4)
+        return {
+            "has_meta_pixel": has_meta_pixel,
+            "has_google_analytics": has_google_analytics,
+            "has_pixel": bool(has_meta_pixel or has_google_analytics),
+            "has_contact_form": has_contact_form,
+            "modern_design": modern_design,
+            "tech_stack": tech_stack,
+            "social_links": social_links,
+        }
+
+    @staticmethod
+    def _merge_website_signals(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(primary or {})
+        for key in ["has_meta_pixel", "has_google_analytics", "has_pixel", "has_contact_form", "modern_design"]:
+            merged[key] = bool(merged.get(key) or secondary.get(key))
+        merged["tech_stack"] = list(dict.fromkeys([*(merged.get("tech_stack") or []), *(secondary.get("tech_stack") or [])]))[:5]
+        social_links = dict(merged.get("social_links") or {})
+        social_links.update({k: v for k, v in (secondary.get("social_links") or {}).items() if v})
+        merged["social_links"] = social_links
+        return merged
+
+    def _extract_social_links_from_html(self, page_html: str, base_url: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for href in re.findall(r'href=["\']([^"\']+)["\']', page_html or "", flags=re.IGNORECASE):
+            absolute = urljoin(base_url, unescape(href.strip()))
+            normalized = absolute.lower()
+            if "linkedin.com" in normalized and "/share" not in normalized and "/feed" not in normalized:
+                found.setdefault("linkedin", absolute)
+            elif "instagram.com" in normalized and "/p/" not in normalized and "/reel/" not in normalized:
+                found.setdefault("instagram", absolute)
+            elif "facebook.com" in normalized and "sharer" not in normalized and "/posts/" not in normalized:
+                found.setdefault("facebook", absolute)
+        return found
+
+    def _discover_social_profiles(
+        self,
+        *,
+        business_name: str,
+        website_url: Optional[str],
+        address: str,
+        existing_profiles: Optional[dict[str, str]] = None,
+        website_signals: Optional[dict[str, Any]] = None,
+    ) -> dict[str, str]:
+        profiles = {
+            "linkedin": str((existing_profiles or {}).get("linkedin") or "").strip(),
+            "instagram": str((existing_profiles or {}).get("instagram") or "").strip(),
+            "facebook": str((existing_profiles or {}).get("facebook") or "").strip(),
+        }
+        site_links = dict((website_signals or {}).get("social_links") or {})
+        for key in profiles:
+            if not profiles[key] and site_links.get(key):
+                profiles[key] = str(site_links[key]).strip()
+
+        city = self._extract_city(address)
+        domain_hint = ""
+        if website_url:
+            try:
+                domain_hint = urlparse(str(website_url)).netloc.lower().replace("www.", "").split(":", 1)[0]
+            except Exception:
+                domain_hint = ""
+
+        platform_queries = {
+            "linkedin": ["linkedin.com/company", "linkedin.com/in"],
+            "instagram": ["instagram.com"],
+            "facebook": ["facebook.com"],
+        }
+
+        for platform, domains in platform_queries.items():
+            if profiles.get(platform):
+                continue
+            search_parts = [f'site:{domains[0]}', f'"{business_name}"']
+            if city:
+                search_parts.append(f'"{city}"')
+            if domain_hint:
+                search_parts.append(f'"{domain_hint.split(".")[0]}"')
+            query = " ".join(part for part in search_parts if part)
+            match = self._search_social_profile_url(query=query, allowed_domains=domains)
+            if match:
+                profiles[platform] = match
+        return profiles
+
+    def _search_social_profile_url(self, *, query: str, allowed_domains: list[str]) -> Optional[str]:
+        results = self._search_engine_links(query=query)
+        for result in results:
+            normalized = result.lower()
+            if any(domain in normalized for domain in allowed_domains):
+                return result
+        return None
+
+    def _search_engine_links(self, *, query: str) -> list[str]:
+        serpapi_key = str(os.environ.get("SERPAPI_API_KEY", "") or "").strip()
+        if serpapi_key:
+            try:
+                url = (
+                    "https://serpapi.com/search.json?engine=google"
+                    f"&q={quote_plus(query)}&api_key={quote_plus(serpapi_key)}&num=5"
+                )
+                request = urllib.request.Request(url, headers={"User-Agent": MODERN_USER_AGENT})
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+                return [
+                    str(item.get("link") or "").strip()
+                    for item in payload.get("organic_results") or []
+                    if str(item.get("link") or "").strip()
+                ][:5]
+            except Exception as exc:
+                logging.debug("SerpApi social discovery failed for %s: %s", query, exc)
+
+        endpoints = [
+            f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+            f"https://www.bing.com/search?q={quote_plus(query)}",
+        ]
+        for endpoint in endpoints:
+            try:
+                request = urllib.request.Request(endpoint, headers={"User-Agent": MODERN_USER_AGENT})
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    html = response.read().decode("utf-8", errors="ignore")
+                links = self._extract_search_links_from_html(html)
+                if links:
+                    return links[:5]
+            except Exception as exc:
+                logging.debug("Search endpoint failed for %s (%s): %s", query, endpoint, exc)
+        return []
+
+    @staticmethod
+    def _extract_search_links_from_html(html: str) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for href in re.findall(r'href=["\']([^"\']+)["\']', html or "", flags=re.IGNORECASE):
+            raw = unescape(href)
+            if "uddg=" in raw:
+                parsed = urlparse(raw)
+                uddg = parse_qs(parsed.query).get("uddg")
+                if uddg:
+                    raw = unquote(uddg[0])
+            if raw.startswith("/") and "bing.com" not in raw:
+                continue
+            if not raw.startswith("http"):
+                continue
+            domain = urlparse(raw).netloc.lower()
+            if any(blocked in domain for blocked in ["duckduckgo.com", "bing.com", "google.com"]):
+                continue
+            if raw in seen:
+                continue
+            seen.add(raw)
+            candidates.append(raw)
+        return candidates
+
+    def _collect_social_metrics(self, context, social_profiles: dict[str, str]) -> dict[str, dict[str, Any]]:
+        metrics: dict[str, dict[str, Any]] = {}
+        for platform, url in social_profiles.items():
+            if not url:
+                continue
+            metrics[platform] = self._fetch_social_profile_metrics(context=context, platform=platform, url=url)
+        return metrics
+
+    def _fetch_social_profile_metrics(self, context, *, platform: str, url: str) -> dict[str, Any]:
+        page = context.new_page()
+        apply_stealth(page)
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=12000)
+            random_delay(250, 700)
+            html = page.content()
+            text_blob = _clean_for_ai(html)
+        except Exception:
+            html = ""
+            text_blob = ""
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+        follower_count = self._extract_social_follower_count(text_blob)
+        last_post_text, last_active_days = self._extract_social_recency(text_blob)
+        engagement_count = self._extract_social_engagement_count(text_blob)
+        active = bool(last_active_days is not None and last_active_days <= 120)
+        if not active and engagement_count >= 25 and follower_count > 0:
+            active = True
+        return {
+            "platform": platform,
+            "url": url,
+            "follower_count": follower_count,
+            "engagement_count": engagement_count,
+            "last_post_text": last_post_text,
+            "last_active_days": last_active_days,
+            "active": active,
+        }
+
+    @staticmethod
+    def _parse_compact_number(raw_value: str) -> int:
+        text_value = str(raw_value or "").strip().upper().replace(",", "")
+        if not text_value:
+            return 0
+        multiplier = 1
+        if text_value.endswith("K"):
+            multiplier = 1_000
+            text_value = text_value[:-1]
+        elif text_value.endswith("M"):
+            multiplier = 1_000_000
+            text_value = text_value[:-1]
+        elif text_value.endswith("B"):
+            multiplier = 1_000_000_000
+            text_value = text_value[:-1]
+        try:
+            return int(float(text_value) * multiplier)
+        except Exception:
+            return 0
+
+    def _extract_social_follower_count(self, text_blob: str) -> int:
+        match = re.search(r'([\d.,]+\s*[KMB]?)\s+(?:followers|follower|likes)', text_blob or "", re.IGNORECASE)
+        if not match:
+            return 0
+        return self._parse_compact_number(match.group(1))
+
+    def _extract_social_engagement_count(self, text_blob: str) -> int:
+        counts = re.findall(r'([\d.,]+\s*[KMB]?)\s+(?:likes|comments|reactions)', text_blob or "", re.IGNORECASE)
+        if not counts:
+            return 0
+        parsed = [self._parse_compact_number(item) for item in counts[:3]]
+        return max(parsed or [0])
+
+    def _extract_social_recency(self, text_blob: str) -> tuple[str, Optional[int]]:
+        relative = re.search(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+ago', text_blob or "", re.IGNORECASE)
+        if relative:
+            amount = int(relative.group(1))
+            unit = relative.group(2).lower()
+            multiplier = 1
+            if unit.startswith("week"):
+                multiplier = 7
+            elif unit.startswith("month"):
+                multiplier = 30
+            elif unit.startswith("year"):
+                multiplier = 365
+            return relative.group(0), amount * multiplier
+
+        absolute = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}', text_blob or "", re.IGNORECASE)
+        if absolute:
+            raw_text = absolute.group(0)
+            for fmt in ["%b %d, %Y", "%B %d, %Y"]:
+                try:
+                    parsed = datetime.strptime(raw_text, fmt).replace(tzinfo=timezone.utc)
+                    days = max(0, (datetime.now(timezone.utc) - parsed).days)
+                    return raw_text, days
+                except Exception:
+                    continue
+            return raw_text, None
+        return "", None
 
     def _find_email_via_google(self, page, context, business_name: str, city: str) -> Optional[str]:
         query = f"contact {business_name} {city}".strip()
@@ -866,9 +1191,16 @@ class LeadEnricher:
         address: str,
         search_keyword: str,
         ai_score: int,
+        google_claimed: Optional[bool] = None,
+        website_signals: Optional[dict[str, Any]] = None,
+        social_profiles: Optional[dict[str, str]] = None,
+        social_metrics: Optional[dict[str, dict[str, Any]]] = None,
         parsed_ai: Optional[dict] = None,
     ) -> dict:
         parsed = parsed_ai if isinstance(parsed_ai, dict) else {}
+        website_signal_map = dict(website_signals or {})
+        social_profile_map = {key: str(value or "").strip() for key, value in dict(social_profiles or {}).items() if str(value or "").strip()}
+        social_metric_map = dict(social_metrics or {})
         default_strengths = []
         if website_url:
             default_strengths.append("Website is live and discoverable")
@@ -876,6 +1208,8 @@ class LeadEnricher:
             default_strengths.append(f"Strong review sentiment ({float(rating):.1f}★)")
         if has_email:
             default_strengths.append("Reachable contact channel is available")
+        if social_profile_map:
+            default_strengths.append("Business has social profiles that can be verified cross-platform")
         if self._infer_recent_site_update(page_excerpt):
             default_strengths.append("Recent content or update signals are visible")
         if not default_strengths:
@@ -903,7 +1237,7 @@ class LeadEnricher:
 
         tech_stack = self._normalize_string_list(parsed.get("tech_stack"), limit=5)
         if not tech_stack:
-            tech_stack = self._detect_tech_stack(website_url, page_excerpt)
+            tech_stack = self._normalize_string_list(website_signal_map.get("tech_stack"), limit=5) or self._detect_tech_stack(website_url, page_excerpt)
 
         recent_site_update = self._coerce_bool(parsed.get("recent_site_update")) or self._infer_recent_site_update(page_excerpt)
         intent_signals = self._normalize_string_list(parsed.get("intent_signals"), limit=6)
@@ -928,6 +1262,15 @@ class LeadEnricher:
         except Exception:
             ai_sentiment_score = float(ai_score * 10)
         ai_sentiment_score = max(0.0, min(100.0, ai_sentiment_score))
+        qualification_score = int(round(ai_sentiment_score))
+
+        social_last_active_days = min(
+            [int(item.get("last_active_days")) for item in social_metric_map.values() if item.get("last_active_days") is not None] or [9999]
+        )
+        social_activity_score = round(min(10.0, sum(
+            2.5 if bool(item.get("active")) else 0.5
+            for item in social_metric_map.values()
+        ) + (1.5 if any(int(item.get("follower_count") or 0) >= 1000 for item in social_metric_map.values()) else 0.0)), 1)
 
         email_component = 40 if has_email else 8
         if employee_count >= 100:
@@ -961,10 +1304,31 @@ class LeadEnricher:
             "employee_count": employee_count,
             "ai_sentiment_score": ai_sentiment_score,
             "lead_score_100": int(round(ai_sentiment_score)),
+            "qualification_score": qualification_score,
             "best_lead_score": best_lead_score,
             "lead_priority": str(parsed.get("lead_priority") or ("Hot Lead" if best_lead_score >= 80 else "Qualified" if best_lead_score >= 55 else "Low Priority")).strip(),
             "reason": str(parsed.get("reason") or parsed.get("enrichment_summary") or "").strip(),
             "enrichment_summary": str(parsed.get("enrichment_summary") or parsed.get("reason") or "").strip(),
+            "google_maps": {
+                "claimed": google_claimed,
+                "rating": rating,
+                "review_count": review_count,
+            },
+            "social_profiles": social_profile_map,
+            "social_metrics": social_metric_map,
+            "has_social_links": bool(social_profile_map),
+            "social_last_active_days": None if social_last_active_days == 9999 else social_last_active_days,
+            "social_activity_score": social_activity_score,
+            "website_signals": {
+                "has_pixel": bool(website_signal_map.get("has_pixel")),
+                "has_meta_pixel": bool(website_signal_map.get("has_meta_pixel")),
+                "has_google_analytics": bool(website_signal_map.get("has_google_analytics")),
+                "has_contact_form": bool(website_signal_map.get("has_contact_form")),
+                "modern_design": bool(website_signal_map.get("modern_design")),
+            },
+            "has_contact_form": bool(website_signal_map.get("has_contact_form")),
+            "has_pixel": bool(website_signal_map.get("has_pixel")),
+            "modern_design": bool(website_signal_map.get("modern_design")),
         }
 
     def _score_lead_priority(
@@ -979,6 +1343,10 @@ class LeadEnricher:
         has_email: bool,
         address: str = "",
         search_keyword: str = "",
+        google_claimed: Optional[bool] = None,
+        website_signals: Optional[dict[str, Any]] = None,
+        social_profiles: Optional[dict[str, str]] = None,
+        social_metrics: Optional[dict[str, dict[str, Any]]] = None,
     ) -> tuple[int, str, str, dict]:
         """Return (score 1-10, ai_summary reason, competitive_hook string, deep_intelligence payload)."""
         if not website_url or str(website_url).strip().lower() == "none":
@@ -993,6 +1361,10 @@ class LeadEnricher:
                 address=address,
                 search_keyword=search_keyword,
                 ai_score=10,
+                google_claimed=google_claimed,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                social_metrics=social_metrics,
                 parsed_ai={
                     "competitive_hook": "Your top competitors already have a website capturing Google traffic, while you currently have no site to convert visitors or support ads.",
                     "strengths": ["Recognizable business name", "Clear local market fit", "Fast upside once online"],
@@ -1047,6 +1419,10 @@ class LeadEnricher:
                 address=address,
                 search_keyword=search_keyword,
                 ai_score=heuristic_score,
+                google_claimed=google_claimed,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                social_metrics=social_metrics,
             )
             return (
                 heuristic_score,
@@ -1102,6 +1478,18 @@ class LeadEnricher:
                     logging.warning("Lead qualification check failed for %s: %s", business_name, qexc)
 
             system_prompt = factory.get_enrichment_system_prompt(user_niche=self.user_niche)
+            social_activity_score = round(
+                min(
+                    10.0,
+                    sum(2.5 if bool(item.get("active")) else 0.5 for item in (social_metrics or {}).values())
+                    + (
+                        1.5
+                        if any(int(item.get("follower_count") or 0) >= 1000 for item in (social_metrics or {}).values())
+                        else 0.0
+                    ),
+                ),
+                1,
+            )
             payload = {
                 "company_name": business_name,
                 "location": address,
@@ -1109,12 +1497,17 @@ class LeadEnricher:
                 "rating": rating,
                 "reviews": review_count,
                 "review_count": review_count,
+                "google_maps_claimed": google_claimed,
                 "audit_findings": shortcoming,
                 "shortcoming": shortcoming,
                 "has_website": bool(website_url),
                 "insecure_site": insecure_site,
                 "has_email": has_email,
                 "website_excerpt": _clean_for_ai(page_excerpt)[:800],
+                "website_signals": website_signals or {},
+                "social_profiles": social_profiles or {},
+                "social_metrics": social_metrics or {},
+                "social_activity_score": social_activity_score,
             }
             parsed = asyncio.run(
                 self._score_lead_priority_async(
@@ -1142,6 +1535,10 @@ class LeadEnricher:
                 address=address,
                 search_keyword=search_keyword,
                 ai_score=score,
+                google_claimed=google_claimed,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                social_metrics=social_metrics,
                 parsed_ai=parsed,
             )
             if competitive_hook and not str(deep_payload.get("competitive_hook") or "").strip():
@@ -1201,6 +1598,10 @@ class LeadEnricher:
                 address=address,
                 search_keyword=search_keyword,
                 ai_score=heuristic_score,
+                google_claimed=google_claimed,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                social_metrics=social_metrics,
             )
             return (
                 heuristic_score,
@@ -1225,6 +1626,10 @@ class LeadEnricher:
                 address=address,
                 search_keyword=search_keyword,
                 ai_score=heuristic_score,
+                google_claimed=google_claimed,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                social_metrics=social_metrics,
             )
             return (
                 heuristic_score,

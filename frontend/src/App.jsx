@@ -694,13 +694,6 @@ const defaultCampaignSequenceForm = {
   ab_subject_b: '{BusinessName} — local traffic idea',
   active: true,
 }
-const defaultSavedTemplateForm = {
-  name: 'Winning Local Offer',
-  category: 'general',
-  prompt_text: 'Keep it concise, local, and conversion-focused.',
-  subject_template: 'Quick question for {BusinessName}',
-  body_template: 'Hi {BusinessName},\n\nI noticed a quick way to improve local conversion in {City}.',
-}
 const defaultManualLead = { contactName: '', email: '', businessName: '' }
 const defaultWorkerForm = { workerName: '', role: 'DEV', monthlyCost: '', status: 'Active', commsLink: '' }
 const createEmptySmtpAccount = () => ({
@@ -1718,10 +1711,8 @@ function App({ initialTab = 'leads' }) {
     recent_events: [],
   })
   const [sequenceForm, setSequenceForm] = useState(defaultCampaignSequenceForm)
-  const [savedTemplateForm, setSavedTemplateForm] = useState(defaultSavedTemplateForm)
   const [campaignLoading, setCampaignLoading] = useState(false)
   const [savingSequence, setSavingSequence] = useState(false)
-  const [savingSavedTemplate, setSavingSavedTemplate] = useState(false)
   const [manualLeadForm, setManualLeadForm] = useState(defaultManualLead)
   const [pendingRequest, setPendingRequest] = useState('')
   const [pendingStatusLeadId, setPendingStatusLeadId] = useState(null)
@@ -2702,7 +2693,7 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     if (activeTab !== 'leads') return
     void refreshLeads({ silent: false })
-  }, [activeTab, leadPage, debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted])
+  }, [activeTab, refreshLeads])
 
   useEffect(() => {
     if (leadPage > 0 && leadPage >= leadsPageCount) {
@@ -2956,7 +2947,7 @@ function App({ initialTab = 'leads' }) {
       }
     }
     previousTasksRef.current = tasks
-  }, [tasks])
+  }, [refreshLeads, tasks])
 
   async function refreshDashboard() {
     setRefreshingDashboard(true)
@@ -3411,7 +3402,7 @@ function App({ initialTab = 'leads' }) {
 
   const handleTopUpProceed = useCallback((packageId) => {
     void startTopUpCheckout(packageId)
-  }, [])
+  }, [startTopUpCheckout])
 
   const navigateToCheckoutWithFallback = useCallback((checkoutUrl) => {
     const targetUrl = String(checkoutUrl || '').trim()
@@ -3438,7 +3429,7 @@ function App({ initialTab = 'leads' }) {
     window.location.assign('/pricing')
   }, [])
 
-  async function startTopUpCheckout(packageId) {
+  const startTopUpCheckout = useCallback(async (packageId) => {
     const normalizedPackageId = String(packageId || '').trim()
     setTopUpLoadingPackageId(normalizedPackageId)
     try {
@@ -3455,7 +3446,7 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setTopUpLoadingPackageId('')
     }
-  }
+  }, [navigateToCheckoutWithFallback, requestTopUpCheckoutUrl])
 
   async function saveConfig(e) {
     e.preventDefault()
@@ -3744,7 +3735,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingWeeklyReport(false)
       }
     }
-  }, [user?.plan_key, user?.plan_type, user?.feature_access])
+  }, [featureAccess.advanced_reporting])
 
   const refreshMonthlyReport = useCallback(async (options = {}) => {
     if (!featureAccess.advanced_reporting) {
@@ -3769,7 +3760,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingMonthlyReport(false)
       }
     }
-  }, [user?.plan_key, user?.plan_type, user?.feature_access])
+  }, [featureAccess.advanced_reporting])
 
   async function downloadMonthlyReportPdf() {
     if (!featureAccess.advanced_reporting) {
@@ -3875,7 +3866,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingClientFolders(false)
       }
     }
-  }, [user?.plan_key, user?.plan_type, user?.feature_access])
+  }, [featureAccess.client_success_dashboard])
 
   const refreshClientDashboard = useCallback(async (options = {}) => {
     if (!featureAccess.client_success_dashboard) {
@@ -3919,7 +3910,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingClientDashboard(false)
       }
     }
-  }, [user?.plan_key, user?.plan_type, user?.feature_access])
+  }, [featureAccess.client_success_dashboard])
 
   async function createClientFolder(e) {
     e.preventDefault()
@@ -4045,7 +4036,7 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function refreshLeads(options = {}) {
+  const refreshLeads = useCallback(async (options = {}) => {
     const silent = options?.silent !== undefined ? options.silent : true
     if (!silent) {
       setLoadingLeads(true)
@@ -4077,7 +4068,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingLeads(false)
       }
     }
-  }
+  }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, showBlacklisted])
 
   async function refreshSavedSegments({ silent = false } = {}) {
     if (!silent) {
@@ -4154,7 +4145,7 @@ function App({ initialTab = 'leads' }) {
       window.clearInterval(fastId)
       window.clearInterval(slowId)
     }
-  }, [activeTab, refreshClientDashboard, refreshClientFolders, refreshMonthlyReport, refreshWeeklyReport])
+  }, [activeTab, refreshClientDashboard, refreshClientFolders, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
 
   function applySavedSegment(segment) {
     const filters = normalizeSavedSegmentFilters(segment?.filters || {})
@@ -4724,36 +4715,6 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function saveTemplateLibraryItem() {
-    setSavingSavedTemplate(true)
-    try {
-      await fetchJson('/api/mailer/templates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(savedTemplateForm),
-      })
-      toast.success('Template saved to library')
-      await fetchMailerCampaignStats({ silent: true })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save template'
-      setLastError(message)
-      toast.error(message)
-    } finally {
-      setSavingSavedTemplate(false)
-    }
-  }
-
-  function applySavedTemplateToEditor(template) {
-    const nextConfig = {
-      ...configForm,
-      competitor_subject_template: String(template?.subject_template || '').trim() || configForm.competitor_subject_template,
-      competitor_body_template: String(template?.body_template || '').trim() || configForm.competitor_body_template,
-    }
-    setConfigForm(nextConfig)
-    void previewMailTemplate({ silent: true, configOverride: nextConfig })
-    toast.success(`Loaded '${template?.name || 'template'}' into editor`)
-  }
-
   async function previewMailTemplate({ regenerate = false, silent = false, configOverride = null } = {}) {
     const previewConfig = configOverride || configForm
     setPreviewLoading(true)
@@ -5209,8 +5170,18 @@ function App({ initialTab = 'leads' }) {
       leadPriority: lead.lead_priority || '',
       employeeCount: Number(lead.employee_count || 0),
       sentimentScore: resolveLeadSignalScore(lead),
+      qualificationScore: Number(lead.qualification_score || lead.lead_score_100 || 0),
+      socialActivityScore: Number(lead.social_activity_score || 0),
       competitiveHook: lead.competitive_hook || '',
       mainOffer: lead.main_offer || '',
+      googleMaps: lead.google_maps || {},
+      websiteSignals: lead.website_signals || {},
+      socialProfiles: lead.social_profiles || {
+        linkedin: lead.linkedin_url || '',
+        instagram: lead.instagram_url || '',
+        facebook: lead.facebook_url || '',
+      },
+      socialMetrics: lead.social_metrics || {},
     })
   }
 
@@ -5323,9 +5294,7 @@ function App({ initialTab = 'leads' }) {
     () => resolveFeatureAccess(user?.plan_type || planKey || 'free', user?.feature_access),
     [planKey, user?.plan_type, user?.feature_access],
   )
-  const canDeepAnalysis = Boolean(featureAccess.deep_analysis)
   const canBulkExport = Boolean(featureAccess.bulk_export)
-  const canDripCampaigns = Boolean(featureAccess.drip_campaigns)
   const canLeadScoring = Boolean(featureAccess.ai_lead_scoring)
   const canAdvancedReporting = Boolean(featureAccess.advanced_reporting)
   const canClientSuccessDashboard = Boolean(featureAccess.client_success_dashboard)
@@ -6819,6 +6788,7 @@ function App({ initialTab = 'leads' }) {
                         const auditHighlights = normalizeLeadInsightList(lead.company_audit?.strengths, 2)
                         const bestLeadScore = resolveBestLeadScore(lead)
                         const pipelineStage = resolvePipelineStage(lead)
+                        const socialLinks = [lead.linkedin_url, lead.instagram_url, lead.facebook_url].filter(Boolean)
                         return (
                         <tr key={lead.id} className="td-row">
                           {/* Business + Niche + Contact merged */}
@@ -6851,6 +6821,16 @@ function App({ initialTab = 'leads' }) {
                                 <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold ${pipelineStageBadgeClass(pipelineStage)}`}>
                                   {pipelineStage}
                                 </span>
+                                {Number(lead.qualification_score || 0) > 0 && (
+                                  <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-100">
+                                    Q {Math.round(Number(lead.qualification_score || 0))}/100
+                                  </span>
+                                )}
+                                {socialLinks.length > 0 && (
+                                  <span className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-sky-100">
+                                    {socialLinks.length} socials
+                                  </span>
+                                )}
                               </div>
                               {canClientSuccessDashboard && clientFolders.length > 0 && (
                                 <div className="relative mt-1.5">
@@ -6954,6 +6934,11 @@ function App({ initialTab = 'leads' }) {
                                 {bestLeadScore > 0 && (
                                   <span className="text-[10px] font-semibold text-cyan-200">
                                     AI {formatLeadScoreValue(bestLeadScore)}/10{lead.lead_priority ? ` · ${lead.lead_priority}` : ''}
+                                  </span>
+                                )}
+                                {Number(lead.qualification_score || 0) > 0 && (
+                                  <span className="text-[10px] font-semibold text-amber-200">
+                                    Qualified {Math.round(Number(lead.qualification_score || 0))}/100
                                   </span>
                                 )}
                               </div>
@@ -7068,6 +7053,7 @@ function App({ initialTab = 'leads' }) {
                       const bestLeadScore = resolveBestLeadScore(lead)
                       const pipelineStage = resolvePipelineStage(lead)
                       const techStack = normalizeLeadInsightList(lead.tech_stack, 2)
+                      const socialCount = [lead.linkedin_url, lead.instagram_url, lead.facebook_url].filter(Boolean).length
                       return (
                         <article key={`mobile-${lead.id}`} className="rounded-[22px] border border-slate-700/50 bg-slate-900/70 p-4 shadow-[0_8px_24px_rgba(2,6,23,0.2)]">
                           <div className="flex items-start justify-between gap-3">
@@ -7085,6 +7071,8 @@ function App({ initialTab = 'leads' }) {
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
                               <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Score {formatLeadScoreValue(bestLeadScore)}/10</span>
+                              {Number(lead.qualification_score || 0) > 0 && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-100">Q {Math.round(Number(lead.qualification_score || 0))}/100</span>}
+                              {socialCount > 0 && <span className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-semibold text-sky-100">{socialCount} socials</span>}
                               {techStack.map((stack) => (
                                 <span key={`${lead.id}-mobile-${stack}`} className="inline-flex items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-1 text-[10px] font-medium text-violet-200">{stack}</span>
                               ))}
@@ -9114,6 +9102,25 @@ function App({ initialTab = 'leads' }) {
               </div>
             </div>
 
+            <div className="mt-3 grid gap-3 md:grid-cols-4">
+              <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-sky-200/80">Qualification</p>
+                <p className="mt-1 text-lg font-semibold text-white">{Math.round(Number(aiSummaryPreviewLead.qualificationScore || 0)) || '—'}/100</p>
+              </div>
+              <div className="rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-fuchsia-200/80">Social activity</p>
+                <p className="mt-1 text-lg font-semibold text-white">{Number(aiSummaryPreviewLead.socialActivityScore || 0).toFixed(1)}/10</p>
+              </div>
+              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-emerald-200/80">Google claimed</p>
+                <p className="mt-1 text-sm font-semibold text-white">{aiSummaryPreviewLead.googleMaps?.claimed == null ? 'Unknown' : aiSummaryPreviewLead.googleMaps?.claimed ? 'Yes' : 'No'}</p>
+              </div>
+              <div className="rounded-xl border border-slate-500/20 bg-slate-500/10 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-slate-300/80">Website maturity</p>
+                <p className="mt-1 text-sm font-semibold text-white">{aiSummaryPreviewLead.websiteSignals?.modern_design ? 'Modern' : 'Basic / unclear'}</p>
+              </div>
+            </div>
+
             <div className="mt-3 rounded-xl border border-white/10 bg-slate-900/70 px-4 py-3">
               <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Full description</p>
               {aiSummaryPreviewLead.summary ? (
@@ -9180,6 +9187,42 @@ function App({ initialTab = 'leads' }) {
                       ))}
                     </ul>
                   </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="rounded-xl border border-white/10 bg-slate-950/60 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Social profiles</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {Object.entries(aiSummaryPreviewLead.socialProfiles || {}).filter(([, value]) => value).length ? Object.entries(aiSummaryPreviewLead.socialProfiles || {}).filter(([, value]) => value).map(([platform, value]) => (
+                    <a key={`social-${platform}`} href={value} target="_blank" rel="noreferrer" className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-500/20">
+                      {platform}
+                    </a>
+                  )) : <span className="text-sm text-slate-400">No social profiles found yet.</span>}
+                </div>
+                <div className="mt-3 space-y-1 text-sm text-slate-300">
+                  {Object.entries(aiSummaryPreviewLead.socialMetrics || {}).length ? Object.entries(aiSummaryPreviewLead.socialMetrics || {}).map(([platform, metrics]) => (
+                    <p key={`metric-${platform}`}>
+                      <span className="font-semibold text-white">{platform}:</span>{' '}
+                      {Number(metrics?.follower_count || 0) > 0 ? `${Number(metrics.follower_count).toLocaleString()} followers` : 'followers n/a'}
+                      {' · '}
+                      {metrics?.last_active_days != null ? `${metrics.last_active_days}d ago` : 'recency n/a'}
+                      {' · '}
+                      {metrics?.active ? 'active' : 'stale'}
+                    </p>
+                  )) : null}
+                </div>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-slate-950/60 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Website signals</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <span className={`rounded-full border px-2 py-1 text-[11px] ${aiSummaryPreviewLead.websiteSignals?.has_pixel ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : 'border-slate-700/50 bg-slate-800/60 text-slate-300'}`}>Pixel {aiSummaryPreviewLead.websiteSignals?.has_pixel ? 'detected' : 'missing'}</span>
+                  <span className={`rounded-full border px-2 py-1 text-[11px] ${aiSummaryPreviewLead.websiteSignals?.has_contact_form ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : 'border-slate-700/50 bg-slate-800/60 text-slate-300'}`}>Contact form {aiSummaryPreviewLead.websiteSignals?.has_contact_form ? 'present' : 'missing'}</span>
+                  <span className={`rounded-full border px-2 py-1 text-[11px] ${aiSummaryPreviewLead.websiteSignals?.modern_design ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100' : 'border-slate-700/50 bg-slate-800/60 text-slate-300'}`}>Design {aiSummaryPreviewLead.websiteSignals?.modern_design ? 'modern' : 'dated'}</span>
+                </div>
+                {aiSummaryPreviewLead.mainOffer && (
+                  <p className="mt-3 text-sm text-slate-300"><span className="font-semibold text-white">Main offer:</span> {aiSummaryPreviewLead.mainOffer}</p>
                 )}
               </div>
             </div>

@@ -565,7 +565,37 @@ class GoogleMapsScraper:
             review_count=self._parse_int(review_text),
             address=address,
             search_keyword=keyword,
+            google_claimed=self._extract_google_claimed_status(),
         )
+
+    def _extract_google_claimed_status(self) -> Optional[bool]:
+        assert self.page is not None
+
+        claim_selectors = [
+            "button:has-text('Claim this business')",
+            "button:has-text('Own this business?')",
+            "button:has-text('Is this your business?')",
+            "text='Claim this business'",
+            "text='Own this business?'",
+            "text='Is this your business?'",
+        ]
+
+        for selector in claim_selectors:
+            try:
+                locator = self.page.locator(selector).first
+                if locator.count() > 0 and locator.is_visible(timeout=500):
+                    return False
+            except Exception:
+                continue
+
+        try:
+            content = (self.page.content() or "").lower()
+        except Exception:
+            content = ""
+
+        if any(token in content for token in ["claim this business", "own this business", "is this your business"]):
+            return False
+        return True
 
     def _extract_website(self) -> Optional[str]:
         assert self.page is not None
