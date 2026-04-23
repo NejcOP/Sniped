@@ -39,6 +39,13 @@ _SHARED_PLAYWRIGHT = None
 _SHARED_BROWSER = None
 _SHARED_BROWSER_HEADLESS: Optional[bool] = None
 
+# Use a stable, realistic UA to reduce Google anti-bot challenge frequency.
+FORCED_WINDOWS_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 class GoogleMapsScraper:
     def __init__(
@@ -163,8 +170,8 @@ class GoogleMapsScraper:
         self.close()
 
     def start(self) -> None:
-        # Rotate UA on every fresh session
-        self.user_agent = random_user_agent()
+        # Keep a stable UA instead of rotating per session to avoid anti-bot challenges.
+        self.user_agent = str(os.environ.get("SCRAPE_USER_AGENT", FORCED_WINDOWS_CHROME_UA) or FORCED_WINDOWS_CHROME_UA).strip()
 
         launch_args = [
             "--disable-blink-features=AutomationControlled",
@@ -204,6 +211,13 @@ class GoogleMapsScraper:
             "user_agent": self.user_agent,
             "viewport": {"width": 1366, "height": 768},
             "locale": self.locale,
+            "extra_http_headers": {
+                "Accept-Language": "en-US,en;q=0.9",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not.A/Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Upgrade-Insecure-Requests": "1",
+            },
         }
         if proxy_config:
             context_kwargs["proxy"] = proxy_config
@@ -332,6 +346,8 @@ class GoogleMapsScraper:
             raise RuntimeError("Scraper not started. Use with-context or call start().")
 
         self._open_maps_and_search(keyword)
+        # Small human-like idle before first interaction/scroll.
+        random_delay(1000, 3000)
         leads: List[Lead] = []
         seen_cards = set()
         stalled_rounds = 0
@@ -479,41 +495,12 @@ class GoogleMapsScraper:
         assert self.page is not None
         search_query = self._compose_search_query(keyword)
 
-        # Fast path: direct maps search URL is usually more reliable in headless environments
-        # and avoids waiting on the homepage search box render.
+        # High-priority path: inject query directly into Maps URL (no typing/clicking search box).
         if self._search_via_fallback_url(search_query):
             logging.info("Direct Maps search URL opened successfully.")
             return
 
-        base_url = f"https://{self.google_domain}/maps"
-        self._goto_with_retry(base_url)
-        self._accept_consent_if_present()
-        random_mouse_movements(self.page, count=4)
-        random_delay(500, 1400)
-
-        search_box = self._get_search_box()
-        if search_box is None:
-            logging.warning("Search box not found on base maps URL, trying direct search URL fallback.")
-            if self._search_via_fallback_url(search_query):
-                return
-            raise RuntimeError("Google Maps search box was not found after consent handling.")
-
-        random_mouse_movements(self.page, count=random.randint(3, 6))
-        random_delay(220, 680)
-        search_box.click()
-        search_box.fill("")
-        human_type(search_box, search_query)
-        random_delay(300, 800)
-        search_box.press("Enter")
-        random_delay(1200, 2200)
-        self._accept_consent_if_present()
-
-        # If a business profile opens directly, we can still parse it.
-        try:
-            self.page.wait_for_selector("div.Nv2PK, div[role='article']", timeout=9000)
-        except PlaywrightTimeoutError:
-            logging.info("Results feed not visible yet, trying direct search URL fallback.")
-            self._search_via_fallback_url(search_query)
+        raise RuntimeError("Google Maps results did not load from direct search URL.")
 
     def _search_via_fallback_url(self, keyword: str) -> bool:
         assert self.page is not None
@@ -523,11 +510,50 @@ class GoogleMapsScraper:
         self._accept_consent_if_present()
         random_delay(1000, 1800)
 
+        return self._wait_for_any_result_signal(timeout_ms=20000)
+
+    def _wait_for_any_result_signal(self, timeout_ms: int = 20000) -> bool:
+        """Wait for generic Maps result signals instead of brittle class-only selectors."""
+        assert self.page is not None
+
+        started = time.monotonic()
+        timeout_seconds = max(5.0, float(timeout_ms) / 1000.0)
+        business_selectors = [
+            "div[role='article']",
+            "a[href*='/maps/place/']",
+            "a[aria-label]",
+            "h1",
+            "h2",
+            "h3",
+        ]
+        phone_selectors = [
+            "a[href^='tel:']",
+            "a[href*='tel:']",
+            "button[data-item-id^='phone:tel:']",
+        ]
+
+        while (time.monotonic() - started) < timeout_seconds:
+            try:
+                for selector in business_selectors:
+                    if self.page.locator(selector).count() > 0:
+                        return True
+                for selector in phone_selectors:
+                    if self.page.locator(selector).count() > 0:
+                        return True
+
+                if re.search(r"\+?\d[\d\s().-]{6,}", self.page.content() or ""):
+                    return True
+            except Exception:
+                pass
+
+            random_delay(250, 550)
+
         try:
-            self.page.wait_for_selector("div.Nv2PK, div[role='article']", timeout=10000)
-            return True
-        except PlaywrightTimeoutError:
-            return False
+            self.page.screenshot(path="debug_screenshot.png", full_page=True)
+            logging.error("No Maps results detected after %sms. Saved screenshot to debug_screenshot.png", int(timeout_ms))
+        except Exception as exc:
+            logging.error("No Maps results detected after %sms and screenshot failed: %s", int(timeout_ms), exc)
+        return False
 
     def _get_search_box(self):
         assert self.page is not None
