@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+import json
 from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -493,7 +494,7 @@ class GoogleMapsScraper:
             if scanned_count == 0:
                 self._log_results_container_preview()
 
-            cards = self.page.locator("div.Nv2PK, div[role='article'], a[href*='/maps/place/']")
+            cards = self.page.locator("a[href*='/maps/place/']")
             count = cards.count()
             before_seen = len(seen_cards)
 
@@ -505,6 +506,9 @@ class GoogleMapsScraper:
                 card_key = self._card_key(card, idx)
                 if card_key in seen_cards:
                     continue
+
+                card_title = self._card_title(card)
+                logging.info("Scanned business candidate idx=%s title=%r", idx, card_title)
 
                 seen_cards.add(card_key)
                 scanned_count += 1
@@ -1070,6 +1074,9 @@ class GoogleMapsScraper:
                 "h1.DUwDvf",
                 "h1",
                 "div[role='main']",
+                "button:has-text('Directions')",
+                "a:has-text('Directions')",
+                "[aria-label*='Directions']",
                 "button[data-item-id='address']",
                 "button[data-item-id^='phone:tel:']",
                 "a[data-item-id='authority']",
@@ -1093,12 +1100,21 @@ class GoogleMapsScraper:
             if name:
                 break
         address = self._extract_address()
+        website = self._extract_website() or "None"
+        phone = self._extract_phone() or "None"
+
+        json_ld = self._extract_from_json_ld()
+        if not name:
+            name = str(json_ld.get("name") or "").strip() or None
+        if not address:
+            address = str(json_ld.get("address") or "").strip() or None
+        if (not website or website == "None") and str(json_ld.get("website") or "").strip():
+            website = str(json_ld.get("website") or "").strip()
+        if (not phone or phone == "None") and str(json_ld.get("phone") or "").strip():
+            phone = str(json_ld.get("phone") or "").strip()
 
         if not name or not address:
             return None
-
-        website = self._extract_website() or "None"
-        phone = self._extract_phone() or "None"
 
         rating_text = self._safe_text(self.page.locator("span.MW4etd").first)
         if not rating_text:
@@ -1169,6 +1185,15 @@ class GoogleMapsScraper:
             if href and href.strip().startswith(("http://", "https://")) and "google." not in href:
                 return href.strip()
 
+        try:
+            panel_text = self.page.locator("div[role='main']").first.inner_text(timeout=2500)
+        except Exception:
+            panel_text = ""
+        for match in re.findall(r"https?://[^\s)\]>\"']+", str(panel_text or ""), flags=re.IGNORECASE):
+            candidate = str(match or "").strip().rstrip(".,)")
+            if candidate and "google." not in candidate.lower() and "gstatic." not in candidate.lower():
+                return candidate
+
         return None
 
     def _extract_phone(self) -> Optional[str]:
@@ -1199,7 +1224,9 @@ class GoogleMapsScraper:
             main_text = self.page.locator("div[role='main']").first.inner_text(timeout=2000)
         except Exception:
             main_text = ""
-        match = re.search(r"\+?[\d][\d\s().-]{6,}", str(main_text or ""))
+        match = re.search(r"(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}", str(main_text or ""))
+        if not match:
+            match = re.search(r"\+?[\d][\d\s().-]{6,}", str(main_text or ""))
         if match:
             return match.group(0).strip()
 
@@ -1251,6 +1278,77 @@ class GoogleMapsScraper:
             title = None
 
         return link or title or f"card-{idx}"
+
+    def _card_title(self, card) -> str:
+        try:
+            title = self._safe_text(card)
+            if title:
+                return str(title)
+        except Exception:
+            pass
+        try:
+            aria = card.get_attribute("aria-label")
+            if aria:
+                return str(aria).strip()
+        except Exception:
+            pass
+        try:
+            href = card.get_attribute("href")
+            if href:
+                return str(href).strip()
+        except Exception:
+            pass
+        return ""
+
+    def _extract_from_json_ld(self) -> dict:
+        assert self.page is not None
+        scripts = self.page.locator("script[type='application/ld+json']")
+        total = min(scripts.count(), 10)
+        for idx in range(total):
+            try:
+                raw = scripts.nth(idx).inner_text(timeout=1500)
+            except Exception:
+                continue
+            if not str(raw or "").strip():
+                continue
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+
+            stack = [parsed]
+            while stack:
+                item = stack.pop()
+                if isinstance(item, list):
+                    stack.extend(item)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+
+                kind = str(item.get("@type") or "").lower()
+                if kind in {"localbusiness", "organization", "place"}:
+                    address_obj = item.get("address")
+                    if isinstance(address_obj, dict):
+                        address_val = ", ".join(
+                            str(address_obj.get(part) or "").strip()
+                            for part in ["streetAddress", "addressLocality", "addressRegion", "postalCode", "addressCountry"]
+                            if str(address_obj.get(part) or "").strip()
+                        )
+                    else:
+                        address_val = str(address_obj or "").strip()
+
+                    return {
+                        "name": str(item.get("name") or "").strip(),
+                        "phone": str(item.get("telephone") or "").strip(),
+                        "website": str(item.get("url") or item.get("sameAs") or "").strip(),
+                        "address": address_val,
+                    }
+
+                for value in item.values():
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+
+        return {}
 
     @staticmethod
     def _safe_text(locator) -> Optional[str]:
