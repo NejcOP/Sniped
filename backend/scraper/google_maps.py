@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import random
 import re
@@ -168,6 +168,30 @@ class GoogleMapsScraper:
             context_kwargs["proxy"] = proxy_config
 
         self._context = self._browser.new_context(**context_kwargs)
+        self._context.add_init_script(
+            """
+            (() => {
+              const clickConsent = () => {
+                try {
+                  const nodes = Array.from(document.querySelectorAll('button, [role="button"], a'));
+                  for (const node of nodes) {
+                    const txt = (node.innerText || node.textContent || '').toLowerCase();
+                    const aria = (node.getAttribute('aria-label') || '').toLowerCase();
+                    if (
+                      txt.includes('accept') || txt.includes('agree') ||
+                      aria.includes('accept') || aria.includes('agree')
+                    ) {
+                      node.click();
+                    }
+                  }
+                } catch (_) {}
+              };
+              clickConsent();
+              setTimeout(clickConsent, 800);
+              setTimeout(clickConsent, 1800);
+            })();
+            """
+        )
         self._seed_google_consent_cookies()
         if self.headless:
             self._context.route(
@@ -179,6 +203,7 @@ class GoogleMapsScraper:
         self.page.set_default_navigation_timeout(nav_timeout_ms)
         self._apply_stealth()
         self._prime_google_consent_state()
+        self._dismiss_google_overlays()
 
     def _country_hint(self) -> str:
         mapping = {
@@ -404,7 +429,7 @@ class GoogleMapsScraper:
         """Close the current session and open a fresh one with a new UA and next proxy.
         Called automatically when a 403/429 block is detected.
         """
-        logging.warning("Block detected — restarting browser session with new User-Agent and proxy.")
+        logging.warning("Block detected â€” restarting browser session with new User-Agent and proxy.")
         # Advance to next proxy in pool for the restarted session
         self.proxy_url = self._next_proxy()
         try:
@@ -488,6 +513,7 @@ class GoogleMapsScraper:
                     f"KEEP_ALIVE maps-scrape found={len(leads)} target={max_results} "
                     f"scanned={scanned_count} elapsed={int(now - started_at)}s"
                 )
+                print("ALIVE_CHECK", flush=True)
                 print(keepalive, flush=True)
                 logging.info(keepalive)
                 last_keep_alive_at = now
@@ -531,6 +557,29 @@ class GoogleMapsScraper:
                     except Exception:
                         logging.debug("Progress callback failed during card scan; continuing scrape.")
                 if not self._open_card(card):
+                    website_hint = self._click_result_website_fallback(card)
+                    fallback_lead = self._extract_business_from_global_html(
+                        keyword=keyword,
+                        card_title=card_title,
+                        website_hint=website_hint,
+                    )
+                    if fallback_lead:
+                        leads.append(fallback_lead)
+                        last_progress_at = time.monotonic()
+                        logging.warning(
+                            "Recovered lead via global HTML fallback idx=%s title=%r website=%r phone=%r",
+                            idx,
+                            card_title,
+                            fallback_lead.website_url,
+                            fallback_lead.phone_number,
+                        )
+                        if progress_callback is not None:
+                            try:
+                                progress_callback(len(leads), max_results, scanned_count, fallback_lead)
+                            except Exception:
+                                logging.debug("Progress callback failed after global fallback lead extraction.")
+                        continue
+
                     screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
                     logging.warning(
                         "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
@@ -641,11 +690,11 @@ class GoogleMapsScraper:
                 return
 
             if attempt < max_retries:
-                logging.warning("Block detected on %s — restarting session (attempt %d/%d)", url, attempt + 1, max_retries)
+                logging.warning("Block detected on %s â€” restarting session (attempt %d/%d)", url, attempt + 1, max_retries)
                 self._restart_with_new_identity()
                 time.sleep(1.2 * (attempt + 1))
             else:
-                logging.error("Still blocked after %d retries for %s — continuing anyway.", max_retries, url)
+                logging.error("Still blocked after %d retries for %s â€” continuing anyway.", max_retries, url)
 
     def _is_consent_page(self) -> bool:
         assert self.page is not None
@@ -994,7 +1043,7 @@ class GoogleMapsScraper:
             "Accetta tutto",
             "Souhlasim",
             "Prihvatam",
-            "Slažem se",
+            "SlaĹľem se",
             "Allow all",
             "Aceptar todo",
             "Tout accepter",
@@ -1192,6 +1241,12 @@ class GoogleMapsScraper:
                         return False
                     continue
 
+            # Emergency force-wait: proxy/Hobby environments need extra time for panel hydration.
+            try:
+                self.page.wait_for_timeout(5000)
+            except Exception:
+                random_delay(4500, 5200)
+
             random_mouse_movements(self.page, count=random.randint(1, 2))
 
             # Explicit fallback wait: panel should expose at least one basic signal.
@@ -1206,6 +1261,106 @@ class GoogleMapsScraper:
                 return False
 
         return False
+
+    def _click_result_website_fallback(self, card) -> Optional[str]:
+        """If panel click fails, try direct Website click from the results list row."""
+        assert self.page is not None
+
+        fallback_selectors = [
+            "a[aria-label*='Website']",
+            "a:has-text('Website')",
+            "[role='link'][aria-label*='Website']",
+            "a[href^='http']",
+        ]
+        for selector in fallback_selectors:
+            try:
+                link = card.locator(selector).first
+                if link.count() == 0 or not link.is_visible(timeout=250):
+                    continue
+                href = str(link.get_attribute("href") or "").strip()
+                if href and self._is_external_website_candidate(href):
+                    try:
+                        link.click(timeout=2000)
+                        self.page.wait_for_timeout(1200)
+                    except Exception:
+                        pass
+                    return href.rstrip(".,)")
+            except Exception:
+                continue
+        return None
+
+    def _extract_business_from_global_html(self, keyword: str, card_title: str, website_hint: Optional[str] = None) -> Optional[Lead]:
+        """Emergency fallback when business panel does not open: parse full page HTML/text."""
+        assert self.page is not None
+
+        try:
+            html = str(self.page.content() or "")
+        except Exception:
+            html = ""
+        try:
+            body_text = str(self.page.locator("body").inner_text(timeout=3000) or "")
+        except Exception:
+            body_text = ""
+
+        phone = self._find_phone_match(f"{body_text}\n{html}") or "None"
+        website = website_hint or "None"
+        if website == "None":
+            for match in re.findall(r"https?://[^\s)\]>\"']+", html, flags=re.IGNORECASE):
+                candidate = str(match or "").strip().rstrip(".,)")
+                if self._is_external_website_candidate(candidate):
+                    website = candidate
+                    break
+
+        name = str(card_title or "").strip() or None
+        if not name:
+            name = self._extract_business_name()
+        if not name:
+            for raw_line in body_text.splitlines():
+                line = str(raw_line or "").strip()
+                if len(line) >= 2 and len(line) <= 120 and not re.search(r"\d", line):
+                    name = line
+                    break
+
+        address = self._extract_address() or ""
+        if not address:
+            for raw_line in body_text.splitlines():
+                line = str(raw_line or "").strip()
+                if len(line) < 8:
+                    continue
+                if re.search(r"\d", line) and re.search(
+                    r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|suite|ste|unit|#)\b",
+                    line,
+                    flags=re.IGNORECASE,
+                ):
+                    address = line
+                    break
+
+        has_any_data = bool((name and str(name).strip()) or (website and website != "None") or (phone and phone != "None"))
+        if not has_any_data:
+            screenshot_path = self._capture_debug_screenshot(reason="global_html_empty")
+            logging.warning(
+                "Global HTML fallback found no usable data | url=%s screenshot=%s body_snippet=%r",
+                str(self.page.url or ""),
+                screenshot_path or "<none>",
+                body_text[:400],
+            )
+            return None
+
+        safe_name = str(name or card_title or "Unknown Business").strip() or "Unknown Business"
+        safe_address = str(address or "Unknown Address").strip() or "Unknown Address"
+        safe_website = str(website or "None").strip() or "None"
+        safe_phone = str(phone or "None").strip() or "None"
+
+        return Lead(
+            business_name=safe_name,
+            website_url=safe_website,
+            phone_number=safe_phone,
+            rating=None,
+            review_count=None,
+            address=safe_address,
+            search_keyword=keyword,
+            google_claimed=None,
+        )
 
     @staticmethod
     def _normalized_text(value: str) -> str:
@@ -1745,3 +1900,5 @@ class GoogleMapsScraper:
             return int(digits)
         except ValueError:
             return None
+
+
