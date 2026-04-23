@@ -505,26 +505,30 @@ class GoogleMapsScraper:
     def _search_via_fallback_url(self, keyword: str) -> bool:
         assert self.page is not None
 
-        fallback_url = f"https://{self.google_domain}/maps/search/{quote_plus(keyword)}"
+        # Always prefer canonical www.google.com Maps search path for stability.
+        fallback_url = f"https://www.google.com/maps/search/{quote_plus(keyword)}"
         self._goto_with_retry(fallback_url)
         self._accept_consent_if_present()
         random_delay(1000, 1800)
 
+        try:
+            self.page.wait_for_load_state("domcontentloaded", timeout=8000)
+        except Exception:
+            pass
+
         return self._wait_for_any_result_signal(timeout_ms=20000)
 
     def _wait_for_any_result_signal(self, timeout_ms: int = 20000) -> bool:
-        """Wait for generic Maps result signals instead of brittle class-only selectors."""
+        """Wait for robust Maps result signals and fail fast on challenge pages."""
         assert self.page is not None
 
         started = time.monotonic()
         timeout_seconds = max(5.0, float(timeout_ms) / 1000.0)
-        business_selectors = [
+        results_selectors = [
             "div[role='article']",
+            "div.Nv2PK",
+            "div[role='feed'] div.Nv2PK",
             "a[href*='/maps/place/']",
-            "a[aria-label]",
-            "h1",
-            "h2",
-            "h3",
         ]
         phone_selectors = [
             "a[href^='tel:']",
@@ -532,17 +536,34 @@ class GoogleMapsScraper:
             "button[data-item-id^='phone:tel:']",
         ]
 
+        challenge_tokens = [
+            "unusual traffic",
+            "verify you are human",
+            "recaptcha",
+            "sorry/index",
+            "detected unusual traffic",
+            "press and hold",
+        ]
+
         while (time.monotonic() - started) < timeout_seconds:
             try:
-                for selector in business_selectors:
+                url = str(self.page.url or "").lower()
+                content = (self.page.content() or "").lower()
+
+                if any(token in url or token in content for token in challenge_tokens):
+                    try:
+                        self.page.screenshot(path="debug_screenshot.png", full_page=True)
+                    except Exception:
+                        pass
+                    logging.error("Google challenge page detected while waiting for Maps results.")
+                    return False
+
+                for selector in results_selectors:
                     if self.page.locator(selector).count() > 0:
                         return True
                 for selector in phone_selectors:
                     if self.page.locator(selector).count() > 0:
                         return True
-
-                if re.search(r"\+?\d[\d\s().-]{6,}", self.page.content() or ""):
-                    return True
             except Exception:
                 pass
 

@@ -7589,8 +7589,6 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["status_message"] = "Launching browser..."
             update_task_progress(db_path, task_id, progress_state)
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
-            progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
-            update_task_progress(db_path, task_id, progress_state)
             logging.info("[scrape-task:%s] Navigating to Google Maps search...", task_id)
             logging.info(
                 "[scrape-task:%s] Scrape limits | max_runtime_seconds=%s stall_timeout_seconds=%s",
@@ -7605,6 +7603,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 proxy_url=_proxy_url,
                 proxy_urls=_proxy_urls or None,
             ) as scraper:
+                progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
+                update_task_progress(db_path, task_id, progress_state)
                 return scraper.scrape(
                     keyword=str(payload_data.get("keyword", "")),
                     max_results=int(payload_data.get("results", 25)),
