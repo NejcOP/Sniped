@@ -7638,16 +7638,32 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         if payload_data.get("user_data_dir")
         else Path(default_profile)
     )
+    requested_total = int(payload_data.get("results", 25))
+    progress_state: dict[str, Any] = {
+        "phase": "scraping",
+        "total_to_find": requested_total,
+        "current_found": 0,
+        "scanned_count": 0,
+        "inserted": 0,
+        "status_message": "Scrape task started.",
+    }
     heartbeat_stop = Event()
 
     def _scrape_heartbeat() -> None:
-        while not heartbeat_stop.wait(5):
+        while not heartbeat_stop.wait(10):
             logging.info(
                 "STILL_ALIVE scrape-task:%s keyword=%r user_id=%s",
                 task_id,
                 keyword,
                 task_user_id,
             )
+            try:
+                progress_state["heartbeat_ts"] = datetime.now(timezone.utc).isoformat()
+                if str(progress_state.get("status_message") or "").strip() == "":
+                    progress_state["status_message"] = f"Searching... Found 0 / {requested_total} (scanned 0)"
+                update_task_progress(db_path, task_id, progress_state)
+            except Exception:
+                logging.debug("[scrape-task:%s] Heartbeat progress update failed", task_id)
 
     heartbeat_thread = Thread(target=_scrape_heartbeat, daemon=True)
     heartbeat_thread.start()
@@ -7655,21 +7671,22 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     try:
         mark_task_running(db_path, task_id)
         logging.info("[scrape-task:%s] Marked task as running", task_id)
-        requested_total = int(payload_data.get("results", 25))
-        progress_state = {
-            "phase": "scraping",
-            "total_to_find": requested_total,
-            "current_found": 0,
-            "scanned_count": 0,
-            "inserted": 0,
-            "status_message": "Scrape task started.",
-        }
         update_task_progress(db_path, task_id, progress_state)
         logging.info("[scrape-task:%s] Initial progress state saved", task_id)
 
-        requested_headless = True
-        if not bool(payload_data.get("headless", False)):
-            logging.info("[scrape-task:%s] Forcing headless mode for lightweight execution", task_id)
+        force_headless = str(os.environ.get("SCRAPE_FORCE_HEADLESS", "1") or "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        requested_headless = bool(payload_data.get("headless", True))
+        if force_headless:
+            requested_headless = True
+            if not bool(payload_data.get("headless", True)):
+                logging.info("[scrape-task:%s] Headless requested by server policy SCRAPE_FORCE_HEADLESS=1", task_id)
+        else:
+            logging.info("[scrape-task:%s] Headless policy disabled, using request value=%s", task_id, requested_headless)
 
         # Read proxy config â€” supports single proxy_url or a list proxy_urls
         try:

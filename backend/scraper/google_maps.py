@@ -1088,11 +1088,73 @@ class GoogleMapsScraper:
 
         return False
 
+    def _dismiss_google_overlays(self) -> bool:
+        """Best-effort dismissal of consent/cookie overlays that can block result clicks."""
+        assert self.page is not None
+
+        clicked_any = False
+        for _ in range(3):
+            if self._accept_consent_if_present():
+                clicked_any = True
+                random_delay(300, 700)
+                continue
+
+            # Extra explicit overlay buttons that frequently block Maps interactions.
+            selectors = [
+                "button:has-text('Accept all')",
+                "button:has-text('I agree')",
+                "button:has-text('Accept')",
+                "[role='button']:has-text('Accept all')",
+                "[aria-label*='Accept all']",
+                "[aria-label*='I agree']",
+            ]
+            clicked = False
+            for selector in selectors:
+                try:
+                    btn = self.page.locator(selector).first
+                    if btn.count() > 0 and btn.is_visible(timeout=250):
+                        btn.click(timeout=1500)
+                        clicked = True
+                        clicked_any = True
+                        random_delay(300, 700)
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                break
+
+        return clicked_any
+
+    def _wait_for_basic_panel_signals(self, timeout_ms: int = 12000) -> bool:
+        """Wait for any basic business panel signal requested by product requirements."""
+        assert self.page is not None
+
+        started = time.monotonic()
+        timeout_seconds = max(8.0, float(timeout_ms) / 1000.0)
+        selectors = [
+            "div[role='main']",
+            "text=/Directions/i",
+            "text=/Website/i",
+        ]
+
+        while (time.monotonic() - started) < timeout_seconds:
+            self._dismiss_google_overlays()
+            for selector in selectors:
+                try:
+                    node = self.page.locator(selector).first
+                    if node.count() > 0 and node.is_visible(timeout=250):
+                        return True
+                except Exception:
+                    continue
+            random_delay(250, 500)
+
+        return False
+
     def _open_card(self, card) -> bool:
         assert self.page is not None
 
         for attempt in range(2):
-            self._accept_consent_if_present()
+            self._dismiss_google_overlays()
 
             heading_before = self._panel_heading_text()
             panel_before = self._normalized_text(self._panel_text())
@@ -1122,7 +1184,7 @@ class GoogleMapsScraper:
                 else:
                     card.click(timeout=6000)
             except PlaywrightTimeoutError:
-                self._accept_consent_if_present()
+                self._dismiss_google_overlays()
                 try:
                     card.locator("a[href*='/maps/place/']").first.click(timeout=6000)
                 except PlaywrightTimeoutError:
@@ -1131,6 +1193,9 @@ class GoogleMapsScraper:
                     continue
 
             random_mouse_movements(self.page, count=random.randint(1, 2))
+
+            # Explicit fallback wait: panel should expose at least one basic signal.
+            self._wait_for_basic_panel_signals(timeout_ms=12000)
 
             # Step 3: Wait for a real panel state change, not just any visible main container.
             if self._wait_for_business_panel_ready(url_before, heading_before, panel_before, timeout_ms=12000):
@@ -1219,7 +1284,7 @@ class GoogleMapsScraper:
         started = time.monotonic()
         timeout_seconds = max(8.0, float(timeout_ms) / 1000.0)
         while (time.monotonic() - started) < timeout_seconds:
-            self._accept_consent_if_present()
+            self._dismiss_google_overlays()
 
             current_url = str(self.page.url or "")
             heading_now = self._panel_heading_text()
@@ -1376,6 +1441,16 @@ class GoogleMapsScraper:
             if self._is_external_website_candidate(candidate):
                 return candidate
 
+        # Full page HTML/text fallback: robust against selector drift.
+        try:
+            html = str(self.page.content() or "")
+        except Exception:
+            html = ""
+        for match in re.findall(r"https?://[^\s)\]>\"']+", html, flags=re.IGNORECASE):
+            candidate = str(match or "").strip().rstrip(".,)")
+            if self._is_external_website_candidate(candidate):
+                return candidate
+
         return None
 
     def _extract_phone(self) -> Optional[str]:
@@ -1418,6 +1493,13 @@ class GoogleMapsScraper:
             except Exception:
                 page_text = ""
             match = self._find_phone_match(str(page_text or ""))
+        if not match:
+            # Full page HTML fallback to survive UI/selector changes.
+            try:
+                html = str(self.page.content() or "")
+            except Exception:
+                html = ""
+            match = self._find_phone_match(html)
         if match:
             return match
 
