@@ -490,7 +490,10 @@ class GoogleMapsScraper:
                 )
                 break
 
-            cards = self.page.locator("div.Nv2PK, div[role='article']")
+            if scanned_count == 0:
+                self._log_results_container_preview()
+
+            cards = self.page.locator("div.Nv2PK, div[role='article'], a[href*='/maps/place/']")
             count = cards.count()
             before_seen = len(seen_cards)
 
@@ -800,7 +803,7 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         started = time.monotonic()
-        timeout_seconds = max(5.0, float(timeout_ms) / 1000.0)
+        timeout_seconds = max(10.0, float(timeout_ms) / 1000.0)
         results_selectors = [
             "div[role='article']",
             "div.Nv2PK",
@@ -856,6 +859,26 @@ class GoogleMapsScraper:
             str(self.page.url or ""),
         )
         return False
+
+    def _log_results_container_preview(self) -> None:
+        assert self.page is not None
+        containers = [
+            "div[role='feed']",
+            "div[role='main']",
+            "body",
+        ]
+        for selector in containers:
+            try:
+                locator = self.page.locator(selector).first
+                if locator.count() == 0:
+                    continue
+                html = locator.inner_html(timeout=2000)
+                snippet = str(html or "").strip().replace("\n", " ").replace("\r", " ")[:500]
+                if snippet:
+                    logging.info("Maps results container preview (%s): %s", selector, snippet)
+                    return
+            except Exception:
+                continue
 
     def _get_search_box(self):
         assert self.page is not None
@@ -1006,26 +1029,44 @@ class GoogleMapsScraper:
         try:
             card.scroll_into_view_if_needed(timeout=3000)
             random_delay(120, 450)
-            card.click(timeout=3000)
+            anchor = card.locator("a[href*='/maps/place/'], a.hfpxzc").first
+            if anchor.count() > 0:
+                anchor.click(timeout=3000)
+            else:
+                card.click(timeout=3000)
         except PlaywrightTimeoutError:
             try:
-                card.locator("a.hfpxzc").first.click(timeout=3000)
+                card.locator("a[href*='/maps/place/'], a.hfpxzc").first.click(timeout=3000)
             except PlaywrightTimeoutError:
                 return False
 
         random_delay(800, 1600)
+        random_mouse_movements(self.page, count=random.randint(1, 3))
 
-        try:
-            self.page.locator("h1.DUwDvf").first.wait_for(state="visible", timeout=5000)
-        except PlaywrightTimeoutError:
-            return False
+        panel_selectors = [
+            "h1.DUwDvf",
+            "h1",
+            "button[data-item-id='address']",
+            "button[data-item-id^='phone:tel:']",
+            "a[data-item-id='authority']",
+        ]
+        for selector in panel_selectors:
+            try:
+                self.page.locator(selector).first.wait_for(state="visible", timeout=5000)
+                return True
+            except PlaywrightTimeoutError:
+                continue
 
-        return True
+        return False
 
     def _extract_business(self, keyword: str) -> Optional[Lead]:
         assert self.page is not None
 
-        name = self._safe_text(self.page.locator("h1.DUwDvf").first)
+        name = None
+        for selector in ["h1.DUwDvf", "h1", "div[role='main'] h1", "div[role='main'] h2"]:
+            name = self._safe_text(self.page.locator(selector).first)
+            if name:
+                break
         address = self._extract_address()
 
         if not name or not address:
@@ -1087,16 +1128,18 @@ class GoogleMapsScraper:
     def _extract_website(self) -> Optional[str]:
         assert self.page is not None
 
-        website_link = self.page.locator("a[data-item-id='authority']").first
-        if website_link.count() > 0:
-            href = website_link.get_attribute("href")
-            if href:
-                return href.strip()
-
-        alternative = self.page.locator("a[aria-label*='Website'], a:has-text('Website')").first
-        if alternative.count() > 0:
-            href = alternative.get_attribute("href")
-            if href:
+        selectors = [
+            "a[data-item-id='authority']",
+            "a[aria-label*='Website']",
+            "a:has-text('Website')",
+            "div[role='main'] a[href^='http']",
+        ]
+        for selector in selectors:
+            locator = self.page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            href = locator.get_attribute("href")
+            if href and href.strip().startswith(("http://", "https://")) and "google." not in href:
                 return href.strip()
 
         return None
@@ -1108,6 +1151,7 @@ class GoogleMapsScraper:
             self.page.locator("button[data-item-id^='phone:tel:']").first,
             self.page.locator("button[aria-label^='Phone:']").first,
             self.page.locator("button[data-tooltip='Copy phone number']").first,
+            self.page.locator("a[href^='tel:']").first,
         ]
 
         for locator in candidates:
@@ -1127,8 +1171,14 @@ class GoogleMapsScraper:
     def _extract_address(self) -> Optional[str]:
         assert self.page is not None
 
-        address_button = self.page.locator("button[data-item-id='address']").first
-        if address_button.count() > 0:
+        candidates = [
+            self.page.locator("button[data-item-id='address']").first,
+            self.page.locator("button[aria-label*='Address']").first,
+            self.page.locator("div[role='main'] button").filter(has_text=re.compile(r"address", re.IGNORECASE)).first,
+        ]
+        for address_button in candidates:
+            if address_button.count() == 0:
+                continue
             label = address_button.get_attribute("aria-label")
             if label and "Address:" in label:
                 return label.split("Address:", 1)[1].strip()
@@ -1144,7 +1194,7 @@ class GoogleMapsScraper:
         title = None
 
         try:
-            link = card.locator("a.hfpxzc").first.get_attribute("href")
+            link = card.locator("a[href*='/maps/place/'], a.hfpxzc").first.get_attribute("href")
         except PlaywrightTimeoutError:
             link = None
 
