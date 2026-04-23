@@ -7704,7 +7704,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["total_to_find"] = int(total_to_find or requested_total)
             progress_state["scanned_count"] = int(scanned_count)
             progress_state["status_message"] = (
-                f"Searching for {keyword}... Found {int(current_found)} / {int(total_to_find or requested_total)} "
+                f"Searching... Found {int(current_found)} / {int(total_to_find or requested_total)} "
                 f"(scanned {int(scanned_count)})"
             )
             update_task_progress(db_path, task_id, progress_state)
@@ -7786,10 +7786,11 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     progress_state.get("current_found", 0),
                     progress_state.get("scanned_count", 0),
                 )
-                # Only overwrite status_message if _on_progress hasn't already set a richer message.
-                if not str(progress_state.get("status_message") or "").startswith("Searching"):
+                if int(progress_state.get("current_found", 0) or 0) == 0 and int(progress_state.get("scanned_count", 0) or 0) == 0:
+                    progress_state["status_message"] = f"Searching... Found 0 / {requested_total} (scanned 0)"
+                elif not str(progress_state.get("status_message") or "").startswith("Searching..."):
                     progress_state["status_message"] = (
-                        f"Searching for {keyword}... Found {progress_state.get('current_found', 0)}"
+                        f"Searching... Found {progress_state.get('current_found', 0)}"
                         f" / {progress_state.get('total_to_find', requested_total)}"
                         f" (scanned {progress_state.get('scanned_count', 0)})"
                     )

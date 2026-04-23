@@ -175,7 +175,7 @@ class GoogleMapsScraper:
                 lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
             )
         self.page = self._context.new_page()
-        self.page.set_default_timeout(6000)
+        self.page.set_default_timeout(12000)
         self.page.set_default_navigation_timeout(nav_timeout_ms)
         self._apply_stealth()
         self._prime_google_consent_state()
@@ -531,6 +531,14 @@ class GoogleMapsScraper:
                     except Exception:
                         logging.debug("Progress callback failed during card scan; continuing scrape.")
                 if not self._open_card(card):
+                    screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
+                    logging.warning(
+                        "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
+                        idx,
+                        card_title,
+                        str(self.page.url or ""),
+                        screenshot_path or "<none>",
+                    )
                     self._log_card_preview(card, idx, reason="open_card_failed")
                     continue
 
@@ -801,14 +809,20 @@ class GoogleMapsScraper:
             title = str(self.page.title() or "").strip()
         except Exception:
             title = ""
-        screenshot_path = self._capture_debug_screenshot()
+        screenshot_path = self._capture_debug_screenshot(reason="page_diagnostic")
         return f"url={current_url!r} title={title!r} screenshot={screenshot_path!r}"
 
-    def _capture_debug_screenshot(self) -> str:
+    @staticmethod
+    def _sanitize_debug_token(value: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "")).strip("_") or "debug"
+
+    def _capture_debug_screenshot(self, reason: str = "debug") -> str:
         assert self.page is not None
-        target_path = str(os.environ.get("SCRAPE_DEBUG_SCREENSHOT_PATH", "debug_screenshot.png") or "debug_screenshot.png").strip()
-        if not target_path:
-            target_path = "debug_screenshot.png"
+        configured_dir = str(os.environ.get("SCRAPE_DEBUG_DIR", "debug") or "debug").strip() or "debug"
+        debug_dir = Path(configured_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"maps_{self._sanitize_debug_token(reason)}_{int(time.time() * 1000)}.png"
+        target_path = str(debug_dir / filename)
         try:
             self.page.screenshot(path=target_path, full_page=True)
             logging.error("Saved scraper debug screenshot: %s", target_path)
@@ -870,7 +884,7 @@ class GoogleMapsScraper:
 
             random_delay(250, 550)
 
-        screenshot_path = self._capture_debug_screenshot()
+        screenshot_path = self._capture_debug_screenshot(reason="maps_result_wait_timeout")
         logging.error(
             "No Maps results detected after %sms. screenshot=%s url=%s",
             int(timeout_ms),
@@ -1078,6 +1092,12 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         for attempt in range(2):
+            self._accept_consent_if_present()
+
+            heading_before = self._panel_heading_text()
+            panel_before = self._normalized_text(self._panel_text())
+            url_before = str(self.page.url or "")
+
             # Step 1: Scroll element fully into view, including inner anchor.
             try:
                 card.scroll_into_view_if_needed(timeout=3000)
@@ -1092,21 +1112,19 @@ class GoogleMapsScraper:
             except Exception:
                 pass
 
-            random_delay(250, 600)
+            random_delay(400, 900)
 
-            # Step 2: Record URL before click so we can detect panel navigation.
-            url_before = str(self.page.url or "")
-
-            # Step 3: Click.
+            # Step 2: Click.
             try:
                 anchor = card.locator("a[href*='/maps/place/']").first
                 if anchor.count() > 0:
-                    anchor.click(timeout=4000)
+                    anchor.click(timeout=6000)
                 else:
-                    card.click(timeout=4000)
+                    card.click(timeout=6000)
             except PlaywrightTimeoutError:
+                self._accept_consent_if_present()
                 try:
-                    card.locator("a[href*='/maps/place/']").first.click(timeout=4000)
+                    card.locator("a[href*='/maps/place/']").first.click(timeout=6000)
                 except PlaywrightTimeoutError:
                     if attempt == 1:
                         return False
@@ -1114,45 +1132,151 @@ class GoogleMapsScraper:
 
             random_mouse_movements(self.page, count=random.randint(1, 2))
 
-            # Step 4: Wait for URL to change to a /maps/place/ URL (most reliable signal).
-            deadline = 8.0
-            start = __import__("time").monotonic()
-            url_changed = False
-            while (__import__("time").monotonic() - start) < deadline:
-                current_url = str(self.page.url or "")
-                if "/maps/place/" in current_url and current_url != url_before:
-                    url_changed = True
-                    break
-                random_delay(200, 350)
+            # Step 3: Wait for a real panel state change, not just any visible main container.
+            if self._wait_for_business_panel_ready(url_before, heading_before, panel_before, timeout_ms=12000):
+                return True
 
-            if not url_changed:
-                logging.warning("Panel URL did not change after click attempt=%s url=%s", attempt, self.page.url)
-                if attempt == 1:
-                    return False
-                continue
-
-            # Step 5: After URL change, wait for panel content signal.
-            panel_selectors = [
-                "a[href^='tel:']",
-                "[aria-label*='Directions']",
-                "button:has-text('Directions')",
-                "a:has-text('Directions')",
-                "text=/Directions/i",
-                "text=/Website|Call|Phone|Address/i",
-                "h1",
-                "h2",
-            ]
-            for selector in panel_selectors:
-                try:
-                    self.page.locator(selector).first.wait_for(state="visible", timeout=6000)
-                    return True
-                except PlaywrightTimeoutError:
-                    continue
-
-            # URL changed but no specific panel element appeared — still treat as open.
-            return True
+            logging.warning("Business panel not ready after click attempt=%s url=%s", attempt, self.page.url)
+            if attempt == 1:
+                return False
 
         return False
+
+    @staticmethod
+    def _normalized_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def _panel_heading_text(self) -> str:
+        assert self.page is not None
+
+        heading_candidates = self.page.locator("div[role='main'] h1, div[role='main'] h2, div[role='main'] [role='heading']")
+        try:
+            total = min(heading_candidates.count(), 8)
+        except Exception:
+            total = 0
+
+        blocked_terms = {"directions", "website", "call", "overview", "reviews", "photos", "about", "menu"}
+        for idx in range(total):
+            text = self._safe_text(heading_candidates.nth(idx))
+            if not text:
+                continue
+            lowered = text.strip().lower()
+            if lowered in blocked_terms or len(lowered) < 2:
+                continue
+            return text.strip()
+
+        return ""
+
+    @staticmethod
+    def _find_phone_match(blob: str) -> Optional[str]:
+        patterns = [
+            re.compile(r"(?:\+?\d{1,3}[\s().-]*)?(?:\(?\d{2,4}\)?[\s().-]*){2,}\d{2,4}"),
+            re.compile(r"\+?[\d][\d\s().-]{6,}"),
+        ]
+        for pattern in patterns:
+            match = pattern.search(str(blob or ""))
+            if match:
+                return match.group(0).strip()
+        return None
+
+    def _collect_panel_metadata(self, limit: int = 30) -> List[str]:
+        assert self.page is not None
+
+        values: List[str] = []
+        seen: set[str] = set()
+        selectors = [
+            "div[role='main'] [aria-label]",
+            "div[role='main'] [data-item-id]",
+            "div[role='main'] a[href]",
+            "div[role='main'] button",
+        ]
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                total = min(locator.count(), limit)
+            except Exception:
+                total = 0
+            for idx in range(total):
+                node = locator.nth(idx)
+                for attr in ("aria-label", "data-item-id", "href"):
+                    try:
+                        raw = str(node.get_attribute(attr) or "").strip()
+                    except Exception:
+                        raw = ""
+                    if raw and raw not in seen:
+                        seen.add(raw)
+                        values.append(raw)
+                text = self._safe_text(node) or ""
+                text = text.strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    values.append(text)
+        return values
+
+    def _wait_for_business_panel_ready(self, url_before: str, heading_before: str, panel_before: str, timeout_ms: int = 12000) -> bool:
+        assert self.page is not None
+
+        started = time.monotonic()
+        timeout_seconds = max(8.0, float(timeout_ms) / 1000.0)
+        while (time.monotonic() - started) < timeout_seconds:
+            self._accept_consent_if_present()
+
+            current_url = str(self.page.url or "")
+            heading_now = self._panel_heading_text()
+            panel_now = self._normalized_text(self._panel_text())
+            metadata_now = "\n".join(self._collect_panel_metadata(limit=18))
+
+            url_changed = current_url != url_before and "/maps/place/" in current_url
+            heading_changed = bool(heading_now and heading_now != heading_before)
+            panel_changed = bool(panel_now and panel_now != panel_before and len(panel_now) >= 60)
+            has_phone = bool(self._find_phone_match(f"{panel_now}\n{metadata_now}"))
+            has_address = bool(
+                self.page.locator(
+                    "div[role='main'] [data-item-id*='address'], div[role='main'] [aria-label*='Address'], div[role='main'] button[data-item-id='address']"
+                ).count()
+            )
+            has_website = bool(self._find_external_website_candidate(limit=25))
+
+            if (url_changed or heading_changed or panel_changed) and (heading_now or has_phone or has_address or has_website):
+                return True
+
+            random_delay(350, 650)
+
+        screenshot_path = self._capture_debug_screenshot(reason="panel_not_ready")
+        logging.warning(
+            "Timed out waiting for business panel readiness | url=%s screenshot=%s panel=%r",
+            str(self.page.url or ""),
+            screenshot_path or "<none>",
+            self._panel_text()[:400],
+        )
+        return False
+
+    @staticmethod
+    def _is_external_website_candidate(candidate: str) -> bool:
+        lowered = str(candidate or "").strip().lower()
+        if not lowered.startswith(("http://", "https://")):
+            return False
+        blocked_tokens = ["google.", "gstatic.", "/maps/", "consent.google.com", "accounts.google.com"]
+        return not any(token in lowered for token in blocked_tokens)
+
+    def _find_external_website_candidate(self, limit: int = 60) -> Optional[str]:
+        assert self.page is not None
+
+        try:
+            anchors = self.page.locator("a[href]")
+            total = min(anchors.count(), limit)
+        except Exception:
+            total = 0
+
+        for idx in range(total):
+            try:
+                href = str(anchors.nth(idx).get_attribute("href") or "").strip()
+            except Exception:
+                href = ""
+            if self._is_external_website_candidate(href):
+                return href.rstrip(".,)")
+
+        return None
 
     def _extract_business(self, keyword: str) -> Optional[Lead]:
         assert self.page is not None
@@ -1173,6 +1297,17 @@ class GoogleMapsScraper:
             phone = str(json_ld.get("phone") or "").strip()
 
         if not name or not address:
+            screenshot_path = self._capture_debug_screenshot(reason=f"empty_business_{name or 'unknown'}")
+            logging.warning(
+                "Business extraction incomplete | name=%r address=%r phone=%r website=%r url=%s screenshot=%s panel=%r",
+                name,
+                address,
+                phone,
+                website,
+                str(self.page.url or ""),
+                screenshot_path or "<none>",
+                self._panel_text()[:400],
+            )
             return None
 
         panel_text = self._panel_text()
@@ -1222,35 +1357,23 @@ class GoogleMapsScraper:
     def _extract_website(self) -> Optional[str]:
         assert self.page is not None
 
-        anchor_groups = [
-            self.page.locator("div[role='main'] a[href]"),
-            self.page.locator("a[href^='http']"),
-        ]
-        for anchors in anchor_groups:
-            try:
-                total = min(anchors.count(), 40)
-            except Exception:
-                total = 0
-            for idx in range(total):
-                try:
-                    href = anchors.nth(idx).get_attribute("href") or ""
-                except Exception:
-                    href = ""
-                candidate = str(href or "").strip()
-                if not candidate.lower().startswith(("http://", "https://")):
-                    continue
-                lowered = candidate.lower()
-                if "google." in lowered or "gstatic." in lowered or "/maps/" in lowered:
-                    continue
-                return candidate
+        candidate = self._find_external_website_candidate(limit=100)
+        if candidate:
+            return candidate
+
+        for raw in self._collect_panel_metadata(limit=30):
+            for match in re.findall(r"https?://[^\s)\]>\"']+", str(raw or ""), flags=re.IGNORECASE):
+                candidate = str(match or "").strip().rstrip(".,)")
+                if self._is_external_website_candidate(candidate):
+                    return candidate
 
         try:
-            panel_text = self.page.locator("div[role='main']").first.inner_text(timeout=2500)
+            panel_text = self.page.locator("div[role='main']").first.inner_text(timeout=4000)
         except Exception:
             panel_text = ""
         for match in re.findall(r"https?://[^\s)\]>\"']+", str(panel_text or ""), flags=re.IGNORECASE):
             candidate = str(match or "").strip().rstrip(".,)")
-            if candidate and "google." not in candidate.lower() and "gstatic." not in candidate.lower():
+            if self._is_external_website_candidate(candidate):
                 return candidate
 
         return None
@@ -1275,32 +1398,28 @@ class GoogleMapsScraper:
             text = self._safe_text(locator) or ""
             blob = f"{label} {text}".strip()
 
-            match = re.search(r"\+?[\d][\d\s().-]{6,}", blob)
+            match = self._find_phone_match(blob)
             if match:
-                return match.group(0).strip()
+                return match
+
+        metadata_blob = "\n".join(self._collect_panel_metadata(limit=40))
+        match = self._find_phone_match(metadata_blob)
+        if match:
+            return match
 
         try:
-            main_text = self.page.locator("div[role='main']").first.inner_text(timeout=2000)
+            main_text = self.page.locator("div[role='main']").first.inner_text(timeout=4000)
         except Exception:
             main_text = ""
-        # Most permissive international phone regex as spec'd by user.
-        _PHONE_RE = re.compile(
-            r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
-        )
-        _LOOSE_RE = re.compile(r"\+?[\d][\d\s().-]{6,}")
-        match = _PHONE_RE.search(str(main_text or ""))
-        if not match:
-            match = _LOOSE_RE.search(str(main_text or ""))
+        match = self._find_phone_match(str(main_text or ""))
         if not match:
             try:
-                page_text = self.page.locator("body").inner_text(timeout=2200)
+                page_text = self.page.locator("body").inner_text(timeout=5000)
             except Exception:
                 page_text = ""
-            match = _PHONE_RE.search(str(page_text or ""))
-            if not match:
-                match = _LOOSE_RE.search(str(page_text or ""))
+            match = self._find_phone_match(str(page_text or ""))
         if match:
-            return match.group(0).strip()
+            return match
 
         return None
 
@@ -1309,7 +1428,10 @@ class GoogleMapsScraper:
 
         candidates = [
             self.page.locator("button[data-item-id='address']").first,
+            self.page.locator("button[data-item-id*='address']").first,
             self.page.locator("button[aria-label*='Address']").first,
+            self.page.locator("[aria-label^='Address:']").first,
+            self.page.locator("div[role='main'] [data-item-id*='address']").first,
             self.page.locator("div[role='main'] button").filter(has_text=re.compile(r"address", re.IGNORECASE)).first,
         ]
         for address_button in candidates:
@@ -1322,6 +1444,17 @@ class GoogleMapsScraper:
             text = self._safe_text(address_button)
             if text:
                 return text
+
+        for raw in self._collect_panel_metadata(limit=40):
+            normalized = str(raw or "").strip()
+            if normalized.lower().startswith("address:"):
+                return normalized.split(":", 1)[1].strip()
+            if len(normalized) >= 8 and re.search(r"\d", normalized) and re.search(
+                r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|suite|ste|unit|#)\b",
+                normalized,
+                flags=re.IGNORECASE,
+            ):
+                return normalized
 
         try:
             buttons = self.page.locator("div[role='main'] button")
@@ -1380,23 +1513,9 @@ class GoogleMapsScraper:
     def _extract_business_name(self) -> Optional[str]:
         assert self.page is not None
 
-        heading_candidates = self.page.locator("div[role='main'] h1, div[role='main'] h2, div[role='main'] [role='heading']")
-        try:
-            total = min(heading_candidates.count(), 8)
-        except Exception:
-            total = 0
-
-        blocked_terms = {"directions", "website", "call", "overview", "reviews", "photos", "about", "menu"}
-        for idx in range(total):
-            text = self._safe_text(heading_candidates.nth(idx))
-            if not text:
-                continue
-            lowered = text.strip().lower()
-            if lowered in blocked_terms:
-                continue
-            if len(lowered) < 2:
-                continue
-            return text.strip()
+        heading_text = self._panel_heading_text()
+        if heading_text:
+            return heading_text
 
         panel_text = self._panel_text()
         for raw_line in str(panel_text or "").splitlines():
@@ -1415,7 +1534,7 @@ class GoogleMapsScraper:
     def _panel_text(self) -> str:
         assert self.page is not None
         try:
-            return str(self.page.locator("div[role='main']").first.inner_text(timeout=2500) or "")
+            return str(self.page.locator("div[role='main']").first.inner_text(timeout=4500) or "")
         except Exception:
             return ""
 
