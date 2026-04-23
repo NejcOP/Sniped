@@ -496,11 +496,80 @@ class GoogleMapsScraper:
         search_query = self._compose_search_query(keyword)
 
         # High-priority path: inject query directly into Maps URL (no typing/clicking search box).
-        if self._search_via_fallback_url(search_query):
-            logging.info("Direct Maps search URL opened successfully.")
+        if self._search_via_url_candidates(search_query):
+            logging.info("Direct Maps URL search opened successfully.")
             return
 
-        raise RuntimeError("Google Maps results did not load from direct search URL.")
+        # Last-resort fallback: attempt classic search-box flow if URL mode fails.
+        logging.warning("Direct Maps URL strategies failed; trying search-box fallback flow.")
+        if self._search_via_searchbox_flow(search_query):
+            logging.info("Search-box fallback flow opened Maps results successfully.")
+            return
+
+        diagnostic = self._build_page_diagnostic()
+        raise RuntimeError(f"Google Maps results did not load via URL or search-box flow. {diagnostic}")
+
+    def _search_via_url_candidates(self, keyword: str) -> bool:
+        assert self.page is not None
+
+        cc = (self.country_code or "us").lower()
+        encoded = quote_plus(keyword)
+        url_candidates = [
+            f"https://www.google.com/maps/search/{encoded}?hl=en&gl={cc}",
+            f"https://www.google.com/maps/search/{encoded}",
+            f"https://www.google.com/maps?hl=en&gl={cc}&q={encoded}",
+            f"https://{self.google_domain}/maps/search/{encoded}",
+        ]
+
+        for url in url_candidates:
+            try:
+                logging.info("Trying Maps URL candidate: %s", url)
+                self._goto_with_retry(url)
+                self._accept_consent_if_present()
+                try:
+                    self.page.wait_for_load_state("domcontentloaded", timeout=8000)
+                except Exception:
+                    pass
+                random_delay(900, 1700)
+                if self._wait_for_any_result_signal(timeout_ms=20000):
+                    return True
+            except Exception as exc:
+                logging.warning("Maps URL candidate failed: %s | reason=%s", url, exc)
+
+        return False
+
+    def _search_via_searchbox_flow(self, keyword: str) -> bool:
+        assert self.page is not None
+
+        base_urls = [
+            f"https://www.google.com/maps?hl=en&gl={(self.country_code or 'us').lower()}",
+            f"https://{self.google_domain}/maps",
+        ]
+        for base_url in base_urls:
+            try:
+                self._goto_with_retry(base_url)
+                self._accept_consent_if_present()
+                random_mouse_movements(self.page, count=3)
+                random_delay(500, 1200)
+
+                search_box = self._get_search_box()
+                if search_box is None:
+                    continue
+
+                search_box.click()
+                search_box.fill("")
+                human_type(search_box, keyword)
+                random_delay(280, 750)
+                search_box.press("Enter")
+                random_delay(1000, 1900)
+                self._accept_consent_if_present()
+
+                if self._wait_for_any_result_signal(timeout_ms=20000):
+                    return True
+            except Exception as exc:
+                logging.warning("Search-box fallback failed on %s: %s", base_url, exc)
+
+        return False
 
     def _search_via_fallback_url(self, keyword: str) -> bool:
         assert self.page is not None
@@ -517,6 +586,29 @@ class GoogleMapsScraper:
             pass
 
         return self._wait_for_any_result_signal(timeout_ms=20000)
+
+    def _build_page_diagnostic(self) -> str:
+        assert self.page is not None
+        current_url = str(self.page.url or "").strip()
+        try:
+            title = str(self.page.title() or "").strip()
+        except Exception:
+            title = ""
+        screenshot_path = self._capture_debug_screenshot()
+        return f"url={current_url!r} title={title!r} screenshot={screenshot_path!r}"
+
+    def _capture_debug_screenshot(self) -> str:
+        assert self.page is not None
+        target_path = str(os.environ.get("SCRAPE_DEBUG_SCREENSHOT_PATH", "debug_screenshot.png") or "debug_screenshot.png").strip()
+        if not target_path:
+            target_path = "debug_screenshot.png"
+        try:
+            self.page.screenshot(path=target_path, full_page=True)
+            logging.error("Saved scraper debug screenshot: %s", target_path)
+            return target_path
+        except Exception as exc:
+            logging.error("Failed to save scraper debug screenshot (%s): %s", target_path, exc)
+            return ""
 
     def _wait_for_any_result_signal(self, timeout_ms: int = 20000) -> bool:
         """Wait for robust Maps result signals and fail fast on challenge pages."""
@@ -551,10 +643,7 @@ class GoogleMapsScraper:
                 content = (self.page.content() or "").lower()
 
                 if any(token in url or token in content for token in challenge_tokens):
-                    try:
-                        self.page.screenshot(path="debug_screenshot.png", full_page=True)
-                    except Exception:
-                        pass
+                    self._capture_debug_screenshot()
                     logging.error("Google challenge page detected while waiting for Maps results.")
                     return False
 
@@ -569,11 +658,13 @@ class GoogleMapsScraper:
 
             random_delay(250, 550)
 
-        try:
-            self.page.screenshot(path="debug_screenshot.png", full_page=True)
-            logging.error("No Maps results detected after %sms. Saved screenshot to debug_screenshot.png", int(timeout_ms))
-        except Exception as exc:
-            logging.error("No Maps results detected after %sms and screenshot failed: %s", int(timeout_ms), exc)
+        screenshot_path = self._capture_debug_screenshot()
+        logging.error(
+            "No Maps results detected after %sms. screenshot=%s url=%s",
+            int(timeout_ms),
+            screenshot_path or "<none>",
+            str(self.page.url or ""),
+        )
         return False
 
     def _get_search_box(self):
