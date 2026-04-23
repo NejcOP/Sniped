@@ -1078,52 +1078,79 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         for attempt in range(2):
+            # Step 1: Scroll element fully into view, including inner anchor.
             try:
                 card.scroll_into_view_if_needed(timeout=3000)
             except Exception:
                 pass
-
-            try:
-                card.evaluate("el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
-            except Exception:
-                pass
-
-            random_delay(180, 550)
-
             try:
                 anchor = card.locator("a[href*='/maps/place/']").first
                 if anchor.count() > 0:
-                    anchor.click(timeout=3000)
+                    anchor.evaluate("el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
                 else:
-                    card.click(timeout=3000)
+                    card.evaluate("el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
+            except Exception:
+                pass
+
+            random_delay(250, 600)
+
+            # Step 2: Record URL before click so we can detect panel navigation.
+            url_before = str(self.page.url or "")
+
+            # Step 3: Click.
+            try:
+                anchor = card.locator("a[href*='/maps/place/']").first
+                if anchor.count() > 0:
+                    anchor.click(timeout=4000)
+                else:
+                    card.click(timeout=4000)
             except PlaywrightTimeoutError:
                 try:
-                    card.locator("a[href*='/maps/place/']").first.click(timeout=3000)
+                    card.locator("a[href*='/maps/place/']").first.click(timeout=4000)
                 except PlaywrightTimeoutError:
                     if attempt == 1:
                         return False
                     continue
 
-            random_delay(3000, 5000)
-            random_mouse_movements(self.page, count=random.randint(1, 3))
+            random_mouse_movements(self.page, count=random.randint(1, 2))
 
+            # Step 4: Wait for URL to change to a /maps/place/ URL (most reliable signal).
+            deadline = 8.0
+            start = __import__("time").monotonic()
+            url_changed = False
+            while (__import__("time").monotonic() - start) < deadline:
+                current_url = str(self.page.url or "")
+                if "/maps/place/" in current_url and current_url != url_before:
+                    url_changed = True
+                    break
+                random_delay(200, 350)
+
+            if not url_changed:
+                logging.warning("Panel URL did not change after click attempt=%s url=%s", attempt, self.page.url)
+                if attempt == 1:
+                    return False
+                continue
+
+            # Step 5: After URL change, wait for panel content signal.
             panel_selectors = [
-                "h1",
-                "h2",
-                "div[role='main']",
+                "a[href^='tel:']",
+                "[aria-label*='Directions']",
                 "button:has-text('Directions')",
                 "a:has-text('Directions')",
-                "[aria-label*='Directions']",
                 "text=/Directions/i",
                 "text=/Website|Call|Phone|Address/i",
-                "a[href^='tel:']",
+                "h1",
+                "h2",
             ]
             for selector in panel_selectors:
                 try:
-                    self.page.locator(selector).first.wait_for(state="visible", timeout=5000)
+                    self.page.locator(selector).first.wait_for(state="visible", timeout=6000)
                     return True
                 except PlaywrightTimeoutError:
                     continue
+
+            # URL changed but no specific panel element appeared — still treat as open.
+            return True
 
         return False
 
@@ -1256,15 +1283,22 @@ class GoogleMapsScraper:
             main_text = self.page.locator("div[role='main']").first.inner_text(timeout=2000)
         except Exception:
             main_text = ""
-        match = re.search(r"(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}", str(main_text or ""))
+        # Most permissive international phone regex as spec'd by user.
+        _PHONE_RE = re.compile(
+            r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
+        )
+        _LOOSE_RE = re.compile(r"\+?[\d][\d\s().-]{6,}")
+        match = _PHONE_RE.search(str(main_text or ""))
         if not match:
-            match = re.search(r"\+?[\d][\d\s().-]{6,}", str(main_text or ""))
+            match = _LOOSE_RE.search(str(main_text or ""))
         if not match:
             try:
                 page_text = self.page.locator("body").inner_text(timeout=2200)
             except Exception:
                 page_text = ""
-            match = re.search(r"\+?[\d][\d\s().-]{6,}", str(page_text or ""))
+            match = _PHONE_RE.search(str(page_text or ""))
+            if not match:
+                match = _LOOSE_RE.search(str(page_text or ""))
         if match:
             return match.group(0).strip()
 
