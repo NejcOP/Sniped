@@ -183,6 +183,7 @@ SUPABASE_SYNC_TABLES = (
 # If environment settings does not provide proxy_urls/proxy_url, scraper will use this list.
 # Add one full URL per item, e.g. "http://user:pass@host:port".
 HARDCODED_PROXY_URLS: List[str] = []
+DEFAULT_PROXY_LIST_PATH = ROOT_DIR / "backend" / "proxies.txt"
 
 # Per-user AI usage guardrail (units/day). Enrichment consumes units ~= lead limit.
 AI_DAILY_USAGE_LIMIT = int(os.environ.get("SNIPED_AI_DAILY_USAGE_LIMIT", os.environ.get("LEADFLOW_AI_DAILY_USAGE_LIMIT", "1000")))
@@ -225,6 +226,35 @@ def _get_cached_leads(key: str):
 
 def _set_cached_leads(key: str, data: dict) -> None:
     _LEADS_CACHE[key] = {"data": data, "ts": _time.monotonic()}
+
+
+def _normalize_proxy_url(raw_proxy: Optional[str]) -> str:
+    value = str(raw_proxy or "").strip()
+    if not value:
+        return ""
+    if "://" in value:
+        return value
+
+    parts = value.split(":")
+    if len(parts) == 4:
+        host, port, username, password = [part.strip() for part in parts]
+        if host and port and username and password:
+            return f"http://{username}:{password}@{host}:{port}"
+    return value
+
+
+def _load_file_proxy_urls(proxy_file_path: Path = DEFAULT_PROXY_LIST_PATH) -> list[str]:
+    try:
+        lines = proxy_file_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+
+    proxy_urls: list[str] = []
+    for line in lines:
+        formatted = _normalize_proxy_url(line)
+        if formatted:
+            proxy_urls.append(formatted)
+    return proxy_urls
 
 
 # User-scoped in-memory cache for niche recommendations.
@@ -7556,17 +7586,22 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         _proxy_url = str(_scrape_cfg.get("proxy_url", "") or "").strip() or None
         _proxy_urls_raw = _scrape_cfg.get("proxy_urls") or []
         _proxy_urls: List[str] = [
-            p.strip()
+            _normalize_proxy_url(p)
             for p in (
                 _proxy_urls_raw
                 if isinstance(_proxy_urls_raw, list)
                 else str(_proxy_urls_raw).splitlines()
             )
-            if str(p or "").strip()
+            if _normalize_proxy_url(p)
         ]
         if not _proxy_urls and HARDCODED_PROXY_URLS:
-            _proxy_urls = [str(p).strip() for p in HARDCODED_PROXY_URLS if str(p).strip()]
+            _proxy_urls = [_normalize_proxy_url(p) for p in HARDCODED_PROXY_URLS if _normalize_proxy_url(p)]
+        if not _proxy_urls and not _proxy_url:
+            _proxy_urls = _load_file_proxy_urls()
+        if _proxy_url:
+            _proxy_url = _normalize_proxy_url(_proxy_url) or None
         if _proxy_urls:
+            _proxy_urls = random.sample(_proxy_urls, len(_proxy_urls))
             _proxy_url = None
 
         def _on_progress(current_found: int, total_to_find: int, scanned_count: int, _lead: Any) -> None:

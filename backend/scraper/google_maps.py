@@ -66,9 +66,10 @@ class GoogleMapsScraper:
         self.locale = locale_for_country(self.country_code)
         self.user_data_dir = str(Path(user_data_dir))
         # Build rotation pool: prefer proxy_urls list, fall back to single proxy_url
-        pool = [p.strip() for p in (proxy_urls or []) if str(p or "").strip()]
+        pool = [self._normalize_proxy_url(p) for p in (proxy_urls or []) if self._normalize_proxy_url(p)]
         if not pool and proxy_url:
-            pool = [proxy_url.strip()]
+            pool = [self._normalize_proxy_url(proxy_url)]
+        random.shuffle(pool)
         self._proxy_pool: List[str] = pool
         self._proxy_pool_index: int = 0
         self.proxy_url: str = self._next_proxy()
@@ -97,6 +98,21 @@ class GoogleMapsScraper:
         proxy = self._proxy_pool[self._proxy_pool_index % len(self._proxy_pool)]
         self._proxy_pool_index += 1
         return proxy
+
+    @staticmethod
+    def _normalize_proxy_url(raw_proxy: Optional[str]) -> str:
+        value = str(raw_proxy or "").strip()
+        if not value:
+            return ""
+        if "://" in value:
+            return value
+
+        parts = value.split(":")
+        if len(parts) == 4:
+            host, port, username, password = [part.strip() for part in parts]
+            if host and port and username and password:
+                return f"http://{username}:{password}@{host}:{port}"
+        return value
 
     def _country_hint(self) -> str:
         mapping = {
@@ -181,12 +197,19 @@ class GoogleMapsScraper:
             "--disable-gpu",
         ]
         proxy_config = None
-        if self.proxy_url:
-            proxy_config = {"server": self.proxy_url}
-            logging.info("Scraper: using proxy %s", self.proxy_url.split("@")[-1])
+        proxy_candidates = [candidate for candidate in [self.proxy_url, *self._proxy_pool] if str(candidate or "").strip()]
+        if proxy_candidates:
+            deduped_candidates: list[str] = []
+            seen_candidates: set[str] = set()
+            for candidate in proxy_candidates:
+                if candidate in seen_candidates:
+                    continue
+                seen_candidates.add(candidate)
+                deduped_candidates.append(candidate)
+            proxy_candidates = deduped_candidates
 
         warm_enabled = str(os.environ.get("SCRAPE_WARM_BROWSER", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-        can_use_shared = bool(self.headless and warm_enabled and proxy_config is None)
+        can_use_shared = bool(self.headless and warm_enabled and not proxy_candidates)
 
         if can_use_shared:
             self._browser = self._acquire_shared_browser(headless=self.headless, launch_args=launch_args)
@@ -195,17 +218,31 @@ class GoogleMapsScraper:
         if self._browser is None:
             self._playwright = sync_playwright().start()
             launch_timeout_ms = max(10000, int(os.environ.get("SCRAPE_BROWSER_LAUNCH_TIMEOUT_MS", "30000") or "30000"))
-            try:
-                with _BROWSER_LAUNCH_LOCK:
-                    self._browser = self._playwright.chromium.launch(
-                        headless=self.headless,
-                        args=launch_args,
-                        proxy=proxy_config,
-                        timeout=launch_timeout_ms,
-                    )
-            except Exception as exc:
-                logging.exception("Playwright browser launch failed: %s", exc)
-                raise RuntimeError(f"Browser launch failed after {launch_timeout_ms}ms: {exc}")
+            launch_targets = proxy_candidates or [""]
+            last_exc: Optional[Exception] = None
+            for proxy_candidate in launch_targets:
+                proxy_config = {"server": proxy_candidate} if proxy_candidate else None
+                if proxy_candidate:
+                    self.proxy_url = proxy_candidate
+                    logging.info("Scraper: using proxy %s", proxy_candidate.split("@")[-1])
+                try:
+                    with _BROWSER_LAUNCH_LOCK:
+                        self._browser = self._playwright.chromium.launch(
+                            headless=self.headless,
+                            args=launch_args,
+                            proxy=proxy_config,
+                            timeout=launch_timeout_ms,
+                        )
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if proxy_candidate:
+                        logging.warning("Proxy launch failed for %s: %s", proxy_candidate.split("@")[-1], exc)
+                    else:
+                        logging.exception("Playwright browser launch failed without proxy: %s", exc)
+            if self._browser is None:
+                raise RuntimeError(f"Browser launch failed after trying {len(launch_targets)} proxy option(s): {last_exc}")
             self._using_shared_browser = False
 
         context_kwargs: dict = {
