@@ -41,16 +41,16 @@ class LeadRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     contact_name: Mapped[Optional[str]] = mapped_column(Text)
     email: Mapped[Optional[str]] = mapped_column(Text)
-    google_claimed: Mapped[Optional[bool]] = mapped_column(Boolean)
+    google_claimed: Mapped[Optional[int]] = mapped_column(Integer)
     linkedin_url: Mapped[Optional[str]] = mapped_column(Text)
     instagram_url: Mapped[Optional[str]] = mapped_column(Text)
     facebook_url: Mapped[Optional[str]] = mapped_column(Text)
     tiktok_url: Mapped[Optional[str]] = mapped_column(Text)
     ig_link: Mapped[Optional[str]] = mapped_column(Text)
     fb_link: Mapped[Optional[str]] = mapped_column(Text)
-    has_pixel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    has_pixel: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     tech_stack: Mapped[Optional[str]] = mapped_column(Text)
-    insecure_site: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    insecure_site: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     main_shortcoming: Mapped[Optional[str]] = mapped_column(Text)
     ai_description: Mapped[Optional[str]] = mapped_column(Text)
     enriched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -67,8 +67,8 @@ class LeadRecord(Base):
     ai_score: Mapped[Optional[float]] = mapped_column(Float)
     client_tier: Mapped[str] = mapped_column(Text, nullable=False, default="standard", server_default="standard")
     next_mail_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    is_ads_client: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    is_website_client: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    is_ads_client: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_website_client: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     worker_id: Mapped[Optional[int]] = mapped_column(Integer)
     assigned_worker_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -468,13 +468,28 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
     }
 
 
+def _to_int_flag(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) != 0 else 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return 1
+    if text in {"0", "false", "no", "off", "", "none", "null"}:
+        return 0
+    return 1
+
+
 def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "user_id": user_id,
         "business_name": lead.business_name,
         "website_url": lead.website_url,
         "phone_number": lead.phone_number,
-        "google_claimed": lead.google_claimed,
+        "google_claimed": _to_int_flag(lead.google_claimed),
         "linkedin_url": lead.linkedin_url,
         "instagram_url": lead.instagram_url,
         "facebook_url": lead.facebook_url,
@@ -488,7 +503,7 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "tiktok_url": lead.tiktok_url,
         "ig_link": lead.ig_link,
         "fb_link": lead.fb_link,
-        "has_pixel": lead.has_pixel,
+        "has_pixel": _to_int_flag(lead.has_pixel),
         "tech_stack": lead.tech_stack,
         "email": lead.email,
         "qualification_score": lead.qualification_score,
@@ -502,6 +517,8 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
 
 def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
     for field_name, value in updates.items():
+        if field_name in {"google_claimed", "has_pixel", "insecure_site", "is_ads_client", "is_website_client"}:
+            value = _to_int_flag(value)
         if hasattr(record, field_name):
             setattr(record, field_name, value)
 

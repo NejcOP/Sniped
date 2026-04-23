@@ -7925,6 +7925,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=task_user_id)
         logging.info("[scrape-task:%s] Saving to DB complete | inserted=%s", task_id, int(inserted))
+        logging.info("SUCCESS: %s leads saved to database", int(inserted))
 
         progress_state["phase"] = "post_process"
         progress_state["inserted"] = inserted
@@ -7953,6 +7954,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         blacklisted_synced = sync_blacklisted_leads(db_path)
         if inserted or blacklisted_synced:
             maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        _invalidate_leads_cache()
 
         exported = 0
         output_csv = None
@@ -8005,6 +8007,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 "credits_balance": credits_balance,
                 "credits_limit": credits_limit,
                 "billing_warning": billing_warning,
+                "refresh_leads": True,
                 "status_message": f"Completed. Inserted {inserted} leads.",
             },
         )
