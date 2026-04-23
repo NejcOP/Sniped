@@ -2016,9 +2016,9 @@ def ensure_users_table(db_path: Path) -> None:
             conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
             conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
             conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
-            conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, 0)")
-            conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, 0)")
-            conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, 0)")
+            conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, FALSE)")
+            conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, FALSE)")
+            conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, FALSE)")
             conn.execute(
                 f"UPDATE users SET average_deal_value = CASE WHEN COALESCE(average_deal_value, 0) <= 0 THEN {DEFAULT_AVERAGE_DEAL_VALUE} ELSE average_deal_value END"
             )
@@ -2028,7 +2028,7 @@ def ensure_users_table(db_path: Path) -> None:
                 SET plan_key = CASE
                     WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
                         THEN LOWER(TRIM(COALESCE(plan_key, '')))
-                    WHEN COALESCE(subscription_active, 0) IN (1, '1', 'true', 'TRUE')
+                    WHEN COALESCE(subscription_active, FALSE) = TRUE
                         THEN 'pro'
                     ELSE 'free'
                 END
@@ -2042,7 +2042,7 @@ def ensure_users_table(db_path: Path) -> None:
                     credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
                     credits_balance = MAX(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
                 WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
-                  AND COALESCE(subscription_active, 0) IN (0, '0', 'false', 'FALSE', '')
+                AND COALESCE(subscription_active, FALSE) = FALSE
                   AND (
                         COALESCE(NULLIF(monthly_quota, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
                      OR COALESCE(NULLIF(monthly_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
@@ -2760,11 +2760,11 @@ def reset_due_monthly_credits(db_path: Path, config_path: Path) -> dict[str, int
             """
             SELECT
                 id,
-                COALESCE(subscription_active, 0) AS subscription_active,
+                COALESCE(subscription_active, FALSE) AS subscription_active,
                 COALESCE(subscription_status, '') AS subscription_status,
                 COALESCE(subscription_start_date, '') AS subscription_start_date,
                 COALESCE(subscription_cancel_at, '') AS subscription_cancel_at,
-                COALESCE(subscription_cancel_at_period_end, 0) AS subscription_cancel_at_period_end,
+                COALESCE(subscription_cancel_at_period_end, FALSE) AS subscription_cancel_at_period_end,
                 COALESCE(NULLIF(plan_key, ''), 'free') AS plan_key,
                 COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), ?) AS monthly_quota,
                 COALESCE(topup_credits_balance, 0) AS topup_credits_balance
@@ -12318,10 +12318,10 @@ def create_app() -> FastAPI:
                     COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT}) AS monthly_limit,
                     COALESCE(topup_credits_balance, 0) AS topup_credits_balance,
                     COALESCE(subscription_start_date, '') AS subscription_start_date,
-                    COALESCE(subscription_active, 0) AS subscription_active,
+                    COALESCE(subscription_active, FALSE) AS subscription_active,
                     COALESCE(subscription_status, '') AS subscription_status,
                     COALESCE(subscription_cancel_at, '') AS subscription_cancel_at,
-                    COALESCE(subscription_cancel_at_period_end, 0) AS subscription_cancel_at_period_end,
+                    COALESCE(subscription_cancel_at_period_end, FALSE) AS subscription_cancel_at_period_end,
                     COALESCE(NULLIF(plan_key, ''), 'free') AS plan_key,
                     COALESCE(stripe_customer_id, '') AS stripe_customer_id,
                     COALESCE(updated_at, '') AS updated_at
