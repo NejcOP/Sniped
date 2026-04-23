@@ -6772,7 +6772,7 @@ def build_client_dashboard_snapshot(db_path: Path, user_id: str) -> dict[str, An
     }
 
 
-def get_task_executor(task_type: str) -> Callable[[FastAPI, dict], None]:
+def get_task_executor(task_type: str) -> Callable[[FastAPI, dict], Any]:
     if task_type == "scrape":
         return execute_scrape_task
     if task_type == "enrich":
@@ -6782,7 +6782,7 @@ def get_task_executor(task_type: str) -> Callable[[FastAPI, dict], None]:
     raise ValueError(f"Unsupported task type: {task_type}")
 
 
-def launch_detached_task(executor: Callable[[FastAPI, dict], None], app: FastAPI, payload_data: dict) -> None:
+def launch_detached_task(executor: Callable[[FastAPI, dict], Any], app: FastAPI, payload_data: dict) -> None:
     task_id = payload_data.get("task_id")
 
     def _run() -> None:
@@ -6790,7 +6790,9 @@ def launch_detached_task(executor: Callable[[FastAPI, dict], None], app: FastAPI
         try:
             if isinstance(task_id, int):
                 registry[task_id] = thread
-            executor(app, payload_data)
+            outcome = executor(app, payload_data)
+            if inspect.isawaitable(outcome):
+                asyncio.run(outcome)
         finally:
             if isinstance(task_id, int):
                 registry.pop(task_id, None)
@@ -7584,6 +7586,9 @@ def _promote_alternate_niche_choice(result: dict[str, Any], previous_result: Opt
 def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     country_value = normalize_country_value(payload_data.get("country"), payload_data.get("country_code"))
     db_path = resolve_path(payload_data.get("db_path"), DEFAULT_DB_PATH)
+    # Keep scrape tasks isolated: open and close a dedicated DB connection per task start.
+    with pgdb.connect(db_path) as _task_conn:
+        _task_conn.execute("SELECT 1")
     ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
     task_user_id = str(payload_data.get("user_id") or "").strip()
@@ -7746,12 +7751,14 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         try:
             leads = _scrape_with_boot_timeout(requested_headless)
+            logging.info("[scrape-task:%s] Scrape thread returned leads=%s", task_id, len(leads))
         except Exception as scrape_exc:
             # Non-headless sessions can be interrupted by consent/ad popups or manual window close.
             msg = str(scrape_exc).lower()
             if (not requested_headless) and ("has been closed" in msg or "target page" in msg):
                 logging.warning("Scrape interrupted in visible browser; retrying once in headless mode.")
                 leads = _scrape_with_boot_timeout(True)
+                logging.info("[scrape-task:%s] Fallback scrape thread returned leads=%s", task_id, len(leads))
             else:
                 raise
 
