@@ -4467,7 +4467,11 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     try:
         client.rpc("exec_sql", {"sql": users_sql}).execute()
     except Exception as exc:
-        logging.warning("Supabase users table auto-create skipped (rpc exec_sql unavailable): %s", exc)
+        exc_text = str(exc)
+        if "PGRST202" in exc_text or "Could not find the function public.exec_sql" in exc_text:
+            logging.info("Supabase users table auto-create skipped; exec_sql RPC unavailable. Proceeding without auto-create.")
+        else:
+            logging.warning("Supabase users table auto-create skipped (rpc exec_sql unavailable): %s", exc)
 
     return supabase_table_available(config_path, "users")
 

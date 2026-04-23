@@ -45,6 +45,7 @@ FORCED_WINDOWS_CHROME_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+GOOGLE_CONSENT_COOKIE = "YES+cb.20240101-00-p0.en+FX+123"
 
 
 class GoogleMapsScraper:
@@ -223,6 +224,7 @@ class GoogleMapsScraper:
             context_kwargs["proxy"] = proxy_config
 
         self._context = self._browser.new_context(**context_kwargs)
+        self._seed_google_consent_cookies()
         if self.headless:
             # In headless mode, block heavy assets to reduce bandwidth and page load time.
             self._context.route(
@@ -233,7 +235,50 @@ class GoogleMapsScraper:
         self.page.set_default_timeout(6000)
         self.page.set_default_navigation_timeout(max(10000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "30000") or "30000")))
         self._apply_stealth()
+        self._prime_google_consent_state()
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
+
+    def _seed_google_consent_cookies(self) -> None:
+        assert self._context is not None
+        cookie_domains = [
+            ".google.com",
+            "www.google.com",
+            "consent.google.com",
+        ]
+        cookies = []
+        for domain in cookie_domains:
+            cookies.append(
+                {
+                    "name": "CONSENT",
+                    "value": GOOGLE_CONSENT_COOKIE,
+                    "domain": domain,
+                    "path": "/",
+                    "httpOnly": False,
+                    "secure": True,
+                    "sameSite": "None",
+                }
+            )
+        try:
+            self._context.add_cookies(cookies)
+            logging.info("Injected Google CONSENT cookie into browser context.")
+        except Exception as exc:
+            logging.warning("Failed to inject Google CONSENT cookie: %s", exc)
+
+    def _prime_google_consent_state(self) -> None:
+        assert self.page is not None
+        warmup_urls = [
+            "https://www.google.com/?hl=en",
+            "https://consent.google.com/?hl=en",
+        ]
+        for warmup_url in warmup_urls:
+            try:
+                self.page.goto(warmup_url, wait_until="domcontentloaded", timeout=15000)
+                self._accept_consent_if_present()
+                random_delay(350, 900)
+                if not self._is_consent_page():
+                    return
+            except Exception:
+                continue
 
     @classmethod
     def _acquire_shared_browser(cls, *, headless: bool, launch_args: list[str]):
@@ -761,9 +806,12 @@ class GoogleMapsScraper:
         text_patterns = [
             "Accept all",
             "Accept all cookies",
+            "Accept everything",
             "I agree",
             "Agree",
             "Accept",
+            "Yes, I'm in",
+            "Continue",
             "Akzeptieren",
             "Alle akzeptieren",
             "Akzeptiere alle",
@@ -782,6 +830,10 @@ class GoogleMapsScraper:
             "Prihvatam",
             "Slažem se",
             "Allow all",
+            "Aceptar todo",
+            "Tout accepter",
+            "Zaakceptuj wszystko",
+            "Aanvaard alles",
         ]
 
         selectors = [
@@ -789,6 +841,9 @@ class GoogleMapsScraper:
             "button#introAgreeButton",
             "button[jsname='higCR']",
             "button[jscontroller]",
+            "button[aria-label*='Accept all']",
+            "button[aria-label*='I agree']",
+            "button[aria-label*='Continue']",
             "button[aria-label*='Sprejmi']",
             "button[aria-label*='vse']",
             "button[aria-label*='Accept']",
@@ -796,10 +851,15 @@ class GoogleMapsScraper:
             "button[aria-label*='Akzeptieren']",
             "button[aria-label*='Strinjam']",
             "button[aria-label*='Consent']",
+            "[role='button'][aria-label*='Accept']",
+            "[role='button'][aria-label*='agree']",
             "form [type='submit']",
+            "input[type='submit']",
             "button:has-text('Accept all')",
+            "button:has-text('Accept all cookies')",
             "button:has-text('I agree')",
             "button:has-text('Accept')",
+            "button:has-text('Continue')",
             "button:has-text('Akzeptieren')",
             "button:has-text('Alle akzeptieren')",
             "button:has-text('Strinjam')",
@@ -818,6 +878,7 @@ class GoogleMapsScraper:
                     try:
                         button = scope.locator(selector).first
                         if button.count() > 0 and button.is_visible(timeout=200):
+                            button.scroll_into_view_if_needed(timeout=1000)
                             button.click(timeout=1200)
                             random_delay(350, 900)
                             logging.info("Accepted Google consent prompt via selector.")
