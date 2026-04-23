@@ -6848,7 +6848,7 @@ def enqueue_task(
             "execution_mode": "worker",
         }
     if _is_postgres_task_store_enabled():
-        logging.warning("No live worker heartbeat detected; falling back to in-process task execution.")
+        logging.info("No live worker heartbeat detected; using in-process task execution.")
     if task_type == "scrape" and FORCE_IN_PROCESS_SCRAPE:
         logging.info("Scrape task configured for in-process execution | task_id=%s", task_id)
 
@@ -7559,6 +7559,19 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         if payload_data.get("user_data_dir")
         else Path(default_profile)
     )
+    heartbeat_stop = Event()
+
+    def _scrape_heartbeat() -> None:
+        while not heartbeat_stop.wait(10):
+            logging.info(
+                "STILL_ALIVE scrape-task:%s keyword=%r user_id=%s",
+                task_id,
+                keyword,
+                task_user_id,
+            )
+
+    heartbeat_thread = Thread(target=_scrape_heartbeat, daemon=True)
+    heartbeat_thread.start()
 
     try:
         mark_task_running(db_path, task_id)
@@ -7575,7 +7588,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         update_task_progress(db_path, task_id, progress_state)
         logging.info("[scrape-task:%s] Initial progress state saved", task_id)
 
-        requested_headless = bool(payload_data.get("headless", False))
+        requested_headless = True
+        if not bool(payload_data.get("headless", False)):
+            logging.info("[scrape-task:%s] Forcing headless mode for lightweight execution", task_id)
 
         # Read proxy config â€” supports single proxy_url or a list proxy_urls
         try:
@@ -7889,6 +7904,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         except Exception:
             pass
         finish_task_record(db_path, task_id, status="failed", result_payload=fail_payload, error=str(exc))
+    finally:
+        heartbeat_stop.set()
 
 
 def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:

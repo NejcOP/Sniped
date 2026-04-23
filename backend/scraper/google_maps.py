@@ -114,6 +114,70 @@ class GoogleMapsScraper:
                 return f"http://{username}:{password}@{host}:{port}"
         return value
 
+    @staticmethod
+    def _playwright_proxy_config(proxy_url: Optional[str]) -> Optional[dict]:
+        value = str(proxy_url or "").strip()
+        if not value:
+            return None
+        parsed = urlparse(value)
+        if not parsed.scheme or not parsed.hostname or not parsed.port:
+            return {"server": value}
+
+        config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+        if parsed.username:
+            config["username"] = unquote(parsed.username)
+        if parsed.password:
+            config["password"] = unquote(parsed.password)
+        return config
+
+    def _reset_launch_state(self) -> None:
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            finally:
+                self._context = None
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            finally:
+                self._browser = None
+        self.page = None
+
+    def _initialize_context_and_page(self, proxy_config: Optional[dict], nav_timeout_ms: int) -> None:
+        assert self._browser is not None
+
+        context_kwargs: dict = {
+            "user_agent": self.user_agent,
+            "viewport": {"width": 1366, "height": 768},
+            "locale": self.locale,
+            "extra_http_headers": {
+                "Accept-Language": "en-US,en;q=0.9",
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not.A/Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Upgrade-Insecure-Requests": "1",
+            },
+        }
+        if proxy_config:
+            context_kwargs["proxy"] = proxy_config
+
+        self._context = self._browser.new_context(**context_kwargs)
+        self._seed_google_consent_cookies()
+        if self.headless:
+            self._context.route(
+                "**/*",
+                lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
+            )
+        self.page = self._context.new_page()
+        self.page.set_default_timeout(6000)
+        self.page.set_default_navigation_timeout(nav_timeout_ms)
+        self._apply_stealth()
+        self._prime_google_consent_state()
+
     def _country_hint(self) -> str:
         mapping = {
             "us": "United States",
@@ -189,14 +253,15 @@ class GoogleMapsScraper:
     def start(self) -> None:
         # Keep a stable UA instead of rotating per session to avoid anti-bot challenges.
         self.user_agent = str(os.environ.get("SCRAPE_USER_AGENT", FORCED_WINDOWS_CHROME_UA) or FORCED_WINDOWS_CHROME_UA).strip()
+        self.headless = True
 
         launch_args = [
             "--disable-blink-features=AutomationControlled",
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
+            "--no-sandbox",
         ]
-        proxy_config = None
         proxy_candidates = [candidate for candidate in [self.proxy_url, *self._proxy_pool] if str(candidate or "").strip()]
         if proxy_candidates:
             deduped_candidates: list[str] = []
@@ -217,11 +282,12 @@ class GoogleMapsScraper:
 
         if self._browser is None:
             self._playwright = sync_playwright().start()
-            launch_timeout_ms = max(10000, int(os.environ.get("SCRAPE_BROWSER_LAUNCH_TIMEOUT_MS", "30000") or "30000"))
+            launch_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_LAUNCH_TIMEOUT_MS", "15000") or "15000"))
+            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "15000") or "15000"))
             launch_targets = proxy_candidates or [""]
             last_exc: Optional[Exception] = None
             for proxy_candidate in launch_targets:
-                proxy_config = {"server": proxy_candidate} if proxy_candidate else None
+                proxy_config = self._playwright_proxy_config(proxy_candidate)
                 if proxy_candidate:
                     self.proxy_url = proxy_candidate
                     logging.info("Scraper: using proxy %s", proxy_candidate.split("@")[-1])
@@ -233,10 +299,12 @@ class GoogleMapsScraper:
                             proxy=proxy_config,
                             timeout=launch_timeout_ms,
                         )
+                    self._initialize_context_and_page(proxy_config, nav_timeout_ms)
                     last_exc = None
                     break
                 except Exception as exc:
                     last_exc = exc
+                    self._reset_launch_state()
                     if proxy_candidate:
                         logging.warning("Proxy launch failed for %s: %s", proxy_candidate.split("@")[-1], exc)
                     else:
@@ -244,35 +312,8 @@ class GoogleMapsScraper:
             if self._browser is None:
                 raise RuntimeError(f"Browser launch failed after trying {len(launch_targets)} proxy option(s): {last_exc}")
             self._using_shared_browser = False
-
-        context_kwargs: dict = {
-            "user_agent": self.user_agent,
-            "viewport": {"width": 1366, "height": 768},
-            "locale": self.locale,
-            "extra_http_headers": {
-                "Accept-Language": "en-US,en;q=0.9",
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not.A/Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "Upgrade-Insecure-Requests": "1",
-            },
-        }
-        if proxy_config:
-            context_kwargs["proxy"] = proxy_config
-
-        self._context = self._browser.new_context(**context_kwargs)
-        self._seed_google_consent_cookies()
-        if self.headless:
-            # In headless mode, block heavy assets to reduce bandwidth and page load time.
-            self._context.route(
-                "**/*",
-                lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
-            )
-        self.page = self._context.new_page()
-        self.page.set_default_timeout(6000)
-        self.page.set_default_navigation_timeout(max(10000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "30000") or "30000")))
-        self._apply_stealth()
-        self._prime_google_consent_state()
+        if self._browser is not None and self.page is None:
+            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "15000") or "15000")))
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
     def _seed_google_consent_cookies(self) -> None:
@@ -659,10 +700,10 @@ class GoogleMapsScraper:
         cc = (self.country_code or "us").lower()
         encoded = quote_plus(keyword)
         url_candidates = [
-            f"https://www.google.com/maps/search/{encoded}?hl=en&gl={cc}",
-            f"https://www.google.com/maps/search/{encoded}",
-            f"https://www.google.com/maps?hl=en&gl={cc}&q={encoded}",
-            f"https://{self.google_domain}/maps/search/{encoded}",
+            f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0&gl={cc}",
+            f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0",
+            f"https://www.google.com/maps?hl=en&authuser=0&gl={cc}&q={encoded}",
+            f"https://{self.google_domain}/maps/search/{encoded}?hl=en&authuser=0",
         ]
 
         for url in url_candidates:
@@ -686,8 +727,8 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         base_urls = [
-            f"https://www.google.com/maps?hl=en&gl={(self.country_code or 'us').lower()}",
-            f"https://{self.google_domain}/maps",
+            f"https://www.google.com/maps?hl=en&authuser=0&gl={(self.country_code or 'us').lower()}",
+            f"https://{self.google_domain}/maps?hl=en&authuser=0",
         ]
         for base_url in base_urls:
             try:
