@@ -513,7 +513,6 @@ class GoogleMapsScraper:
                     f"KEEP_ALIVE maps-scrape found={len(leads)} target={max_results} "
                     f"scanned={scanned_count} elapsed={int(now - started_at)}s"
                 )
-                print("ALIVE_CHECK", flush=True)
                 print(keepalive, flush=True)
                 logging.info(keepalive)
                 last_keep_alive_at = now
