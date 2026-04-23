@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
@@ -41,14 +42,14 @@ class LeadRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     contact_name: Mapped[Optional[str]] = mapped_column(Text)
     email: Mapped[Optional[str]] = mapped_column(Text)
-    google_claimed: Mapped[Optional[bool]] = mapped_column(Boolean)
+    google_claimed: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     linkedin_url: Mapped[Optional[str]] = mapped_column(Text)
     instagram_url: Mapped[Optional[str]] = mapped_column(Text)
     facebook_url: Mapped[Optional[str]] = mapped_column(Text)
     tiktok_url: Mapped[Optional[str]] = mapped_column(Text)
     ig_link: Mapped[Optional[str]] = mapped_column(Text)
     fb_link: Mapped[Optional[str]] = mapped_column(Text)
-    has_pixel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    has_pixel: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     tech_stack: Mapped[Optional[str]] = mapped_column(Text)
     insecure_site: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     main_shortcoming: Mapped[Optional[str]] = mapped_column(Text)
@@ -67,8 +68,8 @@ class LeadRecord(Base):
     ai_score: Mapped[Optional[float]] = mapped_column(Float)
     client_tier: Mapped[str] = mapped_column(Text, nullable=False, default="standard", server_default="standard")
     next_mail_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    is_ads_client: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    is_website_client: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    is_ads_client: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_website_client: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     worker_id: Mapped[Optional[int]] = mapped_column(Integer)
     assigned_worker_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -485,7 +486,7 @@ def _to_bool_flag(value: Any) -> Optional[bool]:
 
 def _to_int_flag(value: Any) -> Optional[int]:
     if value is None:
-        return None
+        return 0
     if isinstance(value, bool):
         return 1 if value else 0
     if isinstance(value, (int, float)):
@@ -499,6 +500,57 @@ def _to_int_flag(value: Any) -> Optional[int]:
         return int(float(text))
     except Exception:
         return 0
+
+
+def _clean_address(value: Any) -> str:
+    raw = str(value or "").replace("\r", "\n")
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
+    lines = [line for line in lines if line]
+    if not lines:
+        return "Unknown Address"
+
+    junk_tokens = {
+        "rating",
+        "hours",
+        "all filters",
+        "results",
+        "website",
+        "directions",
+        "call",
+        "open",
+        "closed",
+        "overview",
+        "photos",
+        "reviews",
+    }
+
+    candidates: list[str] = []
+    for line in lines:
+        lowered = line.lower()
+        if any(token in lowered for token in junk_tokens):
+            continue
+        candidates.append(line)
+
+    if not candidates:
+        candidates = lines
+
+    for line in candidates:
+        if re.search(r"\d", line) and (
+            "," in line
+            or re.search(r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|suite|ste|unit|#)\b", line, flags=re.IGNORECASE)
+        ):
+            return line[:240]
+
+    return candidates[0][:240] if candidates else "Unknown Address"
+
+
+def _to_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _log_payload_types(context: str, payload: dict[str, Any]) -> None:
@@ -516,25 +568,30 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "business_name": lead.business_name,
         "website_url": lead.website_url,
         "phone_number": lead.phone_number,
-        "google_claimed": _to_bool_flag(lead.google_claimed),
+        "google_claimed": _to_int_flag(lead.google_claimed),
         "linkedin_url": lead.linkedin_url,
         "instagram_url": lead.instagram_url,
         "facebook_url": lead.facebook_url,
         "rating": lead.rating,
         "review_count": lead.review_count,
-        "address": lead.address,
+        "address": _clean_address(lead.address),
         "search_keyword": lead.search_keyword,
+        "is_ads_client": _to_int_flag(getattr(lead, "is_ads_client", 0)),
+        "is_website_client": _to_int_flag(getattr(lead, "is_website_client", 0)),
+        "follow_up_count": _to_int_flag(getattr(lead, "follow_up_count", 0)),
+        "open_count": _to_int_flag(getattr(lead, "open_count", 0)),
+        "campaign_step": _to_int_flag(getattr(lead, "campaign_step", 1)) or 1,
     }
 
     optional_fields = {
         "tiktok_url": lead.tiktok_url,
         "ig_link": lead.ig_link,
         "fb_link": lead.fb_link,
-        "has_pixel": _to_bool_flag(lead.has_pixel),
+        "has_pixel": _to_int_flag(lead.has_pixel),
         "insecure_site": _to_int_flag(getattr(lead, "insecure_site", None)),
         "tech_stack": lead.tech_stack,
         "email": lead.email,
-        "qualification_score": lead.qualification_score,
+        "qualification_score": _to_optional_float(lead.qualification_score),
     }
     for key, value in optional_fields.items():
         if value is not None:
@@ -545,10 +602,24 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
 
 def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
     for field_name, value in updates.items():
-        if field_name in {"google_claimed", "has_pixel", "is_ads_client", "is_website_client"}:
-            value = _to_bool_flag(value)
-        elif field_name == "insecure_site":
+        if field_name in {
+            "google_claimed",
+            "has_pixel",
+            "insecure_site",
+            "is_ads_client",
+            "is_website_client",
+            "follow_up_count",
+            "open_count",
+            "campaign_step",
+        }:
             value = _to_int_flag(value)
+        elif field_name == "address":
+            value = _clean_address(value)
+        elif field_name == "qualification_score" and value is not None:
+            try:
+                value = float(value)
+            except Exception:
+                value = None
         if hasattr(record, field_name):
             setattr(record, field_name, value)
 
