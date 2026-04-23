@@ -7716,9 +7716,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 int(scanned_count),
             )
 
+        scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
+        scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
+
         def _scrape_once(headless_value: bool):
-            scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
-            scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
             progress_state["status_message"] = "Launching browser..."
             update_task_progress(db_path, task_id, progress_state)
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
@@ -7747,12 +7748,15 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 )
 
         def _scrape_with_boot_timeout(headless_value: bool):
-            timeout_raw = (
-                os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS")
-                or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
-                or "180"
-            )
-            boot_timeout_seconds = max(45, int(timeout_raw or "180"))
+            timeout_raw = os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS") or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
+            default_timeout_seconds = int(scrape_runtime_limit + max(90, scrape_stall_limit * 2))
+            if str(timeout_raw or "").strip():
+                boot_timeout_seconds = max(120, int(timeout_raw or "0"))
+            else:
+                boot_timeout_seconds = max(120, default_timeout_seconds)
+            min_safe_timeout = int(scrape_runtime_limit + 30)
+            if boot_timeout_seconds < min_safe_timeout:
+                boot_timeout_seconds = min_safe_timeout
             done = Event()
             result_box: dict[str, Any] = {}
             error_box: dict[str, Exception] = {}
@@ -7768,7 +7772,27 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             worker = Thread(target=_target, daemon=True)
             worker.start()
 
-            if not done.wait(timeout=boot_timeout_seconds):
+            wait_started_at = datetime.now(timezone.utc)
+            while True:
+                if done.wait(timeout=5):
+                    break
+
+                elapsed_wait = int((datetime.now(timezone.utc) - wait_started_at).total_seconds())
+                logging.info(
+                    "[scrape-task:%s] Scrape worker watchdog | elapsed=%ss timeout=%ss",
+                    task_id,
+                    elapsed_wait,
+                    int(boot_timeout_seconds),
+                )
+                progress_state["status_message"] = (
+                    f"Scraping in progress... ({elapsed_wait}s elapsed, {progress_state.get('scanned_count', 0)} scanned)"
+                )
+                update_task_progress(db_path, task_id, progress_state)
+
+                if elapsed_wait >= int(boot_timeout_seconds):
+                    break
+
+            if not done.is_set():
                 raise TimeoutError(
                     f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow."
                 )
