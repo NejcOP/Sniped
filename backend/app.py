@@ -7536,6 +7536,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             "current_found": 0,
             "scanned_count": 0,
             "inserted": 0,
+            "status_message": "Scrape task started.",
         }
         update_task_progress(db_path, task_id, progress_state)
         logging.info("[scrape-task:%s] Initial progress state saved", task_id)
@@ -7569,6 +7570,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["current_found"] = int(current_found)
             progress_state["total_to_find"] = int(total_to_find or requested_total)
             progress_state["scanned_count"] = int(scanned_count)
+            progress_state["status_message"] = (
+                f"Searching for {keyword}... Found {int(current_found)} / {int(total_to_find or requested_total)} "
+                f"(scanned {int(scanned_count)})"
+            )
             update_task_progress(db_path, task_id, progress_state)
             logging.info(
                 "[scrape-task:%s] Progress | found=%s | target=%s | scanned=%s",
@@ -7581,7 +7586,11 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         def _scrape_once(headless_value: bool):
             scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
             scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
+            progress_state["status_message"] = "Launching browser..."
+            update_task_progress(db_path, task_id, progress_state)
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
+            progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
+            update_task_progress(db_path, task_id, progress_state)
             logging.info("[scrape-task:%s] Navigating to Google Maps search...", task_id)
             logging.info(
                 "[scrape-task:%s] Scrape limits | max_runtime_seconds=%s stall_timeout_seconds=%s",
@@ -7647,6 +7656,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             leads = [lead for lead in leads if not is_slovenia_address(getattr(lead, "address", None))]
 
         total_scraped_from_maps = len(leads)
+        progress_state["status_message"] = f"Found {total_scraped_from_maps} results from Google Maps."
         logging.info("[scrape-task:%s] Google Maps search finished | leads_found=%s", task_id, total_scraped_from_maps)
 
         if leads:
@@ -7654,6 +7664,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 progress_state["phase"] = "deep_crawl"
                 progress_state["deep_crawled"] = 0
                 progress_state["deep_total"] = len([lead for lead in leads if str(getattr(lead, "website_url", "") or "").strip() not in {"", "None", "none"}])
+                progress_state["status_message"] = "Deep enrichment crawl started..."
                 update_task_progress(db_path, task_id, progress_state)
 
                 deep_crawl_concurrency = min(10, max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "8") or "8")))
@@ -7664,6 +7675,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     progress_state["deep_crawled"] = int(done_count)
                     progress_state["deep_total"] = int(total_count)
                     progress_state["current_lead"] = str(lead_name or "")
+                    progress_state["status_message"] = (
+                        f"Deep crawl {int(done_count)}/{int(total_count)}"
+                        + (f" — {str(lead_name or '').strip()}" if str(lead_name or '').strip() else "")
+                    )
                     update_task_progress(db_path, task_id, progress_state)
 
                 logging.info(
@@ -7727,6 +7742,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         progress_state["inserted"] = inserted
         progress_state["current_found"] = total_scraped_from_maps
         progress_state["total_to_find"] = requested_total
+        progress_state["status_message"] = f"Saving {inserted} leads to database..."
         update_task_progress(db_path, task_id, progress_state)
 
         with pgdb.connect(db_path) as conn:
@@ -7801,6 +7817,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 "credits_balance": credits_balance,
                 "credits_limit": credits_limit,
                 "billing_warning": billing_warning,
+                "status_message": f"Completed. Inserted {inserted} leads.",
             },
         )
         logging.info("[scrape-task:%s] Task completed successfully", task_id)
@@ -7814,6 +7831,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             "current_found": 0,
             "scanned_count": 0,
             "inserted": 0,
+            "status_message": f"Scrape failed: {exc}",
         }
         try:
             latest = fetch_task_by_id(db_path, task_id)
@@ -9098,6 +9116,11 @@ def create_app() -> FastAPI:
                 chromium_path = playwright.chromium.executable_path
             exists = Path(chromium_path).exists() if chromium_path else False
             logging.info("[startup] Playwright Chromium executable ready=%s path=%s", exists, chromium_path)
+            if not exists:
+                logging.error(
+                    "[startup] Chromium executable missing. Ensure image installs it with: "
+                    "python -m playwright install --with-deps chromium"
+                )
         except Exception as exc:
             logging.exception("[startup] Playwright runtime check failed: %s", exc)
 
@@ -11728,6 +11751,47 @@ def create_app() -> FastAPI:
                 "country": payload_data["country"],
             },
         )
+
+    @app.get("/api/scrape/smoke-test")
+    def scrape_smoke_test(request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        timeout_seconds = max(10, int(os.environ.get("SCRAPE_SMOKE_TIMEOUT_SECONDS", "30") or "30"))
+        launch_timeout_ms = timeout_seconds * 1000
+        nav_timeout_ms = timeout_seconds * 1000
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Playwright import failed: {exc}")
+
+        browser = None
+        title = ""
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=["--disable-extensions", "--disable-gpu"],
+                    timeout=launch_timeout_ms,
+                )
+                page = browser.new_page()
+                page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=nav_timeout_ms)
+                title = str(page.title() or "")
+            return {
+                "ok": True,
+                "user_id": user_id,
+                "url": "https://www.google.com",
+                "title": title,
+                "timeout_seconds": timeout_seconds,
+            }
+        except Exception as exc:
+            logging.exception("Scrape smoke test failed")
+            raise HTTPException(status_code=502, detail=f"Smoke test failed: {exc}")
+        finally:
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
 
     @app.post("/api/export-targets")
     def run_export_targets(payload: ExportTargetsRequest, request: Request) -> dict:

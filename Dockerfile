@@ -50,7 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install -r /app/backend/requirements.txt
-RUN python -m playwright install chromium
+RUN python -m playwright install --with-deps chromium
 
 COPY backend /app/backend
 COPY pgdb.py /app/pgdb.py

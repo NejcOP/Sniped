@@ -34,6 +34,7 @@ from .models import Lead
 
 
 _SHARED_BROWSER_LOCK = Lock()
+_BROWSER_LAUNCH_LOCK = Lock()
 _SHARED_PLAYWRIGHT = None
 _SHARED_BROWSER = None
 _SHARED_BROWSER_HEADLESS: Optional[bool] = None
@@ -185,11 +186,18 @@ class GoogleMapsScraper:
 
         if self._browser is None:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(
-                headless=self.headless,
-                args=launch_args,
-                proxy=proxy_config,
-            )
+            launch_timeout_ms = max(10000, int(os.environ.get("SCRAPE_BROWSER_LAUNCH_TIMEOUT_MS", "30000") or "30000"))
+            try:
+                with _BROWSER_LAUNCH_LOCK:
+                    self._browser = self._playwright.chromium.launch(
+                        headless=self.headless,
+                        args=launch_args,
+                        proxy=proxy_config,
+                        timeout=launch_timeout_ms,
+                    )
+            except Exception as exc:
+                logging.exception("Playwright browser launch failed: %s", exc)
+                raise RuntimeError(f"Browser launch failed after {launch_timeout_ms}ms: {exc}")
             self._using_shared_browser = False
 
         context_kwargs: dict = {
@@ -209,7 +217,7 @@ class GoogleMapsScraper:
             )
         self.page = self._context.new_page()
         self.page.set_default_timeout(6000)
-        self.page.set_default_navigation_timeout(12000)
+        self.page.set_default_navigation_timeout(max(10000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "30000") or "30000")))
         self._apply_stealth()
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
@@ -232,10 +240,13 @@ class GoogleMapsScraper:
                 pass
 
             _SHARED_PLAYWRIGHT = sync_playwright().start()
-            _SHARED_BROWSER = _SHARED_PLAYWRIGHT.chromium.launch(
-                headless=headless,
-                args=launch_args,
-            )
+            launch_timeout_ms = max(10000, int(os.environ.get("SCRAPE_BROWSER_LAUNCH_TIMEOUT_MS", "30000") or "30000"))
+            with _BROWSER_LAUNCH_LOCK:
+                _SHARED_BROWSER = _SHARED_PLAYWRIGHT.chromium.launch(
+                    headless=headless,
+                    args=launch_args,
+                    timeout=launch_timeout_ms,
+                )
             _SHARED_BROWSER_HEADLESS = headless
             logging.info("Warm shared scraper browser initialized.")
             return _SHARED_BROWSER
@@ -444,13 +455,13 @@ class GoogleMapsScraper:
         url: str,
         wait_until: str = "domcontentloaded",
         max_retries: int = 1,
-        timeout_ms: int = 15000,
+        timeout_ms: int = 30000,
     ) -> None:
         """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
         assert self.page is not None
         for attempt in range(max_retries + 1):
             try:
-                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 15000)))
+                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 30000)))
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
