@@ -175,6 +175,10 @@ class Cursor:
         try:
             result = self.connection._conn.execute(statement, prepared.params)
         except Exception as exc:
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
             raise OperationalError(str(exc)) from exc
 
         self.rowcount = int(result.rowcount or 0)
@@ -222,7 +226,7 @@ class Connection:
     def __init__(self, db_path: str | Path = "runtime-db") -> None:
         self.db_path = db_path
         self.row_factory: Optional[type[Row]] = None
-        self._ctx = get_shared_engine(str(db_path)).begin()
+        self._ctx = get_shared_engine(str(db_path)).connect()
         self._conn = None
 
     def __enter__(self) -> "Connection":
@@ -230,7 +234,17 @@ class Connection:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        return bool(self._ctx.__exit__(exc_type, exc, tb))
+        if self._conn is not None:
+            try:
+                if exc_type is None:
+                    self._conn.commit()
+                else:
+                    self._conn.rollback()
+            except Exception:
+                pass
+        self._conn = None
+        self._ctx.__exit__(exc_type, exc, tb)
+        return False
 
     def cursor(self) -> Cursor:
         return Cursor(self)
@@ -242,13 +256,19 @@ class Connection:
         return self.cursor().executemany(sql, seq_of_params)
 
     def commit(self) -> None:
-        return None
+        if self._conn is not None:
+            self._conn.commit()
 
     def rollback(self) -> None:
-        return None
+        if self._conn is not None:
+            self._conn.rollback()
 
     def close(self) -> None:
-        return None
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
 
 
 def connect(db_path: str | Path = "runtime-db", *args: Any, **kwargs: Any) -> Connection:

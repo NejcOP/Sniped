@@ -33,6 +33,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPo
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -1987,7 +1988,28 @@ def ensure_users_table(db_path: Path) -> None:
                     conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
                 except Exception:
                     pass
-            conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
+            conn.commit()
+
+            users_table_exists_row = conn.execute(
+                """
+                SELECT COUNT(*) AS table_count
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'users'
+                """
+            ).fetchone()
+            users_table_exists = bool(int((users_table_exists_row or {}).get("table_count", 0))) if isinstance(users_table_exists_row, dict) else bool(int((users_table_exists_row[0] if users_table_exists_row else 0) or 0))
+            if not users_table_exists:
+                logging.warning("ensure_users_table: users table not available after CREATE, skipping update phase.")
+                return
+
+            try:
+                conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
+            except Exception as exc:
+                logging.warning("ensure_users_table: non-fatal credits_balance update failed: %s", exc)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             conn.execute(f"UPDATE users SET credits_limit = COALESCE(NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
             conn.execute(f"UPDATE users SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
             conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
@@ -9279,7 +9301,7 @@ def create_app() -> FastAPI:
 
         print("[startup] Initialising Supabase tables...")
         try:
-            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            await run_in_threadpool(ensure_supabase_users_table, DEFAULT_CONFIG_PATH)
             print("[startup] Supabase users table OK")
         except Exception as exc:
             logging.warning("[startup] Supabase table init skipped (non-fatal): %s", exc)
