@@ -79,6 +79,7 @@ class GoogleMapsScraper:
         self._context = None
         self.page: Optional[Page] = None
         self._using_shared_browser = False
+        self._first_result_snapshot_written = False
 
     @staticmethod
     def _should_abort_resource(request) -> bool:
@@ -478,8 +479,19 @@ class GoogleMapsScraper:
         scanned_count = 0
         started_at = time.monotonic()
         last_progress_at = started_at
+        last_keep_alive_at = started_at
 
         while len(leads) < max_results and stalled_rounds < 8:
+            now = time.monotonic()
+            if now - last_keep_alive_at >= 5.0:
+                keepalive = (
+                    f"KEEP_ALIVE maps-scrape found={len(leads)} target={max_results} "
+                    f"scanned={scanned_count} elapsed={int(now - started_at)}s"
+                )
+                print(keepalive, flush=True)
+                logging.info(keepalive)
+                last_keep_alive_at = now
+
             elapsed_seconds = time.monotonic() - started_at
             if elapsed_seconds >= max(30, int(max_runtime_seconds or 0)):
                 logging.warning(
@@ -525,6 +537,7 @@ class GoogleMapsScraper:
                 lead = self._extract_business(keyword)
                 if not lead:
                     self._log_card_preview(card, idx, reason="extract_business_empty")
+                    self._dump_first_result_html(reason="extract_business_empty")
                     continue
 
                 if lead.business_name and lead.address:
@@ -812,9 +825,9 @@ class GoogleMapsScraper:
         timeout_seconds = max(10.0, float(timeout_ms) / 1000.0)
         results_selectors = [
             "div[role='article']",
-            "div.Nv2PK",
-            "div[role='feed'] div.Nv2PK",
+            "div[role='feed'] a[href*='/maps/place/']",
             "a[href*='/maps/place/']",
+            "text=/Directions/i",
         ]
         phone_selectors = [
             "a[href^='tel:']",
@@ -893,6 +906,30 @@ class GoogleMapsScraper:
             html = ""
         snippet = str(html or "").strip().replace("\n", " ").replace("\r", " ")[:500]
         logging.info("Maps card preview idx=%s reason=%s html=%s", idx, reason, snippet or "<empty>")
+
+    def _dump_first_result_html(self, reason: str) -> None:
+        if self._first_result_snapshot_written:
+            return
+        assert self.page is not None
+
+        try:
+            first_result = self.page.locator("a[href*='/maps/place/']").first
+            if first_result.count() == 0:
+                return
+            html = first_result.evaluate("el => el.outerHTML")
+            content = str(html or "").strip()
+            if not content:
+                return
+
+            dump_dir = Path(str(os.environ.get("SCRAPE_DEBUG_DUMP_DIR", "runtime/logs") or "runtime/logs"))
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(reason or "unknown")).strip("_") or "unknown"
+            file_path = dump_dir / f"maps_first_result_{safe_reason}_{int(time.time())}.html"
+            file_path.write_text(content, encoding="utf-8")
+            self._first_result_snapshot_written = True
+            logging.warning("Saved first-result HTML snapshot: %s", file_path)
+        except Exception as exc:
+            logging.warning("Failed to dump first-result HTML snapshot: %s", exc)
 
     def _get_search_box(self):
         assert self.page is not None
@@ -1054,14 +1091,14 @@ class GoogleMapsScraper:
             random_delay(180, 550)
 
             try:
-                anchor = card.locator("a[href*='/maps/place/'], a.hfpxzc").first
+                anchor = card.locator("a[href*='/maps/place/']").first
                 if anchor.count() > 0:
                     anchor.click(timeout=3000)
                 else:
                     card.click(timeout=3000)
             except PlaywrightTimeoutError:
                 try:
-                    card.locator("a[href*='/maps/place/'], a.hfpxzc").first.click(timeout=3000)
+                    card.locator("a[href*='/maps/place/']").first.click(timeout=3000)
                 except PlaywrightTimeoutError:
                     if attempt == 1:
                         return False
@@ -1071,15 +1108,14 @@ class GoogleMapsScraper:
             random_mouse_movements(self.page, count=random.randint(1, 3))
 
             panel_selectors = [
-                "h1.DUwDvf",
                 "h1",
+                "h2",
                 "div[role='main']",
                 "button:has-text('Directions')",
                 "a:has-text('Directions')",
                 "[aria-label*='Directions']",
-                "button[data-item-id='address']",
-                "button[data-item-id^='phone:tel:']",
-                "a[data-item-id='authority']",
+                "text=/Directions/i",
+                "text=/Website|Call|Phone|Address/i",
                 "a[href^='tel:']",
             ]
             for selector in panel_selectors:
@@ -1094,11 +1130,7 @@ class GoogleMapsScraper:
     def _extract_business(self, keyword: str) -> Optional[Lead]:
         assert self.page is not None
 
-        name = None
-        for selector in ["h1.DUwDvf", "h1", "div[role='main'] h1", "div[role='main'] h2"]:
-            name = self._safe_text(self.page.locator(selector).first)
-            if name:
-                break
+        name = self._extract_business_name()
         address = self._extract_address()
         website = self._extract_website() or "None"
         phone = self._extract_phone() or "None"
@@ -1116,15 +1148,9 @@ class GoogleMapsScraper:
         if not name or not address:
             return None
 
-        rating_text = self._safe_text(self.page.locator("span.MW4etd").first)
-        if not rating_text:
-            rating_text = self._safe_text(self.page.locator("div.F7nice span").first)
-
-        review_text = self._safe_text(self.page.locator("span.UY7F9").first)
-        if not review_text:
-            review_text = self._safe_text(
-                self.page.locator("button[jsaction*='pane.reviewChart.moreReviews'] span").first
-            )
+        panel_text = self._panel_text()
+        rating_text = self._extract_rating_from_text(panel_text)
+        review_text = self._extract_review_count_from_text(panel_text)
 
         return Lead(
             business_name=name,
@@ -1169,21 +1195,27 @@ class GoogleMapsScraper:
     def _extract_website(self) -> Optional[str]:
         assert self.page is not None
 
-        selectors = [
-            "a[data-item-id='authority']",
-            "a[aria-label*='Website']",
-            "a[aria-label*='website']",
-            "a:has-text('Website')",
-            "a[role='link'][href^='http']",
-            "div[role='main'] a[href^='http']",
+        anchor_groups = [
+            self.page.locator("div[role='main'] a[href]"),
+            self.page.locator("a[href^='http']"),
         ]
-        for selector in selectors:
-            locator = self.page.locator(selector).first
-            if locator.count() == 0:
-                continue
-            href = locator.get_attribute("href")
-            if href and href.strip().startswith(("http://", "https://")) and "google." not in href:
-                return href.strip()
+        for anchors in anchor_groups:
+            try:
+                total = min(anchors.count(), 40)
+            except Exception:
+                total = 0
+            for idx in range(total):
+                try:
+                    href = anchors.nth(idx).get_attribute("href") or ""
+                except Exception:
+                    href = ""
+                candidate = str(href or "").strip()
+                if not candidate.lower().startswith(("http://", "https://")):
+                    continue
+                lowered = candidate.lower()
+                if "google." in lowered or "gstatic." in lowered or "/maps/" in lowered:
+                    continue
+                return candidate
 
         try:
             panel_text = self.page.locator("div[role='main']").first.inner_text(timeout=2500)
@@ -1227,6 +1259,12 @@ class GoogleMapsScraper:
         match = re.search(r"(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}", str(main_text or ""))
         if not match:
             match = re.search(r"\+?[\d][\d\s().-]{6,}", str(main_text or ""))
+        if not match:
+            try:
+                page_text = self.page.locator("body").inner_text(timeout=2200)
+            except Exception:
+                page_text = ""
+            match = re.search(r"\+?[\d][\d\s().-]{6,}", str(page_text or ""))
         if match:
             return match.group(0).strip()
 
@@ -1261,6 +1299,16 @@ class GoogleMapsScraper:
         except Exception:
             pass
 
+        panel_text = self._panel_text()
+        for raw_line in str(panel_text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if len(line) < 8:
+                continue
+            if re.search(r"\d", line) and re.search(r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|suite|ste|unit|#)\b", line, flags=re.IGNORECASE):
+                return line
+            if re.search(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b", line):
+                return line
+
         return None
 
     def _card_key(self, card, idx: int) -> str:
@@ -1268,16 +1316,91 @@ class GoogleMapsScraper:
         title = None
 
         try:
-            link = card.locator("a[href*='/maps/place/'], a.hfpxzc").first.get_attribute("href")
+            link = card.locator("a[href*='/maps/place/']").first.get_attribute("href")
         except PlaywrightTimeoutError:
             link = None
+        except Exception:
+            link = None
+
+        if not link:
+            try:
+                link = card.get_attribute("href")
+            except Exception:
+                link = None
 
         try:
-            title = self._safe_text(card.locator(".qBF1Pd").first)
+            title = card.get_attribute("aria-label")
         except PlaywrightTimeoutError:
             title = None
+        except Exception:
+            title = None
+
+        if not title:
+            try:
+                title = self._safe_text(card)
+            except Exception:
+                title = None
 
         return link or title or f"card-{idx}"
+
+    def _extract_business_name(self) -> Optional[str]:
+        assert self.page is not None
+
+        heading_candidates = self.page.locator("div[role='main'] h1, div[role='main'] h2, div[role='main'] [role='heading']")
+        try:
+            total = min(heading_candidates.count(), 8)
+        except Exception:
+            total = 0
+
+        blocked_terms = {"directions", "website", "call", "overview", "reviews", "photos", "about", "menu"}
+        for idx in range(total):
+            text = self._safe_text(heading_candidates.nth(idx))
+            if not text:
+                continue
+            lowered = text.strip().lower()
+            if lowered in blocked_terms:
+                continue
+            if len(lowered) < 2:
+                continue
+            return text.strip()
+
+        panel_text = self._panel_text()
+        for raw_line in str(panel_text or "").splitlines():
+            line = str(raw_line or "").strip()
+            if len(line) < 2:
+                continue
+            lower_line = line.lower()
+            if any(token in lower_line for token in ["directions", "website", "call", "reviews", "open", "closed", "address"]):
+                continue
+            if re.search(r"\d", line):
+                continue
+            return line
+
+        return None
+
+    def _panel_text(self) -> str:
+        assert self.page is not None
+        try:
+            return str(self.page.locator("div[role='main']").first.inner_text(timeout=2500) or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_rating_from_text(panel_text: str) -> Optional[str]:
+        blob = str(panel_text or "")
+        match = re.search(r"\b([0-5](?:[.,]\d)?)\s*(?:stars?)?\b", blob, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b([0-5](?:[.,]\d)?)\b", blob)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_review_count_from_text(panel_text: str) -> Optional[str]:
+        blob = str(panel_text or "")
+        match = re.search(r"([\d.,]+)\s+reviews?", blob, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.search(r"\(([\d.,]+)\)", blob)
+        return match.group(1) if match else None
 
     def _card_title(self, card) -> str:
         try:

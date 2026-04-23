@@ -6812,7 +6812,16 @@ def launch_detached_task(executor: Callable[[FastAPI, dict], Any], app: FastAPI,
                 registry[task_id] = thread
             outcome = executor(app, payload_data)
             if inspect.isawaitable(outcome):
-                asyncio.run(outcome)
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(outcome)
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+                    asyncio.set_event_loop(None)
         finally:
             if isinstance(task_id, int):
                 registry.pop(task_id, None)
@@ -7632,7 +7641,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     heartbeat_stop = Event()
 
     def _scrape_heartbeat() -> None:
-        while not heartbeat_stop.wait(10):
+        while not heartbeat_stop.wait(5):
             logging.info(
                 "STILL_ALIVE scrape-task:%s keyword=%r user_id=%s",
                 task_id,
