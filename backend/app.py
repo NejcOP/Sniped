@@ -10564,7 +10564,7 @@ def create_app() -> FastAPI:
                 ensure_users_table(DEFAULT_DB_PATH)
                 with pgdb.connect(DEFAULT_DB_PATH) as conn:
                     conn.execute(
-                        "UPDATE users SET credits_balance = MAX(0, credits_balance - ?) WHERE token = ?",
+                        "UPDATE users SET credits_balance = GREATEST(0, credits_balance - ?) WHERE token = ?",
                         (scored_count, session_token),
                     )
                     conn.commit()
