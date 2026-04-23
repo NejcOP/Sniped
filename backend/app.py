@@ -977,55 +977,71 @@ def ensure_dashboard_columns(db_path: Path) -> None:
     }
 
     with pgdb.connect(db_path) as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
-        for column_name, statement in optional_columns.items():
-            if column_name not in columns:
-                conn.execute(statement)
-        conn.execute("UPDATE leads SET user_id = 'legacy' WHERE user_id IS NULL OR TRIM(COALESCE(user_id, '')) = ''")
-        conn.execute(
-            """
-            UPDATE leads
-            SET created_at = COALESCE(NULLIF(CAST(scraped_at AS TEXT), ''), CAST(CURRENT_TIMESTAMP AS TEXT))
-            WHERE created_at IS NULL
-            """
-        )
-        conn.execute(
-            """
-            UPDATE leads
-            SET pipeline_stage = CASE
-                WHEN paid_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('paid', 'closed', 'won (paid)', 'won') THEN 'Won (Paid)'
-                WHEN reply_detected_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('replied', 'interested', 'meeting set', 'zoom scheduled') THEN 'Replied'
-                WHEN sent_at IS NOT NULL OR last_contacted_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('emailed', 'contacted', 'failed', 'bounced', 'invalid_email') THEN 'Contacted'
-                ELSE 'Scraped'
-            END
-            WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_id ON leads(user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_created_at ON leads(user_id, created_at DESC, id DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)")
-        conn.commit()
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
+            for column_name, statement in optional_columns.items():
+                if column_name not in columns:
+                    conn.execute(statement)
+            conn.execute("UPDATE leads SET user_id = 'legacy' WHERE user_id IS NULL OR TRIM(COALESCE(user_id, '')) = ''")
+            conn.execute(
+                """
+                UPDATE leads
+                SET created_at = COALESCE(NULLIF(CAST(scraped_at AS TEXT), ''), CAST(CURRENT_TIMESTAMP AS TEXT))
+                WHERE created_at IS NULL
+                """
+            )
+            conn.execute(
+                """
+                UPDATE leads
+                SET pipeline_stage = CASE
+                    WHEN paid_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('paid', 'closed', 'won (paid)', 'won') THEN 'Won (Paid)'
+                    WHEN reply_detected_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('replied', 'interested', 'meeting set', 'zoom scheduled') THEN 'Replied'
+                    WHEN sent_at IS NOT NULL OR last_contacted_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('emailed', 'contacted', 'failed', 'bounced', 'invalid_email') THEN 'Contacted'
+                    ELSE 'Scraped'
+                END
+                WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_id ON leads(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_created_at ON leads(user_id, created_at DESC, id DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)")
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logging.exception("ensure_dashboard_columns failed; transaction rolled back")
+            raise
 
 
 def ensure_blacklist_table(db_path: Path) -> None:
     with pgdb.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS lead_blacklist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                value TEXT NOT NULL,
-                reason TEXT,
-                created_at TEXT NOT NULL
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS lead_blacklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)"
-        )
-        conn.commit()
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)"
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logging.exception("ensure_blacklist_table failed; transaction rolled back")
+            raise
 
 
 def fetch_blacklist_sets(db_path: Path) -> tuple[set[str], set[str]]:
@@ -1923,8 +1939,12 @@ def ensure_runtime_table(db_path: Path) -> None:
 
 
 def ensure_users_table(db_path: Path) -> None:
-    ensure_dashboard_columns(db_path)
-    ensure_blacklist_table(db_path)
+    try:
+        ensure_dashboard_columns(db_path)
+        ensure_blacklist_table(db_path)
+    except Exception:
+        logging.exception("ensure_users_table prerequisites failed")
+        raise
     with pgdb.connect(db_path) as conn:
         try:
             conn.execute(
@@ -2040,7 +2060,7 @@ def ensure_users_table(db_path: Path) -> None:
                 SET monthly_quota = {DEFAULT_MONTHLY_CREDIT_LIMIT},
                     monthly_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
                     credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                    credits_balance = MAX(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
+                    credits_balance = GREATEST(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
                 WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
                 AND COALESCE(subscription_active, FALSE) = FALSE
                   AND (
