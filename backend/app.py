@@ -2073,7 +2073,7 @@ def ensure_users_table(db_path: Path) -> None:
             conn.execute(
                 """
                 UPDATE users
-                SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP)
+                SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CAST(CURRENT_TIMESTAMP AS TEXT))
                 WHERE updated_at IS NULL OR TRIM(COALESCE(updated_at, '')) = ''
                 """
             )
