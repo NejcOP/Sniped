@@ -515,10 +515,12 @@ class GoogleMapsScraper:
                     except Exception:
                         logging.debug("Progress callback failed during card scan; continuing scrape.")
                 if not self._open_card(card):
+                    self._log_card_preview(card, idx, reason="open_card_failed")
                     continue
 
                 lead = self._extract_business(keyword)
                 if not lead:
+                    self._log_card_preview(card, idx, reason="extract_business_empty")
                     continue
 
                 if lead.business_name and lead.address:
@@ -880,6 +882,14 @@ class GoogleMapsScraper:
             except Exception:
                 continue
 
+    def _log_card_preview(self, card, idx: int, reason: str) -> None:
+        try:
+            html = card.inner_html(timeout=2000)
+        except Exception:
+            html = ""
+        snippet = str(html or "").strip().replace("\n", " ").replace("\r", " ")[:500]
+        logging.info("Maps card preview idx=%s reason=%s html=%s", idx, reason, snippet or "<empty>")
+
     def _get_search_box(self):
         assert self.page is not None
 
@@ -1026,36 +1036,51 @@ class GoogleMapsScraper:
     def _open_card(self, card) -> bool:
         assert self.page is not None
 
-        try:
-            card.scroll_into_view_if_needed(timeout=3000)
-            random_delay(120, 450)
-            anchor = card.locator("a[href*='/maps/place/'], a.hfpxzc").first
-            if anchor.count() > 0:
-                anchor.click(timeout=3000)
-            else:
-                card.click(timeout=3000)
-        except PlaywrightTimeoutError:
+        for attempt in range(2):
             try:
-                card.locator("a[href*='/maps/place/'], a.hfpxzc").first.click(timeout=3000)
-            except PlaywrightTimeoutError:
-                return False
+                card.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
 
-        random_delay(800, 1600)
-        random_mouse_movements(self.page, count=random.randint(1, 3))
-
-        panel_selectors = [
-            "h1.DUwDvf",
-            "h1",
-            "button[data-item-id='address']",
-            "button[data-item-id^='phone:tel:']",
-            "a[data-item-id='authority']",
-        ]
-        for selector in panel_selectors:
             try:
-                self.page.locator(selector).first.wait_for(state="visible", timeout=5000)
-                return True
+                card.evaluate("el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
+            except Exception:
+                pass
+
+            random_delay(180, 550)
+
+            try:
+                anchor = card.locator("a[href*='/maps/place/'], a.hfpxzc").first
+                if anchor.count() > 0:
+                    anchor.click(timeout=3000)
+                else:
+                    card.click(timeout=3000)
             except PlaywrightTimeoutError:
-                continue
+                try:
+                    card.locator("a[href*='/maps/place/'], a.hfpxzc").first.click(timeout=3000)
+                except PlaywrightTimeoutError:
+                    if attempt == 1:
+                        return False
+                    continue
+
+            random_delay(3000, 5000)
+            random_mouse_movements(self.page, count=random.randint(1, 3))
+
+            panel_selectors = [
+                "h1.DUwDvf",
+                "h1",
+                "div[role='main']",
+                "button[data-item-id='address']",
+                "button[data-item-id^='phone:tel:']",
+                "a[data-item-id='authority']",
+                "a[href^='tel:']",
+            ]
+            for selector in panel_selectors:
+                try:
+                    self.page.locator(selector).first.wait_for(state="visible", timeout=5000)
+                    return True
+                except PlaywrightTimeoutError:
+                    continue
 
         return False
 
@@ -1131,7 +1156,9 @@ class GoogleMapsScraper:
         selectors = [
             "a[data-item-id='authority']",
             "a[aria-label*='Website']",
+            "a[aria-label*='website']",
             "a:has-text('Website')",
+            "a[role='link'][href^='http']",
             "div[role='main'] a[href^='http']",
         ]
         for selector in selectors:
@@ -1150,8 +1177,10 @@ class GoogleMapsScraper:
         candidates = [
             self.page.locator("button[data-item-id^='phone:tel:']").first,
             self.page.locator("button[aria-label^='Phone:']").first,
+            self.page.locator("button[aria-label*='Call']").first,
             self.page.locator("button[data-tooltip='Copy phone number']").first,
             self.page.locator("a[href^='tel:']").first,
+            self.page.locator("[aria-label*='phone' i]").first,
         ]
 
         for locator in candidates:
@@ -1165,6 +1194,14 @@ class GoogleMapsScraper:
             match = re.search(r"\+?[\d][\d\s().-]{6,}", blob)
             if match:
                 return match.group(0).strip()
+
+        try:
+            main_text = self.page.locator("div[role='main']").first.inner_text(timeout=2000)
+        except Exception:
+            main_text = ""
+        match = re.search(r"\+?[\d][\d\s().-]{6,}", str(main_text or ""))
+        if match:
+            return match.group(0).strip()
 
         return None
 
@@ -1186,6 +1223,16 @@ class GoogleMapsScraper:
             text = self._safe_text(address_button)
             if text:
                 return text
+
+        try:
+            buttons = self.page.locator("div[role='main'] button")
+            total = min(buttons.count(), 12)
+            for idx in range(total):
+                text = self._safe_text(buttons.nth(idx))
+                if text and len(text) >= 8 and any(token in text.lower() for token in ["street", "ave", "road", "blvd", "suite", ","]):
+                    return text
+        except Exception:
+            pass
 
         return None
 
