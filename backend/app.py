@@ -1925,118 +1925,125 @@ def ensure_users_table(db_path: Path) -> None:
     ensure_dashboard_columns(db_path)
     ensure_blacklist_table(db_path)
     with pgdb.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                email         TEXT    NOT NULL UNIQUE,
-                password_hash TEXT    NOT NULL,
-                salt          TEXT    NOT NULL,
-                niche         TEXT    NOT NULL DEFAULT 'B2B Service Provider',
-                account_type  TEXT    NOT NULL DEFAULT 'entrepreneur',
-                display_name  TEXT    NOT NULL DEFAULT '',
-                contact_name  TEXT    NOT NULL DEFAULT '',
-                token         TEXT    UNIQUE,
-                credits_balance INTEGER NOT NULL DEFAULT 0,
-                monthly_quota INTEGER NOT NULL DEFAULT 50,
-                credits_limit INTEGER NOT NULL DEFAULT 50,
-                monthly_limit INTEGER NOT NULL DEFAULT 50,
-                topup_credits_balance INTEGER NOT NULL DEFAULT 0,
-                subscription_start_date TEXT,
-                subscription_active INTEGER NOT NULL DEFAULT 0,
-                subscription_status TEXT,
-                subscription_cancel_at TEXT,
-                subscription_cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
-                plan_key TEXT NOT NULL DEFAULT 'free',
-                stripe_customer_id TEXT,
-                quickstart_completed INTEGER NOT NULL DEFAULT 0,
-                average_deal_value REAL NOT NULL DEFAULT 1000,
-                smtp_accounts_json TEXT,
-                reset_token   TEXT,
-                reset_token_expires_at TEXT,
-                created_at    TEXT    NOT NULL,
-                updated_at    TEXT
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email         TEXT    NOT NULL UNIQUE,
+                    password_hash TEXT    NOT NULL,
+                    salt          TEXT    NOT NULL,
+                    niche         TEXT    NOT NULL DEFAULT 'B2B Service Provider',
+                    account_type  TEXT    NOT NULL DEFAULT 'entrepreneur',
+                    display_name  TEXT    NOT NULL DEFAULT '',
+                    contact_name  TEXT    NOT NULL DEFAULT '',
+                    token         TEXT    UNIQUE,
+                    credits_balance INTEGER NOT NULL DEFAULT 0,
+                    monthly_quota INTEGER NOT NULL DEFAULT 50,
+                    credits_limit INTEGER NOT NULL DEFAULT 50,
+                    monthly_limit INTEGER NOT NULL DEFAULT 50,
+                    topup_credits_balance INTEGER NOT NULL DEFAULT 0,
+                    subscription_start_date TEXT,
+                    subscription_active INTEGER NOT NULL DEFAULT 0,
+                    subscription_status TEXT,
+                    subscription_cancel_at TEXT,
+                    subscription_cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+                    plan_key TEXT NOT NULL DEFAULT 'free',
+                    stripe_customer_id TEXT,
+                    quickstart_completed INTEGER NOT NULL DEFAULT 0,
+                    average_deal_value REAL NOT NULL DEFAULT 1000,
+                    smtp_accounts_json TEXT,
+                    reset_token   TEXT,
+                    reset_token_expires_at TEXT,
+                    created_at    TEXT    NOT NULL,
+                    updated_at    TEXT
+                )
+                """
             )
-            """
-        )
-        # Migrate existing tables that may be missing new columns
-        for col, typedef in [
-            ("account_type", "TEXT NOT NULL DEFAULT 'entrepreneur'"),
-            ("display_name", "TEXT NOT NULL DEFAULT ''"),
-            ("contact_name", "TEXT NOT NULL DEFAULT ''"),
-            ("credits_balance", "INTEGER NOT NULL DEFAULT 0"),
-            ("monthly_quota", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-            ("credits_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-            ("monthly_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-            ("topup_credits_balance", "INTEGER NOT NULL DEFAULT 0"),
-            ("subscription_start_date", "TEXT"),
-            ("subscription_active", "INTEGER NOT NULL DEFAULT 0"),
-            ("subscription_status", "TEXT"),
-            ("subscription_cancel_at", "TEXT"),
-            ("subscription_cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
-            ("plan_key", "TEXT NOT NULL DEFAULT 'free'"),
-            ("stripe_customer_id", "TEXT"),
-            ("quickstart_completed", "INTEGER NOT NULL DEFAULT 0"),
-            ("average_deal_value", f"REAL NOT NULL DEFAULT {DEFAULT_AVERAGE_DEAL_VALUE}"),
-            ("smtp_accounts_json", "TEXT"),
-            ("reset_token", "TEXT"),
-            ("reset_token_expires_at", "TEXT"),
-            ("updated_at", "TEXT"),
-        ]:
+            for col, typedef in [
+                ("account_type", "TEXT NOT NULL DEFAULT 'entrepreneur'"),
+                ("display_name", "TEXT NOT NULL DEFAULT ''"),
+                ("contact_name", "TEXT NOT NULL DEFAULT ''"),
+                ("credits_balance", "INTEGER NOT NULL DEFAULT 0"),
+                ("monthly_quota", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                ("credits_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                ("monthly_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                ("topup_credits_balance", "INTEGER NOT NULL DEFAULT 0"),
+                ("subscription_start_date", "TEXT"),
+                ("subscription_active", "INTEGER NOT NULL DEFAULT 0"),
+                ("subscription_status", "TEXT"),
+                ("subscription_cancel_at", "TEXT"),
+                ("subscription_cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
+                ("plan_key", "TEXT NOT NULL DEFAULT 'free'"),
+                ("stripe_customer_id", "TEXT"),
+                ("quickstart_completed", "INTEGER NOT NULL DEFAULT 0"),
+                ("average_deal_value", f"REAL NOT NULL DEFAULT {DEFAULT_AVERAGE_DEAL_VALUE}"),
+                ("smtp_accounts_json", "TEXT"),
+                ("reset_token", "TEXT"),
+                ("reset_token_expires_at", "TEXT"),
+                ("updated_at", "TEXT"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+                except Exception:
+                    pass
+            conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
+            conn.execute(f"UPDATE users SET credits_limit = COALESCE(NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+            conn.execute(f"UPDATE users SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+            conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+            conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
+            conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
+            conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
+            conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, 0)")
+            conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, 0)")
+            conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, 0)")
+            conn.execute(
+                f"UPDATE users SET average_deal_value = CASE WHEN COALESCE(average_deal_value, 0) <= 0 THEN {DEFAULT_AVERAGE_DEAL_VALUE} ELSE average_deal_value END"
+            )
+            conn.execute(
+                """
+                UPDATE users
+                SET plan_key = CASE
+                    WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
+                        THEN LOWER(TRIM(COALESCE(plan_key, '')))
+                    WHEN COALESCE(subscription_active, 0) IN (1, '1', 'true', 'TRUE')
+                        THEN 'pro'
+                    ELSE 'free'
+                END
+                """
+            )
+            conn.execute(
+                f"""
+                UPDATE users
+                SET monthly_quota = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                    monthly_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                    credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                    credits_balance = MAX(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
+                WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
+                  AND COALESCE(subscription_active, 0) IN (0, '0', 'false', 'FALSE', '')
+                  AND (
+                        COALESCE(NULLIF(monthly_quota, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                     OR COALESCE(NULLIF(monthly_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                     OR COALESCE(NULLIF(credits_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                  )
+                """
+            )
+            conn.execute(
+                """
+                UPDATE users
+                SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP)
+                WHERE updated_at IS NULL OR TRIM(COALESCE(updated_at, '')) = ''
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)")
+            conn.commit()
+        except Exception:
             try:
-                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+                conn.rollback()
             except Exception:
                 pass
-        conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
-        conn.execute(f"UPDATE users SET credits_limit = COALESCE(NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-        conn.execute(f"UPDATE users SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-        conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-        conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
-        conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
-        conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
-        conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, 0)")
-        conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, 0)")
-        conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, 0)")
-        conn.execute(
-            f"UPDATE users SET average_deal_value = CASE WHEN COALESCE(average_deal_value, 0) <= 0 THEN {DEFAULT_AVERAGE_DEAL_VALUE} ELSE average_deal_value END"
-        )
-        conn.execute(
-            """
-            UPDATE users
-            SET plan_key = CASE
-                WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
-                    THEN LOWER(TRIM(COALESCE(plan_key, '')))
-                WHEN COALESCE(subscription_active, 0) IN (1, '1', 'true', 'TRUE')
-                    THEN 'pro'
-                ELSE 'free'
-            END
-            """
-        )
-        conn.execute(
-            f"""
-            UPDATE users
-            SET monthly_quota = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                monthly_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                credits_balance = MAX(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
-            WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
-              AND COALESCE(subscription_active, 0) IN (0, '0', 'false', 'FALSE', '')
-              AND (
-                    COALESCE(NULLIF(monthly_quota, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-                 OR COALESCE(NULLIF(monthly_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-                 OR COALESCE(NULLIF(credits_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-              )
-            """
-        )
-        conn.execute(
-            """
-            UPDATE users
-            SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CURRENT_TIMESTAMP)
-            WHERE updated_at IS NULL OR TRIM(COALESCE(updated_at, '')) = ''
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)")
-        conn.commit()
+            logging.exception("ensure_users_table failed; transaction rolled back")
+            raise
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -4260,6 +4267,8 @@ def load_supabase_settings(config_path: Path) -> dict:
         "enabled": bool(url and key),
         "url": url,
         "key": key,
+        "service_role_key": service_role_key,
+        "publishable_key": publishable_key,
         "database_url": database_url,
         "resolved_database_url": resolved_database_url,
         "has_database_url": bool(resolved_database_url or database_url),
@@ -4302,6 +4311,20 @@ def get_supabase_client(config_path: Path) -> Optional[Any]:
         return create_supabase_client(settings["url"], settings["key"])
     except Exception as exc:
         logging.warning("Supabase init failed: %s", exc)
+        return None
+
+
+def get_supabase_admin_client(config_path: Path) -> Optional[Any]:
+    if not _HAS_SUPABASE or create_supabase_client is None:
+        return None
+    settings = load_supabase_settings(config_path)
+    service_role_key = str(settings.get("service_role_key") or "").strip()
+    if not settings.get("url") or not service_role_key:
+        return None
+    try:
+        return create_supabase_client(settings["url"], service_role_key)
+    except Exception as exc:
+        logging.warning("Supabase admin init failed: %s", exc)
         return None
 
 
@@ -4366,7 +4389,7 @@ def is_supabase_auth_enabled(config_path: Path) -> bool:
 
 
 def ensure_supabase_users_table(config_path: Path) -> bool:
-    client = get_supabase_client(config_path)
+    client = get_supabase_admin_client(config_path) or get_supabase_client(config_path)
     if client is None:
         return False
 
@@ -9165,15 +9188,15 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-    def _log_playwright_runtime_diagnostics() -> None:
+    async def _log_playwright_runtime_diagnostics() -> None:
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.async_api import async_playwright
         except Exception as exc:
             logging.exception("[startup] Playwright import failed: %s", exc)
             return
 
         try:
-            with sync_playwright() as playwright:
+            async with async_playwright() as playwright:
                 chromium_path = playwright.chromium.executable_path
             exists = Path(chromium_path).exists() if chromium_path else False
             logging.info("[startup] Playwright Chromium executable ready=%s path=%s", exists, chromium_path)
@@ -9190,14 +9213,10 @@ def create_app() -> FastAPI:
         if not warm_enabled:
             logging.info("[startup] SCRAPE_WARM_BROWSER disabled; skipping browser warm-up.")
             return
-        try:
-            GoogleMapsScraper.warm_browser(headless=True)
-            logging.info("[startup] Warm scraper browser ready.")
-        except Exception as exc:
-            logging.warning("[startup] Warm scraper browser init failed: %s", exc)
+        logging.info("[startup] Skipping browser warm-up during startup to avoid sync Playwright usage inside the event loop.")
 
     @app.on_event("startup")
-    def startup_tasks() -> None:
+    async def startup_tasks() -> None:
         logging.basicConfig(
             level=getattr(logging, DEFAULT_LOG_LEVEL, logging.WARNING),
             format="%(asctime)s | %(levelname)s | %(message)s",
@@ -9224,7 +9243,7 @@ def create_app() -> FastAPI:
             )
         else:
             logging.info("[startup] Supabase service-role key detected for server-side writes.")
-        _log_playwright_runtime_diagnostics()
+        await _log_playwright_runtime_diagnostics()
         _prewarm_scraper_browser()
         # â”€â”€ Env-var check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         _required_env = {
@@ -11814,29 +11833,29 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/scrape/smoke-test")
-    def scrape_smoke_test(request: Request) -> dict:
+    async def scrape_smoke_test(request: Request) -> dict:
         user_id = require_current_user_id(request)
         timeout_seconds = max(10, int(os.environ.get("SCRAPE_SMOKE_TIMEOUT_SECONDS", "30") or "30"))
         launch_timeout_ms = timeout_seconds * 1000
         nav_timeout_ms = timeout_seconds * 1000
 
         try:
-            from playwright.sync_api import sync_playwright
+            from playwright.async_api import async_playwright
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Playwright import failed: {exc}")
 
         browser = None
         title = ""
         try:
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
                     headless=True,
                     args=["--disable-extensions", "--disable-gpu"],
                     timeout=launch_timeout_ms,
                 )
-                page = browser.new_page()
-                page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=nav_timeout_ms)
-                title = str(page.title() or "")
+                page = await browser.new_page()
+                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=nav_timeout_ms)
+                title = str(await page.title() or "")
             return {
                 "ok": True,
                 "user_id": user_id,
@@ -11850,7 +11869,7 @@ def create_app() -> FastAPI:
         finally:
             try:
                 if browser is not None:
-                    browser.close()
+                    await browser.close()
             except Exception:
                 pass
 
