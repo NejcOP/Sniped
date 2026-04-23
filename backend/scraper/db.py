@@ -50,7 +50,7 @@ class LeadRecord(Base):
     fb_link: Mapped[Optional[str]] = mapped_column(Text)
     has_pixel: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     tech_stack: Mapped[Optional[str]] = mapped_column(Text)
-    insecure_site: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    insecure_site: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     main_shortcoming: Mapped[Optional[str]] = mapped_column(Text)
     ai_description: Mapped[Optional[str]] = mapped_column(Text)
     enriched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -483,6 +483,33 @@ def _to_bool_flag(value: Any) -> Optional[bool]:
     return True
 
 
+def _to_int_flag(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "on"}:
+        return 1
+    if text in {"false", "no", "off", "", "none", "null"}:
+        return 0
+    try:
+        return int(float(text))
+    except Exception:
+        return 0
+
+
+def _log_payload_types(context: str, payload: dict[str, Any]) -> None:
+    try:
+        type_map = {k: type(v).__name__ for k, v in payload.items()}
+        logging.error("Lead persistence type map (%s): %s", context, json.dumps(type_map, ensure_ascii=False, sort_keys=True))
+        logging.error("Lead persistence payload (%s): %s", context, json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        logging.exception("Failed to log lead payload type map for context=%s", context)
+
+
 def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "user_id": user_id,
@@ -504,6 +531,7 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "ig_link": lead.ig_link,
         "fb_link": lead.fb_link,
         "has_pixel": _to_bool_flag(lead.has_pixel),
+        "insecure_site": _to_int_flag(getattr(lead, "insecure_site", None)),
         "tech_stack": lead.tech_stack,
         "email": lead.email,
         "qualification_score": lead.qualification_score,
@@ -517,8 +545,10 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
 
 def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
     for field_name, value in updates.items():
-        if field_name in {"google_claimed", "has_pixel", "insecure_site", "is_ads_client", "is_website_client"}:
+        if field_name in {"google_claimed", "has_pixel", "is_ads_client", "is_website_client"}:
             value = _to_bool_flag(value)
+        elif field_name == "insecure_site":
+            value = _to_int_flag(value)
         if hasattr(record, field_name):
             setattr(record, field_name, value)
 
@@ -540,9 +570,15 @@ def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "runtime-db"
         ).scalar_one_or_none()
         if existing is not None:
             raise ValueError("Lead already exists.")
-        record = LeadRecord(**_lead_to_create_payload(lead, user_id))
+        payload = _lead_to_create_payload(lead, user_id)
+        record = LeadRecord(**payload)
         session.add(record)
-        session.commit()
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            _log_payload_types("create_lead", payload)
+            raise
         session.refresh(record)
         return _lead_record_to_dict(record)
 
@@ -594,8 +630,14 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
         ).scalar_one_or_none()
         if existing is not None:
             return False
-        session.add(LeadRecord(**_lead_to_create_payload(lead, user_id)))
-        session.commit()
+        payload = _lead_to_create_payload(lead, user_id)
+        session.add(LeadRecord(**payload))
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            _log_payload_types("upsert_lead", payload)
+            raise
         return True
 
 
@@ -611,15 +653,24 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
         ).all()
         existing_keys = {(row[0], row[1]) for row in existing_records}
         inserted = 0
+        inserted_payloads: list[dict[str, Any]] = []
         for lead in leads:
             key = (lead.business_name, lead.address)
             if key in existing_keys:
                 continue
-            session.add(LeadRecord(**_lead_to_create_payload(lead, user_id)))
+            payload = _lead_to_create_payload(lead, user_id)
+            session.add(LeadRecord(**payload))
+            inserted_payloads.append(payload)
             existing_keys.add(key)
             inserted += 1
         if inserted:
-            session.commit()
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+                for idx, payload in enumerate(inserted_payloads, start=1):
+                    _log_payload_types(f"batch_upsert_leads#{idx}", payload)
+                raise
         return inserted
 
 
