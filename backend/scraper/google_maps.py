@@ -6,7 +6,7 @@ import time
 from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -481,6 +481,9 @@ class GoogleMapsScraper:
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
+            if self._is_consent_page():
+                self._handle_consent_gate(fallback_url=url)
+
             if not self._is_blocked_page():
                 return
 
@@ -490,6 +493,65 @@ class GoogleMapsScraper:
                 time.sleep(1.2 * (attempt + 1))
             else:
                 logging.error("Still blocked after %d retries for %s — continuing anyway.", max_retries, url)
+
+    def _is_consent_page(self) -> bool:
+        assert self.page is not None
+        try:
+            current_url = str(self.page.url or "").lower()
+            content = (self.page.content() or "").lower()
+        except Exception:
+            return False
+
+        if "consent.google.com" in current_url:
+            return True
+        if "before you continue" in content and "google" in content:
+            return True
+        return False
+
+    def _extract_consent_continue_url(self) -> str:
+        assert self.page is not None
+        try:
+            parsed = urlparse(str(self.page.url or "").strip())
+            query = parse_qs(parsed.query)
+            values = query.get("continue") or []
+            if not values:
+                return ""
+            candidate = unquote(str(values[0] or "").strip())
+            if candidate.startswith("/"):
+                candidate = f"https://www.google.com{candidate}"
+            return candidate
+        except Exception:
+            return ""
+
+    def _handle_consent_gate(self, fallback_url: Optional[str] = None) -> bool:
+        assert self.page is not None
+        if not self._is_consent_page():
+            return True
+
+        for _ in range(3):
+            clicked = self._accept_consent_if_present()
+            random_delay(450, 1200)
+
+            if not self._is_consent_page():
+                return True
+
+            continue_url = self._extract_consent_continue_url() or str(fallback_url or "").strip()
+            if continue_url:
+                try:
+                    self.page.goto(continue_url, wait_until="domcontentloaded", timeout=25000)
+                    random_delay(350, 1000)
+                except Exception:
+                    pass
+
+            if not self._is_consent_page():
+                return True
+
+            if not clicked and not continue_url:
+                break
+
+        self._capture_debug_screenshot()
+        logging.error("Consent page could not be resolved automatically.")
+        return False
 
     def _open_maps_and_search(self, keyword: str) -> None:
         assert self.page is not None
@@ -641,6 +703,11 @@ class GoogleMapsScraper:
             try:
                 url = str(self.page.url or "").lower()
                 content = (self.page.content() or "").lower()
+
+                if "consent.google.com" in url:
+                    if self._handle_consent_gate():
+                        continue
+                    return False
 
                 if any(token in url or token in content for token in challenge_tokens):
                     self._capture_debug_screenshot()

@@ -7614,7 +7614,12 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 )
 
         def _scrape_with_boot_timeout(headless_value: bool):
-            boot_timeout_seconds = max(20, int(os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS", "75") or "75"))
+            timeout_raw = (
+                os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS")
+                or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
+                or "180"
+            )
+            boot_timeout_seconds = max(45, int(timeout_raw or "180"))
             done = Event()
             result_box: dict[str, Any] = {}
             error_box: dict[str, Exception] = {}
@@ -7632,7 +7637,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
             if not done.wait(timeout=boot_timeout_seconds):
                 raise TimeoutError(
-                    f"Scrape startup timeout after {boot_timeout_seconds}s while opening browser/Maps."
+                    f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow."
                 )
 
             if "exc" in error_box:
