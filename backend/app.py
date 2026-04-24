@@ -10343,6 +10343,16 @@ def create_app() -> FastAPI:
                     order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
                     desc=normalized_sort != "name",
                 )
+                if not rows and fallback_filters is not None:
+                    # Numeric user_id filters can silently return empty when the column is text.
+                    rows = supabase_select_rows(
+                        client,
+                        "leads",
+                        columns=supabase_columns,
+                        filters=fallback_filters,
+                        order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
+                        desc=normalized_sort != "name",
+                    )
             except Exception as exc:
                 if fallback_filters is not None:
                     try:
