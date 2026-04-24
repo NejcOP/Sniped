@@ -1793,6 +1793,12 @@ function App({ initialTab = 'leads' }) {
       }
       const data = await fetchJson(`/api/leads?${params.toString()}`)
       const items = Array.isArray(data?.items) ? data.items : []
+      console.log('[LeadManagement] /api/leads response', {
+        url: `/api/leads?${params.toString()}`,
+        total: Number(data?.total || data?.count || items.length || 0),
+        itemsLength: items.length,
+        sample: items.slice(0, 3),
+      })
       setLeads(items)
       setLeadServerTotal(Number(data?.total || data?.count || items.length || 0))
     } catch (error) {

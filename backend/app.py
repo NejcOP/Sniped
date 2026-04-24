@@ -10283,30 +10283,57 @@ def create_app() -> FastAPI:
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
-            if str(user_id).isdigit():
-                filters = {"user_id": int(user_id)}
-            else:
-                filters = {"user_id": user_id}
+            primary_filters = {"user_id": int(user_id)} if str(user_id).isdigit() else {"user_id": str(user_id)}
+            fallback_filters = {"user_id": str(user_id)} if str(user_id).isdigit() else None
             try:
                 rows = supabase_select_rows(
                     client,
                     "leads",
                     columns=supabase_columns,
-                    filters=filters,
+                    filters=primary_filters,
                     order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
                     desc=normalized_sort != "name",
                 )
             except Exception as exc:
-                logging.warning("Supabase leads query fallback to legacy columns: %s", exc)
+                if fallback_filters is not None:
+                    try:
+                        rows = supabase_select_rows(
+                            client,
+                            "leads",
+                            columns=supabase_columns,
+                            filters=fallback_filters,
+                            order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
+                            desc=normalized_sort != "name",
+                        )
+                    except Exception as exc_retry:
+                        logging.warning("Supabase leads query failed for both user_id filter types; fallback to legacy columns: %s", exc_retry)
+                        rows = None
+                else:
+                    rows = None
+
+                if rows is None:
+                    logging.warning("Supabase leads query fallback to legacy columns: %s", exc)
                 try:
-                    rows = supabase_select_rows(
-                        client,
-                        "leads",
-                        columns=legacy_columns,
-                        filters=filters,
-                        order_by="id",
-                        desc=True,
-                    )
+                    try:
+                        rows = supabase_select_rows(
+                            client,
+                            "leads",
+                            columns=legacy_columns,
+                            filters=primary_filters,
+                            order_by="id",
+                            desc=True,
+                        )
+                    except Exception:
+                        if fallback_filters is None:
+                            raise
+                        rows = supabase_select_rows(
+                            client,
+                            "leads",
+                            columns=legacy_columns,
+                            filters=fallback_filters,
+                            order_by="id",
+                            desc=True,
+                        )
                 except Exception as exc2:
                     logging.warning("Supabase leads user_id filter failed; returning empty result instead of unfiltered query: %s", exc2)
                     rows = []
