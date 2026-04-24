@@ -1761,6 +1761,7 @@ function App({ initialTab = 'leads' }) {
   const [showBlacklisted, setShowBlacklisted] = useState(false)
   const [loadingLeads, setLoadingLeads] = useState(false)
   const [leadServerTotal, setLeadServerTotal] = useState(0)
+  const [lastLeadsApiPayload, setLastLeadsApiPayload] = useState(null)
   const [leadFilterPanelOpen, setLeadFilterPanelOpen] = useState(false)
   const [advancedLeadFilters, setAdvancedLeadFilters] = useState({
     industries: [],
@@ -1782,6 +1783,7 @@ function App({ initialTab = 'leads' }) {
         page: String(leadPage + 1),
         sort: String(leadSortMode || 'recent'),
         include_blacklisted: showBlacklisted ? '1' : '0',
+        _ts: String(Date.now()),
       })
       if (leadStatusFilter !== 'all') {
         params.set('status', leadStatusFilter)
@@ -1793,15 +1795,22 @@ function App({ initialTab = 'leads' }) {
         params.set('search', debouncedLeadSearch.trim())
       }
       const data = await fetchJson(`/api/leads?${params.toString()}`)
-      const items = Array.isArray(data?.items) ? data.items : []
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.leads)
+          ? data.leads
+          : Array.isArray(data?.data)
+            ? data.data
+            : []
       console.log('[LeadManagement] /api/leads response', {
         url: `/api/leads?${params.toString()}`,
         total: Number(data?.total || data?.count || items.length || 0),
         itemsLength: items.length,
         sample: items.slice(0, 3),
       })
+      setLastLeadsApiPayload(data)
       setLeads(items)
-      setLeadServerTotal(Number(data?.total || data?.count || items.length || 0))
+      setLeadServerTotal(Number(data?.total || data?.count || data?.total_count || items.length || 0))
     } catch (error) {
       setLastError(error instanceof Error ? error.message : 'Unknown error while loading leads')
     } finally {
@@ -2763,8 +2772,21 @@ function App({ initialTab = 'leads' }) {
 
   useEffect(() => {
     if (activeTab !== 'leads') return
+    setLeadStatusFilter('all')
+    setLeadQuickFilter('all')
+    setLeadSearch('')
+    setLeadPage(0)
     void refreshLeads({ silent: false })
   }, [activeTab, refreshLeads])
+
+  useEffect(() => {
+    if (!lastLeadsApiPayload) return
+    console.log('[LeadManagement useEffect] last /api/leads payload', {
+      total: Number(lastLeadsApiPayload?.total || lastLeadsApiPayload?.count || 0),
+      itemsLength: Array.isArray(lastLeadsApiPayload?.items) ? lastLeadsApiPayload.items.length : 0,
+      sample: Array.isArray(lastLeadsApiPayload?.items) ? lastLeadsApiPayload.items.slice(0, 3) : [],
+    })
+  }, [lastLeadsApiPayload])
 
   useEffect(() => {
     const previous = scrapeTaskStateRef.current

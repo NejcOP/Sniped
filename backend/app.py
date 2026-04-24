@@ -10015,7 +10015,8 @@ def create_app() -> FastAPI:
     def add_revenue(payload: RevenueEntryRequest, request: Request) -> dict:
         user_id = require_current_user_id(request)
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            # Prefer service-role client for server-side reads to avoid RLS visibility mismatches.
+            client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
 
