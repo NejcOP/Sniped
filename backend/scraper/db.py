@@ -32,7 +32,7 @@ class LeadRecord(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(Text, nullable=False, default="legacy", server_default="legacy")
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
     business_name: Mapped[str] = mapped_column(Text, nullable=False)
     website_url: Mapped[Optional[str]] = mapped_column(Text)
     phone_number: Mapped[Optional[str]] = mapped_column(Text)
@@ -629,9 +629,19 @@ def _log_payload_types(context: str, payload: dict[str, Any]) -> None:
         logging.exception("Failed to log lead payload type map for context=%s", context)
 
 
+def _normalize_required_user_id(user_id: Any) -> str:
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("Missing user_id for lead persistence")
+    if normalized.lower() == "legacy":
+        raise ValueError("Invalid user_id 'legacy' for lead persistence")
+    return normalized
+
+
 def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
+    normalized_user_id = _normalize_required_user_id(user_id)
     payload: dict[str, Any] = {
-        "user_id": user_id,
+        "user_id": normalized_user_id,
         "business_name": lead.business_name,
         "website_url": lead.website_url,
         "phone_number": lead.phone_number,
@@ -696,7 +706,7 @@ def init_db(db_path: str = "runtime-db") -> None:
     Base.metadata.create_all(get_engine(db_path))
 
 
-def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "runtime-db") -> dict[str, Any]:
+def create_lead(lead: Lead, user_id: str, db_path: str = "runtime-db") -> dict[str, Any]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -759,12 +769,13 @@ def delete_lead(lead_id: int, db_path: str = "runtime-db") -> bool:
         return True
 
 
-def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy") -> bool:
+def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "") -> bool:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
-        logging.info("[upsert_lead] using user_id=%s business_name=%s", str(user_id), str(getattr(lead, "business_name", "") or ""))
-        payload = _lead_to_create_payload(lead, user_id)
+        normalized_user_id = _normalize_required_user_id(user_id)
+        logging.info("[upsert_lead] using user_id=%s business_name=%s", normalized_user_id, str(getattr(lead, "business_name", "") or ""))
+        payload = _lead_to_create_payload(lead, normalized_user_id)
         statement = _build_lead_upsert_statement([payload], session.bind.dialect.name if session.bind is not None else "")
         try:
             if statement is None:
@@ -780,18 +791,19 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
         return True
 
 
-def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_id: str = "legacy") -> int:
+def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_id: str = "") -> int:
     if not leads:
         return 0
 
-    logging.info("[batch_upsert_leads] using user_id=%s leads=%s", str(user_id), len(leads))
+    normalized_user_id = _normalize_required_user_id(user_id)
+    logging.info("[batch_upsert_leads] using user_id=%s leads=%s", normalized_user_id, len(leads))
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
         # Deduplicate within current batch to avoid conflicting updates on the same key in one statement.
         payload_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         for lead in leads:
-            payload = _lead_to_create_payload(lead, user_id)
+            payload = _lead_to_create_payload(lead, normalized_user_id)
             key = _lead_identity_from_payload(payload)
             payload_by_key[key] = payload
 

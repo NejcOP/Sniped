@@ -7958,6 +7958,60 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         logging.info("[scrape-task:%s] Saving to DB complete | inserted=%s", task_id, int(inserted))
         logging.info("SUCCESS: %s leads saved to database", int(inserted))
 
+        # Safety repair: if any rows for this scrape keyword were saved under legacy/user_id=1,
+        # re-assign them to the authenticated task owner so they are visible in Lead Management.
+        if keyword and task_user_id and task_user_id not in {"1", "legacy"}:
+            try:
+                with pgdb.connect(db_path) as conn:
+                    repaired_local = conn.execute(
+                        """
+                        UPDATE leads
+                        SET user_id = ?
+                        WHERE search_keyword = ?
+                          AND TRIM(COALESCE(user_id, '')) IN ('1', 'legacy')
+                        """,
+                        (task_user_id, keyword),
+                    ).rowcount or 0
+                    conn.commit()
+                if int(repaired_local) > 0:
+                    logging.warning(
+                        "[scrape-task:%s] Repaired local leads user_id for keyword=%r -> user_id=%s rows=%s",
+                        task_id,
+                        keyword,
+                        task_user_id,
+                        int(repaired_local),
+                    )
+            except Exception as repair_exc:
+                logging.warning("[scrape-task:%s] Local user_id repair skipped: %s", task_id, repair_exc)
+
+            try:
+                sb_admin = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+                if sb_admin is not None:
+                    repaired_remote = 0
+                    for orphan_uid in ("1", "legacy"):
+                        orphan_rows = supabase_select_rows(
+                            sb_admin,
+                            "leads",
+                            columns="id",
+                            filters={"search_keyword": keyword, "user_id": orphan_uid},
+                        )
+                        for row in orphan_rows:
+                            row_id = row.get("id")
+                            if row_id is None:
+                                continue
+                            sb_admin.table("leads").update({"user_id": task_user_id}).eq("id", row_id).execute()
+                            repaired_remote += 1
+                    if repaired_remote > 0:
+                        logging.warning(
+                            "[scrape-task:%s] Repaired Supabase leads user_id for keyword=%r -> user_id=%s rows=%s",
+                            task_id,
+                            keyword,
+                            task_user_id,
+                            int(repaired_remote),
+                        )
+            except Exception as repair_sb_exc:
+                logging.warning("[scrape-task:%s] Supabase user_id repair skipped: %s", task_id, repair_sb_exc)
+
         progress_state["phase"] = "post_process"
         progress_state["inserted"] = inserted
         progress_state["current_found"] = total_scraped_from_maps
