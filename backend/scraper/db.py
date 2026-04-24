@@ -523,6 +523,22 @@ def _coerce_bool_flags_for_lead_payload(payload: dict[str, Any]) -> dict[str, An
     return payload
 
 
+def _lead_identity_from_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(payload.get("business_name") or "").strip(),
+        str(payload.get("address") or "").strip(),
+    )
+
+
+def _is_duplicate_lead_identity_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "uq_leads_user_business_address" in message
+        or "duplicate key value violates unique constraint" in message
+        or "unique constraint failed: leads.user_id, leads.business_name, leads.address" in message
+    )
+
+
 def _clean_address(value: Any) -> str:
     raw = str(value or "").replace("\r", "\n")
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
@@ -654,22 +670,25 @@ def create_lead(lead: Lead, user_id: str = "legacy", db_path: str = "runtime-db"
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
+        payload = _lead_to_create_payload(lead, user_id)
+        business_name, address = _lead_identity_from_payload(payload)
         existing = session.execute(
             select(LeadRecord).where(
                 LeadRecord.user_id == str(user_id),
-                LeadRecord.business_name == lead.business_name,
-                LeadRecord.address == lead.address,
+                LeadRecord.business_name == business_name,
+                LeadRecord.address == address,
             )
         ).scalar_one_or_none()
         if existing is not None:
             raise ValueError("Lead already exists.")
-        payload = _lead_to_create_payload(lead, user_id)
         record = LeadRecord(**payload)
         session.add(record)
         try:
             session.commit()
-        except Exception:
+        except Exception as exc:
             session.rollback()
+            if _is_duplicate_lead_identity_error(exc):
+                raise ValueError("Lead already exists.") from exc
             _log_payload_types("create_lead", payload)
             raise
         session.refresh(record)
@@ -714,21 +733,24 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
+        payload = _lead_to_create_payload(lead, user_id)
+        business_name, address = _lead_identity_from_payload(payload)
         existing = session.execute(
             select(LeadRecord.id).where(
                 LeadRecord.user_id == str(user_id),
-                LeadRecord.business_name == lead.business_name,
-                LeadRecord.address == lead.address,
+                LeadRecord.business_name == business_name,
+                LeadRecord.address == address,
             )
         ).scalar_one_or_none()
         if existing is not None:
             return False
-        payload = _lead_to_create_payload(lead, user_id)
         session.add(LeadRecord(**payload))
         try:
             session.commit()
-        except Exception:
+        except Exception as exc:
             session.rollback()
+            if _is_duplicate_lead_identity_error(exc):
+                return False
             _log_payload_types("upsert_lead", payload)
             raise
         return True
@@ -744,14 +766,17 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
         existing_records = session.execute(
             select(LeadRecord.business_name, LeadRecord.address).where(LeadRecord.user_id == str(user_id))
         ).all()
-        existing_keys = {(row[0], row[1]) for row in existing_records}
+        existing_keys = {
+            (str(row[0] or "").strip(), str(row[1] or "").strip())
+            for row in existing_records
+        }
         inserted = 0
         inserted_payloads: list[dict[str, Any]] = []
         for lead in leads:
-            key = (lead.business_name, lead.address)
+            payload = _lead_to_create_payload(lead, user_id)
+            key = _lead_identity_from_payload(payload)
             if key in existing_keys:
                 continue
-            payload = _lead_to_create_payload(lead, user_id)
             session.add(LeadRecord(**payload))
             inserted_payloads.append(payload)
             existing_keys.add(key)
@@ -759,8 +784,33 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
         if inserted:
             try:
                 session.commit()
-            except Exception:
+            except Exception as exc:
                 session.rollback()
+                if _is_duplicate_lead_identity_error(exc):
+                    logging.warning("Duplicate lead identity detected during batch_upsert_leads; retrying rows individually.")
+                    recovered = 0
+                    for payload in inserted_payloads:
+                        business_name, address = _lead_identity_from_payload(payload)
+                        already_exists = session.execute(
+                            select(LeadRecord.id).where(
+                                LeadRecord.user_id == str(user_id),
+                                LeadRecord.business_name == business_name,
+                                LeadRecord.address == address,
+                            )
+                        ).scalar_one_or_none()
+                        if already_exists is not None:
+                            continue
+                        session.add(LeadRecord(**payload))
+                        try:
+                            session.commit()
+                            recovered += 1
+                        except Exception as row_exc:
+                            session.rollback()
+                            if _is_duplicate_lead_identity_error(row_exc):
+                                continue
+                            _log_payload_types("batch_upsert_leads#recovery", payload)
+                            raise
+                    return recovered
                 for idx, payload in enumerate(inserted_payloads, start=1):
                     _log_payload_types(f"batch_upsert_leads#{idx}", payload)
                 raise
