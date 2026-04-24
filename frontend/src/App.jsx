@@ -53,6 +53,7 @@ const MRR_GOAL_EUR = 16000
 const SETUP_MILESTONE_EUR = 6500
 const DEFAULT_AVERAGE_DEAL_VALUE = 1000
 const LEADS_PAGE_SIZE = 50
+const BYPASS_LEAD_FILTERS = true
 
 const QUALIFIER_LOSS_MULTIPLIER_RULES = [
   { terms: ['dentist', 'dental', 'orthodont'], multiplier: 1.55 },
@@ -2033,6 +2034,7 @@ function App({ initialTab = 'leads' }) {
   const scrapeTask = tasks.scrape || getIdleTask('scrape')
   const enrichTask = tasks.enrich || getIdleTask('enrich')
   const mailerTask = tasks.mailer || getIdleTask('mailer')
+  const scrapeTaskStateRef = useRef({ id: null, status: 'idle' })
 
   useEffect(() => {
     if (!mailerTask.running) {
@@ -2658,49 +2660,51 @@ function App({ initialTab = 'leads' }) {
 
   const filteredLeads = useMemo(() => {
     let result = [...leads]
-    if (!showBlacklisted) {
-      result = result.filter((l) => !isBlacklistedLeadStatus(l.status))
-    }
-    if (leadStatusFilter !== 'all') {
-      result = result.filter((l) => String(l.status || 'pending').toLowerCase() === leadStatusFilter.toLowerCase())
-    }
-    if (leadQuickFilter === 'qualified') {
-      result = result.filter((l) => isQualifiedLead(l))
-    }
-    if (leadQuickFilter === 'not_qualified') {
-      result = result.filter((l) => !isQualifiedLead(l))
-    }
-    if (leadQuickFilter === 'mailed') {
-      result = result.filter((l) => hasSentMail(l))
-    }
-    if (leadQuickFilter === 'opened') {
-      result = result.filter((l) => hasOpenedMail(l))
-    }
-    if (leadQuickFilter === 'replied') {
-      result = result.filter((l) => hasReply(l))
-    }
-    if (debouncedLeadSearch.trim()) {
-      const q = debouncedLeadSearch.trim().toLowerCase()
-      result = result.filter(
-        (l) => (l.business_name || '').toLowerCase().includes(q) ||
-               (l.contact_name || '').toLowerCase().includes(q) ||
-               (l.email || '').toLowerCase().includes(q),
-      )
-    }
-    if (advancedLeadFilters.industries.length > 0) {
-      result = result.filter((lead) => advancedLeadFilters.industries.includes(deriveLeadIndustry(lead)))
-    }
-    if (advancedLeadFilters.revenueBands.length > 0) {
-      result = result.filter((lead) => advancedLeadFilters.revenueBands.includes(deriveLeadRevenueBand(lead)))
-    }
-    if (advancedLeadFilters.techStacks.length > 0) {
-      result = result.filter((lead) => {
-        const stackSet = new Set(normalizeLeadInsightList(lead.tech_stack, 5))
-        return advancedLeadFilters.techStacks.some((stack) => stackSet.has(stack))
-      })
-    }
-    if (advancedLeadFilters.highScoreOnly) {
-      result = result.filter((lead) => resolveBestLeadScore(lead) >= 8)
+    if (!BYPASS_LEAD_FILTERS) {
+      if (!showBlacklisted) {
+        result = result.filter((l) => !isBlacklistedLeadStatus(l.status))
+      }
+      if (leadStatusFilter !== 'all') {
+        result = result.filter((l) => String(l.status || 'pending').toLowerCase() === leadStatusFilter.toLowerCase())
+      }
+      if (leadQuickFilter === 'qualified') {
+        result = result.filter((l) => isQualifiedLead(l))
+      }
+      if (leadQuickFilter === 'not_qualified') {
+        result = result.filter((l) => !isQualifiedLead(l))
+      }
+      if (leadQuickFilter === 'mailed') {
+        result = result.filter((l) => hasSentMail(l))
+      }
+      if (leadQuickFilter === 'opened') {
+        result = result.filter((l) => hasOpenedMail(l))
+      }
+      if (leadQuickFilter === 'replied') {
+        result = result.filter((l) => hasReply(l))
+      }
+      if (debouncedLeadSearch.trim()) {
+        const q = debouncedLeadSearch.trim().toLowerCase()
+        result = result.filter(
+          (l) => (l.business_name || '').toLowerCase().includes(q) ||
+                 (l.contact_name || '').toLowerCase().includes(q) ||
+                 (l.email || '').toLowerCase().includes(q),
+        )
+      }
+      if (advancedLeadFilters.industries.length > 0) {
+        result = result.filter((lead) => advancedLeadFilters.industries.includes(deriveLeadIndustry(lead)))
+      }
+      if (advancedLeadFilters.revenueBands.length > 0) {
+        result = result.filter((lead) => advancedLeadFilters.revenueBands.includes(deriveLeadRevenueBand(lead)))
+      }
+      if (advancedLeadFilters.techStacks.length > 0) {
+        result = result.filter((lead) => {
+          const stackSet = new Set(normalizeLeadInsightList(lead.tech_stack, 5))
+          return advancedLeadFilters.techStacks.some((stack) => stackSet.has(stack))
+        })
+      }
+      if (advancedLeadFilters.highScoreOnly) {
+        result = result.filter((lead) => resolveBestLeadScore(lead) >= 8)
+      }
     }
 
     const sorted = [...result]
@@ -2763,6 +2767,21 @@ function App({ initialTab = 'leads' }) {
   }, [activeTab, refreshLeads])
 
   useEffect(() => {
+    const previous = scrapeTaskStateRef.current
+    const currentStatus = String(scrapeTask.status || 'idle').toLowerCase()
+    const sameTask = previous.id === scrapeTask.id
+    const transitionedToCompleted = sameTask
+      ? (previous.status === 'running' || previous.status === 'queued') && currentStatus === 'completed'
+      : currentStatus === 'completed'
+
+    if (transitionedToCompleted) {
+      void refreshLeads({ silent: false })
+    }
+
+    scrapeTaskStateRef.current = { id: scrapeTask.id, status: currentStatus }
+  }, [scrapeTask.id, scrapeTask.status, refreshLeads])
+
+  useEffect(() => {
     if (leadPage > 0 && leadPage >= leadsPageCount) {
       setLeadPage(Math.max(0, leadsPageCount - 1))
     }
@@ -2777,6 +2796,41 @@ function App({ initialTab = 'leads' }) {
     () => leads.filter((lead) => isBlacklistedLeadStatus(lead.status)),
     [leads],
   )
+
+  const workflowStats = useMemo(() => {
+    const enrichmentStatuses = new Set([
+      'enriched',
+      'invalid_email',
+      'queued_mail',
+      'emailed',
+      'interested',
+      'replied',
+      'meeting set',
+      'zoom scheduled',
+      'closed',
+      'paid',
+      'failed',
+      'generation failed',
+      'generation_failed',
+      'retry_later',
+      'low_priority',
+      'qualified_not_interested',
+      'qualified not interested',
+    ])
+
+    const total = leads.length
+    const scraped = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'scraped').length
+    const enriched = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'enriched').length
+    const queued = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'queued_mail').length
+
+    const enrichmentDone = leads.filter((lead) => {
+      const status = String(lead.status || '').toLowerCase().trim()
+      return Boolean(lead.enriched_at) || enrichmentStatuses.has(status)
+    }).length
+    const notEnriched = Math.max(0, total - enrichmentDone)
+
+    return { total, scraped, enriched, queued, enrichmentDone, notEnriched }
+  }, [leads])
 
   const performanceSeries = useMemo(() => {
     const days = Array.from({ length: 7 }, (_, idx) => {
@@ -2815,41 +2869,6 @@ function App({ initialTab = 'leads' }) {
       replies: days.map((day) => { replyRunning += replyDaily[day]; return replyRunning }),
       days,
     }
-  }, [leads])
-
-  const workflowStats = useMemo(() => {
-    const enrichmentStatuses = new Set([
-      'enriched',
-      'invalid_email',
-      'queued_mail',
-      'emailed',
-      'interested',
-      'replied',
-      'meeting set',
-      'zoom scheduled',
-      'closed',
-      'paid',
-      'failed',
-      'generation failed',
-      'generation_failed',
-      'retry_later',
-      'low_priority',
-      'qualified_not_interested',
-      'qualified not interested',
-    ])
-
-    const total = leads.length
-    const scraped = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'scraped').length
-    const enriched = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'enriched').length
-    const queued = leads.filter((lead) => String(lead.status || '').toLowerCase() === 'queued_mail').length
-
-    const enrichmentDone = leads.filter((lead) => {
-      const status = String(lead.status || '').toLowerCase().trim()
-      return Boolean(lead.enriched_at) || enrichmentStatuses.has(status)
-    }).length
-    const notEnriched = Math.max(0, total - enrichmentDone)
-
-    return { total, scraped, enriched, queued, enrichmentDone, notEnriched }
   }, [leads])
 
   const activityFeed = useMemo(() => {
@@ -2982,6 +3001,13 @@ function App({ initialTab = 'leads' }) {
         if (taskType === 'scrape') {
           const inserted = Number(cur.result?.inserted || 0)
           if (inserted > 0) shootConfetti()
+          if (inserted > 0) {
+            // Make newly scraped rows visible immediately.
+            setLeadStatusFilter('all')
+            setLeadQuickFilter('all')
+            setLeadSearch('')
+            setLeadPage(0)
+          }
           setLastResult('')
         } else if (cur.result) {
           if (taskType === 'enrich') {
@@ -4879,7 +4905,11 @@ function App({ initialTab = 'leads' }) {
         setLastResult(JSON.stringify(data, null, 2))
       }
       if (data.status === 'started') toast(`${taskLabels[action]} started`, { icon: '\u23F3' })
-      await Promise.allSettled([fetchTaskState(), refreshStats(), refreshConfigHealth()])
+      const postStartRequests = [fetchTaskState(), refreshStats(), refreshConfigHealth()]
+      if (action === 'scrape') {
+        postStartRequests.push(refreshLeads({ silent: true }))
+      }
+      await Promise.allSettled(postStartRequests)
     } catch (error) {
       const axiosStatus = axios.isAxiosError(error) ? Number(error.response?.status || 0) : 0
       const fetchStatus = Number(error?.status || 0)

@@ -10361,9 +10361,43 @@ def create_app() -> FastAPI:
                     row.setdefault("phone_type", None)
                     row.setdefault("created_at", row.get("scraped_at"))
 
+            if not rows:
+                try:
+                    admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH)
+                    if admin_client is not None:
+                        admin_probe = supabase_select_rows(
+                            admin_client,
+                            "leads",
+                            columns="id",
+                            filters=primary_filters,
+                            limit=1,
+                        )
+                        if not admin_probe and fallback_filters is not None:
+                            admin_probe = supabase_select_rows(
+                                admin_client,
+                                "leads",
+                                columns="id",
+                                filters=fallback_filters,
+                                limit=1,
+                            )
+                        if admin_probe:
+                            logging.warning(
+                                "Supabase /api/leads visibility mismatch for user_id=%s: admin can see rows but API query returned none (possible RLS/key mismatch).",
+                                user_id,
+                            )
+                    else:
+                        settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
+                        if not bool(settings.get("has_service_role")):
+                            logging.warning(
+                                "Supabase /api/leads returned no rows and service-role key is not configured; RLS may block data visibility."
+                            )
+                except Exception as visibility_exc:
+                    logging.warning("Supabase /api/leads visibility probe failed: %s", visibility_exc)
+
             filtered_rows = _post_process_rows(rows)
             total = len(filtered_rows)
             page_items = filtered_rows[offset: offset + page_size]
+            print(f"Sending {len(page_items)} leads to frontend for user {user_id}")
             result = {
                 "count": len(page_items),
                 "total": total,
@@ -10470,6 +10504,7 @@ def create_app() -> FastAPI:
             rows = conn.execute(query, [*params, page_size, offset]).fetchall()
 
         page_items = _post_process_rows([dict(row) for row in rows])
+        print(f"Sending {len(page_items)} leads to frontend for user {user_id}")
         result = {
             "count": len(page_items),
             "total": total,
