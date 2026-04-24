@@ -4,6 +4,7 @@
 BEGIN;
 
 ALTER TABLE IF EXISTS public.leads
+  ADD COLUMN IF NOT EXISTS user_id text DEFAULT 'legacy',
   ADD COLUMN IF NOT EXISTS google_claimed bigint DEFAULT 0,
   ADD COLUMN IF NOT EXISTS has_pixel bigint DEFAULT 0,
   ADD COLUMN IF NOT EXISTS insecure_site bigint DEFAULT 0,
@@ -20,8 +21,16 @@ DECLARE
 BEGIN
   SELECT data_type INTO col_type
   FROM information_schema.columns
+  WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'user_id';
+  IF col_type IN ('smallint', 'integer', 'bigint', 'uuid') THEN
+    EXECUTE 'ALTER TABLE public.leads ALTER COLUMN user_id TYPE text USING (user_id::text)';
+  END IF;
+
+  SELECT data_type INTO col_type
+  FROM information_schema.columns
   WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'google_claimed';
   IF col_type = 'boolean' THEN
+    EXECUTE 'ALTER TABLE public.leads ALTER COLUMN google_claimed DROP DEFAULT';
     EXECUTE 'ALTER TABLE public.leads ALTER COLUMN google_claimed TYPE bigint USING (CASE WHEN google_claimed THEN 1 ELSE 0 END)';
   END IF;
 
@@ -29,6 +38,7 @@ BEGIN
   FROM information_schema.columns
   WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'has_pixel';
   IF col_type = 'boolean' THEN
+    EXECUTE 'ALTER TABLE public.leads ALTER COLUMN has_pixel DROP DEFAULT';
     EXECUTE 'ALTER TABLE public.leads ALTER COLUMN has_pixel TYPE bigint USING (CASE WHEN has_pixel THEN 1 ELSE 0 END)';
   END IF;
 
@@ -36,6 +46,7 @@ BEGIN
   FROM information_schema.columns
   WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'is_ads_client';
   IF col_type = 'boolean' THEN
+    EXECUTE 'ALTER TABLE public.leads ALTER COLUMN is_ads_client DROP DEFAULT';
     EXECUTE 'ALTER TABLE public.leads ALTER COLUMN is_ads_client TYPE bigint USING (CASE WHEN is_ads_client THEN 1 ELSE 0 END)';
   END IF;
 
@@ -43,12 +54,14 @@ BEGIN
   FROM information_schema.columns
   WHERE table_schema = 'public' AND table_name = 'leads' AND column_name = 'is_website_client';
   IF col_type = 'boolean' THEN
+    EXECUTE 'ALTER TABLE public.leads ALTER COLUMN is_website_client DROP DEFAULT';
     EXECUTE 'ALTER TABLE public.leads ALTER COLUMN is_website_client TYPE bigint USING (CASE WHEN is_website_client THEN 1 ELSE 0 END)';
   END IF;
 END $$;
 
 UPDATE public.leads
 SET
+  user_id = COALESCE(NULLIF(BTRIM(user_id), ''), 'legacy'),
   google_claimed = COALESCE(google_claimed, 0),
   has_pixel = COALESCE(has_pixel, 0),
   insecure_site = COALESCE(insecure_site, 0),
@@ -58,6 +71,9 @@ SET
   open_count = COALESCE(open_count, 0),
   campaign_step = COALESCE(campaign_step, 1)
 WHERE
+  user_id IS NULL
+  OR BTRIM(user_id) = ''
+  OR
   google_claimed IS NULL
   OR has_pixel IS NULL
   OR insecure_site IS NULL
@@ -68,6 +84,8 @@ WHERE
   OR campaign_step IS NULL;
 
 ALTER TABLE public.leads
+  ALTER COLUMN user_id SET DEFAULT 'legacy',
+  ALTER COLUMN user_id SET NOT NULL,
   ALTER COLUMN google_claimed SET DEFAULT 0,
   ALTER COLUMN google_claimed SET NOT NULL,
   ALTER COLUMN has_pixel SET DEFAULT 0,
