@@ -189,7 +189,7 @@ async def _enrich_single_lead(
 
     lead.fb_link = social_links.get("facebook")
     lead.ig_link = social_links.get("instagram")
-    lead.has_pixel = bool(has_pixel)
+    lead.has_pixel = int(bool(has_pixel))
     lead.tech_stack = ", ".join(tech_stack)
     lead.qualification_score = qualification_score
 

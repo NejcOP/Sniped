@@ -5361,6 +5361,23 @@ def get_table_columns_snapshot(db_path: Path, table_name: str) -> list[str]:
     return [str(row[1]) for row in rows]
 
 
+def _normalize_leads_bigint_flags(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    for key in (
+        "google_claimed",
+        "has_pixel",
+        "insecure_site",
+        "is_ads_client",
+        "is_website_client",
+        "follow_up_count",
+        "open_count",
+        "campaign_step",
+    ):
+        value = normalized.get(key)
+        normalized[key] = int(value) if isinstance(value, bool) else value
+    return normalized
+
+
 def replace_table_rows_snapshot(db_path: Path, table_name: str, rows: list[dict], columns: list[str]) -> None:
     with pgdb.connect(db_path) as conn:
         conn.execute(f"DELETE FROM {table_name}")
@@ -5420,6 +5437,8 @@ def sync_table_to_supabase(db_path: Path, table_name: str, config_path: Path) ->
         for _attempt in range(15):
             try:
                 filtered = [{k: v for k, v in row.items() if k not in excluded_cols} for row in rows]
+                if table_name == "leads":
+                    filtered = [_normalize_leads_bigint_flags(row) for row in filtered]
                 client.table(table_name).upsert(filtered).execute()
                 if excluded_cols:
                     logging.info(

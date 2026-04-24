@@ -11,14 +11,20 @@ class Lead:
     review_count: Optional[int]
     address: str
     search_keyword: str
-    google_claimed: Optional[bool] = None
+    google_claimed: Optional[int] = None
     linkedin_url: Optional[str] = None
     instagram_url: Optional[str] = None
     facebook_url: Optional[str] = None
     tiktok_url: Optional[str] = None
     ig_link: Optional[str] = None
     fb_link: Optional[str] = None
-    has_pixel: Optional[bool] = None
+    has_pixel: Optional[int] = None
+    insecure_site: Optional[int] = None
+    is_ads_client: Optional[int] = 0
+    is_website_client: Optional[int] = 0
+    follow_up_count: Optional[int] = 0
+    open_count: Optional[int] = 0
+    campaign_step: Optional[int] = 1
     tech_stack: Optional[str] = None
     email: Optional[str] = None
     qualification_score: Optional[float] = None

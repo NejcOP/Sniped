@@ -502,6 +502,27 @@ def _to_int_flag(value: Any) -> Optional[int]:
         return 0
 
 
+LEAD_INT_FLAG_FIELDS = (
+    "google_claimed",
+    "has_pixel",
+    "insecure_site",
+    "is_ads_client",
+    "is_website_client",
+    "follow_up_count",
+    "open_count",
+    "campaign_step",
+)
+
+
+def _coerce_bool_flags_for_lead_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    # PostgreSQL bigint columns reject boolean bind values; force bool -> int explicitly.
+    for key in LEAD_INT_FLAG_FIELDS:
+        if key in payload:
+            value = payload.get(key)
+            payload[key] = int(value) if isinstance(value, bool) else value
+    return payload
+
+
 def _clean_address(value: Any) -> str:
     raw = str(value or "").replace("\r", "\n")
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
@@ -597,10 +618,11 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         if value is not None:
             payload[key] = value
 
-    return payload
+    return _coerce_bool_flags_for_lead_payload(payload)
 
 
 def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
+    updates = _coerce_bool_flags_for_lead_payload(dict(updates or {}))
     for field_name, value in updates.items():
         if field_name in {
             "google_claimed",
