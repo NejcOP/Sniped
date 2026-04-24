@@ -4279,9 +4279,9 @@ def load_supabase_settings(config_path: Path) -> dict:
     except Exception:
         resolved_database_url = database_url
     shared_key = str(os.environ.get("SUPABASE_KEY") or ("" if env_only else supabase_cfg.get("key", "")) or "").strip()
+    # IMPORTANT: never infer service-role from shared/anon key. It must be explicit.
     service_role_key = str(
         os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        or shared_key
         or ("" if env_only else supabase_cfg.get("service_role_key", ""))
         or ("" if env_only else supabase_cfg.get("serviceRoleKey", ""))
         or ""
