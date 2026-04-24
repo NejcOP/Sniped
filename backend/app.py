@@ -10221,6 +10221,20 @@ def create_app() -> FastAPI:
         debug_all: bool = Query(default=False),
     ) -> dict:
         user_id = require_current_user_id(request)
+        print(f"Fetching leads for user_id: {user_id}")
+        print(
+            "Incoming /api/leads filters:",
+            {
+                "status": status,
+                "search": search,
+                "sort": sort,
+                "quick_filter": quick_filter,
+                "include_blacklisted": include_blacklisted,
+                "debug_all": debug_all,
+                "limit": limit,
+                "page": page,
+            },
+        )
         logging.info("[/api/leads] request resolved user_id=%s debug_all=%s", user_id, bool(debug_all))
         page_size = max(1, min(int(limit or 50), 200))
         page_number = max(1, int(page or 1))
@@ -10287,6 +10301,22 @@ def create_app() -> FastAPI:
             client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
+
+            try:
+                all_rows_probe = supabase_select_rows(client, "leads", columns="id", limit=1)
+                all_count_probe = len(
+                    supabase_select_rows(
+                        client,
+                        "leads",
+                        columns="id",
+                    )
+                )
+                print(
+                    f"Total leads in Supabase (no user_id filter): {all_count_probe}"
+                    + ("" if all_rows_probe else " (probe returned empty)")
+                )
+            except Exception as supabase_total_exc:
+                print(f"Could not fetch total leads in Supabase without user_id filter: {supabase_total_exc}")
 
             supabase_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
@@ -10500,6 +10530,13 @@ def create_app() -> FastAPI:
 
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
+
+        try:
+            with pgdb.connect(db_path) as conn:
+                total_all_local = int(conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0] or 0)
+            print(f"Total leads in local DB (no user_id filter): {total_all_local}")
+        except Exception as local_total_exc:
+            print(f"Could not fetch total leads in local DB without user_id filter: {local_total_exc}")
 
         select_clause = """
             SELECT
