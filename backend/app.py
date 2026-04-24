@@ -10283,7 +10283,10 @@ def create_app() -> FastAPI:
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
-            filters = {"user_id": user_id}
+            if str(user_id).isdigit():
+                filters = {"user_id": int(user_id)}
+            else:
+                filters = {"user_id": user_id}
             try:
                 rows = supabase_select_rows(
                     client,
@@ -10305,14 +10308,8 @@ def create_app() -> FastAPI:
                         desc=True,
                     )
                 except Exception as exc2:
-                    logging.warning("Supabase leads user_id filter failed (column missing?), returning unfiltered: %s", exc2)
-                    rows = supabase_select_rows(
-                        client,
-                        "leads",
-                        columns=legacy_columns,
-                        order_by="id",
-                        desc=True,
-                    )
+                    logging.warning("Supabase leads user_id filter failed; returning empty result instead of unfiltered query: %s", exc2)
+                    rows = []
                 for row in rows:
                     row.setdefault("ai_description", None)
                     row.setdefault("google_claimed", None)
