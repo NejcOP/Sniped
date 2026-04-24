@@ -10579,6 +10579,7 @@ def create_app() -> FastAPI:
                     logging.warning("[/api/leads] direct DB fallback diagnostics failed: %s", fallback_exc)
 
             page_items = _json_safe_rows(filtered_rows[offset: offset + page_size])
+            print(f"Leads found for user_id {user_id}: total={total}, page_items={len(page_items)}")
             print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
             result = {
                 "count": len(page_items),
@@ -10699,6 +10700,7 @@ def create_app() -> FastAPI:
             rows = conn.execute(query, [*params, page_size, offset]).fetchall()
 
         page_items = _json_safe_rows(_post_process_rows([dict(row) for row in rows]))
+        print(f"Leads found for user_id {user_id}: total={total}, page_items={len(page_items)}")
         print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
         result = {
             "count": len(page_items),
