@@ -9,6 +9,8 @@ from typing import Any, Optional, Sequence
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint, asc, create_engine, desc, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .models import Lead
@@ -539,6 +541,34 @@ def _is_duplicate_lead_identity_error(exc: Exception) -> bool:
     )
 
 
+LEAD_UPSERT_CONFLICT_COLUMNS = ("user_id", "business_name", "address")
+LEAD_UPSERT_IMMUTABLE_COLUMNS = {
+    "id",
+    "created_at",
+    *LEAD_UPSERT_CONFLICT_COLUMNS,
+}
+
+
+def _build_lead_upsert_statement(payloads: list[dict[str, Any]], dialect_name: str) -> Any:
+    if dialect_name == "postgresql":
+        stmt = pg_insert(LeadRecord).values(payloads)
+    elif dialect_name == "sqlite":
+        stmt = sqlite_insert(LeadRecord).values(payloads)
+    else:
+        return None
+
+    updatable_columns = [
+        column.name
+        for column in LeadRecord.__table__.columns
+        if column.name not in LEAD_UPSERT_IMMUTABLE_COLUMNS
+    ]
+    update_set = {column_name: getattr(stmt.excluded, column_name) for column_name in updatable_columns}
+    return stmt.on_conflict_do_update(
+        index_elements=list(LEAD_UPSERT_CONFLICT_COLUMNS),
+        set_=update_set,
+    )
+
+
 def _clean_address(value: Any) -> str:
     raw = str(value or "").replace("\r", "\n")
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
@@ -734,23 +764,16 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
         payload = _lead_to_create_payload(lead, user_id)
-        business_name, address = _lead_identity_from_payload(payload)
-        existing = session.execute(
-            select(LeadRecord.id).where(
-                LeadRecord.user_id == str(user_id),
-                LeadRecord.business_name == business_name,
-                LeadRecord.address == address,
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return False
-        session.add(LeadRecord(**payload))
+        statement = _build_lead_upsert_statement([payload], session.bind.dialect.name if session.bind is not None else "")
         try:
+            if statement is None:
+                # Fallback for unsupported dialects.
+                session.merge(LeadRecord(**payload))
+            else:
+                session.execute(statement)
             session.commit()
         except Exception as exc:
             session.rollback()
-            if _is_duplicate_lead_identity_error(exc):
-                return False
             _log_payload_types("upsert_lead", payload)
             raise
         return True
@@ -763,58 +786,31 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
-        existing_records = session.execute(
-            select(LeadRecord.business_name, LeadRecord.address).where(LeadRecord.user_id == str(user_id))
-        ).all()
-        existing_keys = {
-            (str(row[0] or "").strip(), str(row[1] or "").strip())
-            for row in existing_records
-        }
-        inserted = 0
-        inserted_payloads: list[dict[str, Any]] = []
+        # Deduplicate within current batch to avoid conflicting updates on the same key in one statement.
+        payload_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         for lead in leads:
             payload = _lead_to_create_payload(lead, user_id)
             key = _lead_identity_from_payload(payload)
-            if key in existing_keys:
-                continue
-            session.add(LeadRecord(**payload))
-            inserted_payloads.append(payload)
-            existing_keys.add(key)
-            inserted += 1
-        if inserted:
-            try:
-                session.commit()
-            except Exception as exc:
-                session.rollback()
-                if _is_duplicate_lead_identity_error(exc):
-                    logging.warning("Duplicate lead identity detected during batch_upsert_leads; retrying rows individually.")
-                    recovered = 0
-                    for payload in inserted_payloads:
-                        business_name, address = _lead_identity_from_payload(payload)
-                        already_exists = session.execute(
-                            select(LeadRecord.id).where(
-                                LeadRecord.user_id == str(user_id),
-                                LeadRecord.business_name == business_name,
-                                LeadRecord.address == address,
-                            )
-                        ).scalar_one_or_none()
-                        if already_exists is not None:
-                            continue
-                        session.add(LeadRecord(**payload))
-                        try:
-                            session.commit()
-                            recovered += 1
-                        except Exception as row_exc:
-                            session.rollback()
-                            if _is_duplicate_lead_identity_error(row_exc):
-                                continue
-                            _log_payload_types("batch_upsert_leads#recovery", payload)
-                            raise
-                    return recovered
-                for idx, payload in enumerate(inserted_payloads, start=1):
-                    _log_payload_types(f"batch_upsert_leads#{idx}", payload)
-                raise
-        return inserted
+            payload_by_key[key] = payload
+
+        payloads = list(payload_by_key.values())
+        if not payloads:
+            return 0
+
+        statement = _build_lead_upsert_statement(payloads, session.bind.dialect.name if session.bind is not None else "")
+        try:
+            if statement is None:
+                for payload in payloads:
+                    session.merge(LeadRecord(**payload))
+            else:
+                session.execute(statement)
+            session.commit()
+        except Exception:
+            session.rollback()
+            for idx, payload in enumerate(payloads, start=1):
+                _log_payload_types(f"batch_upsert_leads#{idx}", payload)
+            raise
+        return len(payloads)
 
 
 def fetch_target_leads(db_path: str = "runtime-db", min_score: float = 7.0, user_id: Optional[str] = None) -> list[dict[str, Any]]:
