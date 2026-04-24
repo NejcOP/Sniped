@@ -7640,6 +7640,17 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     ensure_scrape_tables(db_path)
     task_id = int(payload_data["task_id"])
     task_user_id = str(payload_data.get("user_id") or "").strip()
+    owner_user_id = str(payload_data.get("owner_id") or payload_data.get("request_user_id") or "").strip()
+    if owner_user_id and task_user_id and owner_user_id != task_user_id:
+        logging.warning(
+            "[scrape-task:%s] user_id mismatch in payload: task user_id=%s owner_id=%s; forcing owner_id",
+            task_id,
+            task_user_id,
+            owner_user_id,
+        )
+        task_user_id = owner_user_id
+    elif owner_user_id and not task_user_id:
+        task_user_id = owner_user_id
     if not task_user_id:
         raise RuntimeError("Missing user_id in scrape task payload. Refusing to write unscoped leads.")
     keyword = str(payload_data.get("keyword", "") or "").strip()
@@ -7942,6 +7953,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             except Exception as dedup_exc:
                 logging.warning("Supabase dedup check failed (will rely on DB constraints): %s", dedup_exc)
 
+        logging.info("[scrape-task:%s] Persisting leads with user_id=%s", task_id, task_user_id)
         inserted = batch_upsert_leads(leads, db_path=str(db_path), user_id=task_user_id)
         logging.info("[scrape-task:%s] Saving to DB complete | inserted=%s", task_id, int(inserted))
         logging.info("SUCCESS: %s leads saved to database", int(inserted))
@@ -10209,6 +10221,7 @@ def create_app() -> FastAPI:
         debug_all: bool = Query(default=False),
     ) -> dict:
         user_id = require_current_user_id(request)
+        logging.info("[/api/leads] request resolved user_id=%s debug_all=%s", user_id, bool(debug_all))
         page_size = max(1, min(int(limit or 50), 200))
         page_number = max(1, int(page or 1))
         offset = max(0, (page_number - 1) * page_size)
@@ -10402,6 +10415,75 @@ def create_app() -> FastAPI:
 
             filtered_rows = _post_process_rows(rows)
             total = len(filtered_rows)
+
+            if total == 0:
+                try:
+                    direct_engine = pg_get_engine(str(DEFAULT_DB_PATH))
+                    with direct_engine.connect() as conn:
+                        total_all = int(conn.execute(text("SELECT COUNT(*) FROM leads")).scalar() or 0)
+                        total_for_user = int(
+                            conn.execute(
+                                text("SELECT COUNT(*) FROM leads WHERE CAST(user_id AS TEXT) = :uid"),
+                                {"uid": str(user_id)},
+                            ).scalar()
+                            or 0
+                        )
+                        sample_user_rows = conn.execute(
+                            text(
+                                "SELECT CAST(user_id AS TEXT) AS uid, COUNT(*) AS c "
+                                "FROM leads GROUP BY CAST(user_id AS TEXT) ORDER BY c DESC LIMIT 5"
+                            )
+                        ).fetchall()
+                        sample_users = [dict(r._mapping) for r in sample_user_rows]
+
+                    logging.warning(
+                        "[/api/leads] Supabase returned 0 rows for user_id=%s (debug_all=%s). Direct DB counts: total_all=%s total_for_user=%s sample_users=%s",
+                        user_id,
+                        bool(debug_all),
+                        total_all,
+                        total_for_user,
+                        sample_users,
+                    )
+
+                    if total_for_user > 0 or (debug_all and total_all > 0):
+                        where_sql = ""
+                        params: dict[str, Any] = {"limit": page_size, "offset": offset}
+                        if not debug_all:
+                            where_sql = " WHERE CAST(user_id AS TEXT) = :uid"
+                            params["uid"] = str(user_id)
+
+                        if normalized_sort == "name":
+                            order_sql = "ORDER BY LOWER(COALESCE(business_name, '')) ASC, id DESC"
+                        elif normalized_sort in {"score", "best"}:
+                            order_sql = "ORDER BY COALESCE(ai_score, 0) DESC, created_at DESC, id DESC"
+                        else:
+                            order_sql = "ORDER BY created_at DESC, id DESC"
+
+                        with direct_engine.connect() as conn:
+                            direct_rows_raw = conn.execute(
+                                text(f"SELECT * FROM leads{where_sql} {order_sql} LIMIT :limit OFFSET :offset"),
+                                params,
+                            ).fetchall()
+
+                        direct_rows = _post_process_rows([dict(r._mapping) for r in direct_rows_raw])
+                        direct_page_items = _json_safe_rows(direct_rows)
+                        effective_total = total_for_user if not debug_all else total_all
+                        direct_result = {
+                            "count": len(direct_page_items),
+                            "total": effective_total,
+                            "page": page_number,
+                            "page_size": page_size,
+                            "has_more": offset + len(direct_page_items) < effective_total,
+                            "items": direct_page_items,
+                            "leads": direct_page_items,
+                            "source": "direct-db-fallback",
+                        }
+                        _set_cached_leads(cache_key, direct_result)
+                        print(f"Sending {len(direct_page_items)} leads to frontend for user {user_id} (debug_all={debug_all}) source=direct-db-fallback")
+                        return direct_result
+                except Exception as fallback_exc:
+                    logging.warning("[/api/leads] direct DB fallback diagnostics failed: %s", fallback_exc)
+
             page_items = _json_safe_rows(filtered_rows[offset: offset + page_size])
             print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
             result = {
@@ -12029,6 +12111,8 @@ def create_app() -> FastAPI:
                 "keyword": payload.keyword,
                 "results": payload_data["results"],
                 "country": payload_data["country"],
+                "owner_id": user_id,
+                "request_user_id": user_id,
             },
         )
 

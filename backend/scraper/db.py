@@ -763,6 +763,7 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "legacy"
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
+        logging.info("[upsert_lead] using user_id=%s business_name=%s", str(user_id), str(getattr(lead, "business_name", "") or ""))
         payload = _lead_to_create_payload(lead, user_id)
         statement = _build_lead_upsert_statement([payload], session.bind.dialect.name if session.bind is not None else "")
         try:
@@ -783,6 +784,7 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
     if not leads:
         return 0
 
+    logging.info("[batch_upsert_leads] using user_id=%s leads=%s", str(user_id), len(leads))
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
