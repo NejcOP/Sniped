@@ -10782,6 +10782,43 @@ def create_app() -> FastAPI:
 
         return {"status": "created", "lead_id": lead_id, "blacklisted_synced": blacklisted_synced}
 
+    @app.post("/api/leads/repair-hardcoded-user")
+    def repair_hardcoded_user_leads(request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        repaired_supabase = 0
+        repaired_local = 0
+
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            try:
+                admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+                if admin_client is not None:
+                    # Update all historic rows accidentally written with hardcoded user_id='1'.
+                    response = admin_client.table("leads").update({"user_id": str(user_id)}).eq("user_id", "1").execute()
+                    repaired_supabase = len(getattr(response, "data", None) or [])
+            except Exception as exc:
+                logging.warning("Failed to repair hardcoded Supabase user_id rows: %s", exc)
+
+        try:
+            db_path = DEFAULT_DB_PATH
+            ensure_system_tables(db_path)
+            with pgdb.connect(db_path) as conn:
+                repaired_local = conn.execute(
+                    "UPDATE leads SET user_id = ? WHERE CAST(user_id AS TEXT) = '1'",
+                    (str(user_id),),
+                ).rowcount or 0
+                conn.commit()
+        except Exception as exc:
+            logging.warning("Failed to repair hardcoded local user_id rows: %s", exc)
+
+        _invalidate_leads_cache()
+        print(f"Repaired hardcoded leads for user_id {user_id}: supabase={repaired_supabase}, local={repaired_local}")
+        return {
+            "status": "ok",
+            "user_id": str(user_id),
+            "repaired_supabase": int(repaired_supabase),
+            "repaired_local": int(repaired_local),
+        }
+
     @app.post("/api/leads/score")
     async def score_leads_endpoint(payload: BulkLeadScoreRequest, request: Request):
         payload_dict = payload.dict()

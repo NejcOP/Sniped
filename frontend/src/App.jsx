@@ -1779,6 +1779,17 @@ function App({ initialTab = 'leads' }) {
       setLoadingLeads(true)
     }
     try {
+      if (!hardcodedUserRepairAttemptedRef.current) {
+        hardcodedUserRepairAttemptedRef.current = true
+        try {
+          await fetchJson('/api/leads/repair-hardcoded-user', {
+            method: 'POST',
+          })
+        } catch {
+          // Non-blocking: continue loading leads even if repair endpoint is unavailable.
+        }
+      }
+
       const params = new URLSearchParams({
         limit: String(LEADS_PAGE_SIZE),
         page: String(leadPage + 1),
@@ -2057,6 +2068,7 @@ function App({ initialTab = 'leads' }) {
   const enrichTask = tasks.enrich || getIdleTask('enrich')
   const mailerTask = tasks.mailer || getIdleTask('mailer')
   const scrapeTaskStateRef = useRef({ id: null, status: 'idle' })
+  const hardcodedUserRepairAttemptedRef = useRef(false)
 
   useEffect(() => {
     if (!mailerTask.running) {
