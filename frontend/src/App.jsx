@@ -54,6 +54,7 @@ const SETUP_MILESTONE_EUR = 6500
 const DEFAULT_AVERAGE_DEAL_VALUE = 1000
 const LEADS_PAGE_SIZE = 50
 const BYPASS_LEAD_FILTERS = true
+const DEBUG_ALL_LEADS = true
 
 const QUALIFIER_LOSS_MULTIPLIER_RULES = [
   { terms: ['dentist', 'dental', 'orthodont'], multiplier: 1.55 },
@@ -1785,6 +1786,9 @@ function App({ initialTab = 'leads' }) {
         include_blacklisted: showBlacklisted ? '1' : '0',
         _ts: String(Date.now()),
       })
+      if (DEBUG_ALL_LEADS) {
+        params.set('debug_all', '1')
+      }
       if (leadStatusFilter !== 'all') {
         params.set('status', leadStatusFilter)
       }
@@ -1795,16 +1799,25 @@ function App({ initialTab = 'leads' }) {
         params.set('search', debouncedLeadSearch.trim())
       }
       const data = await fetchJson(`/api/leads?${params.toString()}`)
-      const items = Array.isArray(data?.items)
-        ? data.items
-        : Array.isArray(data?.leads)
-          ? data.leads
-          : Array.isArray(data?.data)
-            ? data.data
-            : []
+      const rawItems = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data?.leads)
+            ? data.leads
+            : Array.isArray(data?.data)
+              ? data.data
+              : []
+      const items = rawItems.map((lead) => ({
+        ...lead,
+        business_name: lead?.business_name || lead?.name || '',
+        contact_name: lead?.contact_name || lead?.contact || '',
+        website_url: lead?.website_url || lead?.website || '',
+        phone_number: lead?.phone_number || lead?.phone || '',
+      }))
       console.log('[LeadManagement] /api/leads response', {
         url: `/api/leads?${params.toString()}`,
-        total: Number(data?.total || data?.count || items.length || 0),
+        total: Number(data?.total || data?.count || data?.total_count || items.length || 0),
         itemsLength: items.length,
         sample: items.slice(0, 3),
       })

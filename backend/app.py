@@ -10206,6 +10206,7 @@ def create_app() -> FastAPI:
         sort: str = Query("recent"),
         quick_filter: str = Query("all"),
         include_blacklisted: bool = Query(default=False),
+        debug_all: bool = Query(default=False),
     ) -> dict:
         user_id = require_current_user_id(request)
         page_size = max(1, min(int(limit or 50), 200))
@@ -10217,10 +10218,14 @@ def create_app() -> FastAPI:
         normalized_quick_filter = str(quick_filter or "all").strip().lower() or "all"
 
         cache_scope = f"{str(DEFAULT_DB_PATH)}:{int(is_supabase_primary_enabled(DEFAULT_CONFIG_PATH))}"
-        cache_key = f"{cache_scope}:{user_id}:{page_size}:{page_number}:{normalized_status}:{normalized_search}:{normalized_sort}:{normalized_quick_filter}:{int(include_blacklisted)}"
+        cache_key = f"{cache_scope}:{user_id}:{page_size}:{page_number}:{normalized_status}:{normalized_search}:{normalized_sort}:{normalized_quick_filter}:{int(include_blacklisted)}:{int(debug_all)}"
         cached = _get_cached_leads(cache_key)
         if cached is not None:
             return cached
+
+        def _json_safe_rows(raw_rows: list[dict]) -> list[dict]:
+            # Ensure every value is JSON-serializable for FastAPI responses.
+            return json.loads(json.dumps(raw_rows, default=str))
 
         def _post_process_rows(raw_rows: list[dict]) -> list[dict]:
             normalized_rows: list[dict] = []
@@ -10266,7 +10271,7 @@ def create_app() -> FastAPI:
             return normalized_rows
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
 
@@ -10284,8 +10289,8 @@ def create_app() -> FastAPI:
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
-            primary_filters = {"user_id": int(user_id)} if str(user_id).isdigit() else {"user_id": str(user_id)}
-            fallback_filters = {"user_id": str(user_id)} if str(user_id).isdigit() else None
+            primary_filters = None if debug_all else ({"user_id": int(user_id)} if str(user_id).isdigit() else {"user_id": str(user_id)})
+            fallback_filters = None if debug_all else ({"user_id": str(user_id)} if str(user_id).isdigit() else None)
             try:
                 rows = supabase_select_rows(
                     client,
@@ -10397,8 +10402,8 @@ def create_app() -> FastAPI:
 
             filtered_rows = _post_process_rows(rows)
             total = len(filtered_rows)
-            page_items = filtered_rows[offset: offset + page_size]
-            print(f"Sending {len(page_items)} leads to frontend for user {user_id}")
+            page_items = _json_safe_rows(filtered_rows[offset: offset + page_size])
+            print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
             result = {
                 "count": len(page_items),
                 "total": total,
@@ -10406,6 +10411,7 @@ def create_app() -> FastAPI:
                 "page_size": page_size,
                 "has_more": offset + len(page_items) < total,
                 "items": page_items,
+                "leads": page_items,
             }
             _set_cached_leads(cache_key, result)
             return result
@@ -10465,8 +10471,12 @@ def create_app() -> FastAPI:
                 client_folder_id
             FROM leads
         """
-        where_clauses = ["user_id = ?"]
-        params: list[Any] = [user_id]
+        where_clauses: list[str] = []
+        params: list[Any] = []
+
+        if not debug_all:
+            where_clauses.append("user_id = ?")
+            params.append(user_id)
 
         if normalized_status:
             where_clauses.append("LOWER(COALESCE(status, 'pending')) = ?")
@@ -10496,16 +10506,17 @@ def create_app() -> FastAPI:
             order_clause = "COALESCE(ai_score, 0) DESC, datetime(COALESCE(created_at, scraped_at)) DESC, id DESC"
 
         where_sql = " AND ".join(where_clauses)
-        count_query = f"SELECT COUNT(*) FROM leads WHERE {where_sql}"
-        query = f"{select_clause} WHERE {where_sql} ORDER BY {order_clause} LIMIT ? OFFSET ?"
+        where_fragment = f" WHERE {where_sql}" if where_sql else ""
+        count_query = f"SELECT COUNT(*) FROM leads{where_fragment}"
+        query = f"{select_clause}{where_fragment} ORDER BY {order_clause} LIMIT ? OFFSET ?"
 
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             total = int(conn.execute(count_query, params).fetchone()[0] or 0)
             rows = conn.execute(query, [*params, page_size, offset]).fetchall()
 
-        page_items = _post_process_rows([dict(row) for row in rows])
-        print(f"Sending {len(page_items)} leads to frontend for user {user_id}")
+        page_items = _json_safe_rows(_post_process_rows([dict(row) for row in rows]))
+        print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
         result = {
             "count": len(page_items),
             "total": total,
@@ -10513,6 +10524,7 @@ def create_app() -> FastAPI:
             "page_size": page_size,
             "has_more": offset + len(page_items) < total,
             "items": page_items,
+            "leads": page_items,
         }
         _set_cached_leads(cache_key, result)
         return result
