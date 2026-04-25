@@ -125,9 +125,10 @@ class LeadEnricher:
     def run(
         self,
         limit: Optional[int] = None,
+        lead_ids: Optional[list[int]] = None,
         progress_callback: Optional[Callable[[int, int, int, Optional[str], Optional[str]], None]] = None,
     ) -> tuple[int, int]:
-        leads = self._fetch_leads_for_enrichment(limit=limit)
+        leads = self._fetch_leads_for_enrichment(limit=limit, lead_ids=lead_ids)
         if not leads:
             logging.info("No scraped leads available for enrichment.")
             return 0, 0
@@ -383,7 +384,7 @@ class LeadEnricher:
         for statement in statements:
             self._execute(text(statement))
 
-    def _fetch_leads_for_enrichment(self, limit: Optional[int] = None) -> List[dict[str, Any]]:
+    def _fetch_leads_for_enrichment(self, limit: Optional[int] = None, lead_ids: Optional[list[int]] = None) -> List[dict[str, Any]]:
         query = """
                 SELECT
                     id,
@@ -414,6 +415,15 @@ class LeadEnricher:
         if self.user_id:
             query += " AND user_id = :user_id"
             params["user_id"] = self.user_id
+
+        normalized_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
+        if normalized_ids:
+            id_params: list[str] = []
+            for idx, lead_id in enumerate(normalized_ids[:500]):
+                key = f"lead_id_{idx}"
+                id_params.append(f":{key}")
+                params[key] = int(lead_id)
+            query += f" AND id IN ({', '.join(id_params)})"
 
         query += " ORDER BY id ASC"
 

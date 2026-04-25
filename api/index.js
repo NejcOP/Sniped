@@ -21,6 +21,18 @@ function normalizeBaseUrl(value) {
   return withScheme.replace(/\/$/, '')
 }
 
+function setCorsHeaders(req, res) {
+  const origin = String(req.headers?.origin || '')
+  if (origin && (origin.endsWith('.vercel.app') || origin.startsWith('http://localhost'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', 'https://sniped-one.vercel.app')
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type')
+}
+
 function buildQueryString(query) {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query || {})) {
@@ -35,36 +47,12 @@ function buildQueryString(query) {
   return qs ? `?${qs}` : ''
 }
 
-function extractPathParts(pathValue) {
-  if (Array.isArray(pathValue)) {
-    return pathValue
-      .map((part) => String(part).replace(/^\/+|\/+$/g, ''))
-      .filter(Boolean)
-  }
-  const single = String(pathValue || '').replace(/^\/+|\/+$/g, '')
-  return single ? [single] : []
-}
-
-function resolveCatchAllPathParts(req) {
-  const direct = extractPathParts(req.query?.path || req.query?._path)
-  if (direct.length) return direct
-
+function resolveApiPath(req) {
   const rawUrl = String(req.url || '')
   const pathname = rawUrl.split('?')[0] || ''
-  const match = pathname.match(/^\/api\/(.+)$/)
-  return extractPathParts(match ? match[1] : '')
-}
-
-function setCorsHeaders(req, res) {
-  const origin = String(req.headers?.origin || '')
-  if (origin && (origin.endsWith('.vercel.app') || origin.startsWith('http://localhost'))) {
-    res.setHeader('Access-Control-Allow-Origin', origin)
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', 'https://sniped-one.vercel.app')
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true')
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type')
+  const stripped = pathname.replace(/^\/api\/?/, '')
+  const cleaned = String(stripped || '').replace(/^\/+|\/+$/g, '')
+  return cleaned ? `/${cleaned}` : ''
 }
 
 async function readRawBody(req) {
@@ -91,8 +79,7 @@ module.exports = async (req, res) => {
     })
   }
 
-  const pathParts = resolveCatchAllPathParts(req)
-  const pathSuffix = pathParts.length ? `/${pathParts.join('/')}` : ''
+  const pathSuffix = resolveApiPath(req)
   const queryString = buildQueryString(req.query)
   const targetUrl = `${backendBase}/api${pathSuffix}${queryString}`
 

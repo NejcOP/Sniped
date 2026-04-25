@@ -277,6 +277,7 @@ class ScrapeRequest(BaseModel):
 
 class EnrichRequest(BaseModel):
     limit: Optional[int] = Field(default=None, ge=1)
+    lead_ids: Optional[list[int]] = None
     headless: bool = True
     output_csv: Optional[str] = None
     skip_export: bool = False
@@ -8178,6 +8179,11 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             user_id=payload_data.get("user_id"),
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
         )
+        ai_key_configured = bool(getattr(enricher, "openai_api_key", None))
+        progress_state["ai_key_configured"] = ai_key_configured
+        if not ai_key_configured:
+            progress_state["status_message"] = "OPENAI_API_KEY missing on Railway. Using heuristic enrichment mode."
+            update_task_progress(db_path, task_id, progress_state)
 
         phase_labels = {
             "starting": "Preparing enrichment engine...",
@@ -8204,6 +8210,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             progress_state["current_lead"] = current_lead
             progress_state["current_phase"] = phase_key
             progress_state["status_message"] = phase_labels.get(phase_key, phase_labels["enriching"])
+            progress_state["ai_key_configured"] = ai_key_configured
             update_task_progress(db_path, task_id, progress_state)
 
         enrich_semaphore = getattr(_app.state, "enrich_semaphore", None)
@@ -8228,6 +8235,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             update_task_progress(db_path, task_id, progress_state)
             processed, with_email = enricher.run(
                 limit=payload_data.get("limit"),
+                lead_ids=payload_data.get("lead_ids") or None,
                 progress_callback=_on_enrich_progress,
             )
         finally:
@@ -8257,7 +8265,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
         credits_balance: Optional[int] = None
         credits_limit: Optional[int] = None
         billing_warning: Optional[str] = None
-        if processed > 0:
+        if processed > 0 and int(payload_data.get("_credits_per_success") or 0) > 0:
             try:
                 billing = deduct_credits_on_success(
                     str(payload_data.get("user_id") or ""),
@@ -8281,6 +8289,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             result_payload={
                 "requested_limit": int(payload_data.get("requested_limit") or payload_data.get("limit") or 0),
                 "effective_limit": int(payload_data.get("limit") or 0),
+                "requested_lead_ids": int(len(payload_data.get("lead_ids") or [])),
                 "processed": processed,
                 "with_email": with_email,
                 "queued_for_mail": queued_for_mail,
@@ -8290,6 +8299,12 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
                 "credits_balance": credits_balance,
                 "credits_limit": credits_limit,
                 "billing_warning": billing_warning,
+                "ai_key_configured": ai_key_configured,
+                "status_message": (
+                    f"No eligible leads found for enrichment (requested ids: {len(payload_data.get('lead_ids') or [])})."
+                    if int(processed or 0) == 0
+                    else "Enrichment completed."
+                ),
             },
         )
     except TimeoutError:
@@ -13384,12 +13399,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail="Database offline")
 
         payload_data = payload.model_dump()
-        session_token, billing, access = resolve_plan_access_context(
-            request,
-            fallback_token=payload_data.get("token"),
-            feature_key="deep_analysis",
-            allow_stripe_recovery=False,
-        )
+        # Force unlock enrichment for all plans: keep authentication, bypass plan checks.
+        session_token = require_authenticated_session(request, fallback_token=payload_data.get("token"))
+        billing: dict[str, Any] = {}
+        try:
+            billing = load_user_billing_context(session_token, allow_stripe_recovery=False)
+        except Exception:
+            billing = {}
+        access = get_plan_feature_access(_normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY))
         user_id = require_current_user_id(request, fallback_token=payload_data.get("token"), db_path=db_path)
         session_token = require_authenticated_session(request, fallback_token=payload_data.pop("token", ""))
         payload_data["user_niche"] = resolve_user_niche_from_user_id(user_id, db_path=db_path)
@@ -13400,9 +13417,12 @@ def create_app() -> FastAPI:
         effective_limit = max(1, min(requested_limit, 200))
         payload_data["limit"] = effective_limit
         payload_data["requested_limit"] = requested_limit
-        reserve_ai_credits_or_raise(user_id, feature_key="enrich", db_path=db_path)
-        consume_ai_usage_or_raise(session_token, units=max(1, min(effective_limit, 500)), db_path=db_path)
-        payload_data["_credits_per_success"] = get_ai_credit_cost("enrich")
+        payload_data["_credits_per_success"] = 0
+        raw_lead_ids = payload_data.get("lead_ids") or []
+        if isinstance(raw_lead_ids, list):
+            payload_data["lead_ids"] = [int(x) for x in raw_lead_ids if str(x).strip().isdigit()][:500]
+        else:
+            payload_data["lead_ids"] = []
 
         # High-scale mode guard: production throughput should run on Supabase/PostgreSQL primary mode.
         if os.environ.get("SNIPED_SCALE_MODE", os.environ.get("LEADFLOW_SCALE_MODE", "0")) == "1" and not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):

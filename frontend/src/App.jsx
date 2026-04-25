@@ -5227,17 +5227,45 @@ function App({ initialTab = 'leads' }) {
   }
   function onEnrichSubmit(e) {
     e?.preventDefault?.()
-    if (creditsBalance <= 0) {
-      toast.error('Out of credits. Please upgrade or buy more credits.')
-      return
-    }
     const requested = Number(enrichForm.limit)
     const normalizedBatchSize = Math.max(1, Math.min(Number.isFinite(requested) ? Math.floor(requested) : 50, 200))
     if (normalizedBatchSize !== requested) {
       setEnrichForm((prev) => ({ ...prev, limit: normalizedBatchSize }))
     }
+
+    const doneStatuses = new Set([
+      'enriched',
+      'queued_mail',
+      'emailed',
+      'interested',
+      'replied',
+      'meeting set',
+      'zoom scheduled',
+      'closed',
+      'paid',
+      'invalid_email',
+    ])
+    const selectedLeadIds = leads
+      .filter((lead) => {
+        const status = String(lead.status || '').toLowerCase().trim()
+        const enrichmentStatus = String(lead.enrichment_status || '').toLowerCase().trim()
+        if (!lead?.id) return false
+        if (lead.enriched_at != null && String(lead.enriched_at).trim() !== '') return false
+        if (doneStatuses.has(status)) return false
+        return ['pending', 'failed', '', 'processing'].includes(enrichmentStatus) || status === 'scraped'
+      })
+      .map((lead) => Number(lead.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .slice(0, normalizedBatchSize)
+
+    if (!selectedLeadIds.length) {
+      toast('No eligible leads to enrich in current view.', { icon: 'ℹ️' })
+      return
+    }
+
     void startTask('enrich', '/api/enrich', {
       limit: normalizedBatchSize,
+      lead_ids: selectedLeadIds,
       headless: Boolean(enrichForm.headless),
       skip_export: Boolean(enrichForm.skipExport),
       token: getStoredValue('lf_token') || undefined,
