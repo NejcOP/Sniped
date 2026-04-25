@@ -9435,8 +9435,9 @@ def create_app() -> FastAPI:
         allow_origins=allowed_cors_origins,
         allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^http:\/\/localhost(:\d+)?$",
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        # Explicitly include the critical cross-origin flow used by Vercel and localhost.
+        allow_methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],
     )
 
     async def _log_playwright_runtime_diagnostics() -> None:

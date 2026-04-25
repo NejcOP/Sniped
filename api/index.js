@@ -48,9 +48,19 @@ function buildQueryString(query) {
 }
 
 function resolveApiPath(req) {
+  const qp = req.query?.path
+  if (Array.isArray(qp) && qp.length) {
+    const joined = qp.map((part) => String(part || '').replace(/^\/+|\/+$/g, '')).filter(Boolean).join('/')
+    return joined ? `/${joined}` : ''
+  }
+  if (typeof qp === 'string' && qp.trim()) {
+    const cleanedQp = qp.replace(/^\/+|\/+$/g, '')
+    return cleanedQp ? `/${cleanedQp}` : ''
+  }
+
   const rawUrl = String(req.url || '')
   const pathname = rawUrl.split('?')[0] || ''
-  const stripped = pathname.replace(/^\/api\/?/, '')
+  const stripped = pathname.replace(/^\/api\/?/, '').replace(/^index\/?/, '')
   const cleaned = String(stripped || '').replace(/^\/+|\/+$/g, '')
   return cleaned ? `/${cleaned}` : ''
 }
@@ -112,6 +122,7 @@ module.exports = async (req, res) => {
   } catch (error) {
     res.setHeader('Content-Type', 'application/json')
     return res.status(502).json({
+      target_url: targetUrl,
       detail: `Backend request failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
     })
   }
