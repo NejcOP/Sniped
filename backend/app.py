@@ -7763,6 +7763,24 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 int(scanned_count),
             )
 
+            # ── Immediate per-lead commit to Supabase ────────────────────
+            # Commit each found lead to Supabase the moment it is discovered so
+            # the dashboard table updates in real-time and no data is lost if the
+            # scraper crashes mid-run.
+            if _lead is not None and task_user_id:
+                business_name_hint = str(getattr(_lead, "business_name", "") or "").strip() or "<unknown>"
+                print(f"DEBUG: Attempting to save {business_name_hint} to DB...", flush=True)
+                logging.info("[scrape-task:%s] Immediate save: %s", task_id, business_name_hint)
+                try:
+                    _immediate_count = batch_upsert_leads([_lead], db_path=str(db_path), user_id=task_user_id)
+                    if _immediate_count > 0 and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+                        try:
+                            maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+                        except Exception as _sync_exc:
+                            logging.warning("[scrape-task:%s] Immediate Supabase sync failed: %s", task_id, _sync_exc)
+                except Exception as _imm_exc:
+                    logging.warning("[scrape-task:%s] Immediate lead save failed for %s: %s", task_id, business_name_hint, _imm_exc)
+
         scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
         scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
 
@@ -8037,8 +8055,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             conn.commit()
 
         blacklisted_synced = sync_blacklisted_leads(db_path)
-        if inserted or blacklisted_synced:
-            maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        # Always sync to Supabase regardless of insertion count so leads saved
+        # via the per-lead immediate path are not double-synced but any that
+        # failed immediate sync are caught here as a safety net.
+        maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
         _invalidate_leads_cache()
 
         exported = 0
@@ -9849,6 +9869,67 @@ def create_app() -> FastAPI:
             "has_publishable": settings["has_publishable"],
             "errors": probe_errors,
         }
+
+    @app.get("/api/db-audit")
+    def db_audit(request: Request) -> dict:
+        """Diagnostic endpoint: count all leads rows in Supabase grouped by user_id.
+        Returns total row count (no user filter) plus per-user breakdown.
+        Useful to confirm data is actually reaching Supabase regardless of UI filters.
+        """
+        result: dict = {
+            "total_rows": 0,
+            "rows_per_user": {},
+            "supabase_enabled": False,
+            "supabase_primary": False,
+            "local_db_total": 0,
+            "local_db_for_caller": 0,
+        }
+
+        result["supabase_enabled"] = is_supabase_auth_enabled(DEFAULT_CONFIG_PATH)
+        result["supabase_primary"] = is_supabase_primary_enabled(DEFAULT_CONFIG_PATH)
+
+        # ── Local SQLite count ─────────────────────────────────────────
+        try:
+            engine = pg_get_engine(str(DEFAULT_DB_PATH))
+            with engine.connect() as conn:
+                result["local_db_total"] = int(conn.execute(text("SELECT COUNT(*) FROM leads")).scalar() or 0)
+                try:
+                    caller_uid = require_current_user_id(request)
+                    result["local_db_for_caller"] = int(
+                        conn.execute(
+                            text("SELECT COUNT(*) FROM leads WHERE CAST(user_id AS TEXT) = :uid"),
+                            {"uid": str(caller_uid)},
+                        ).scalar() or 0
+                    )
+                    result["caller_user_id"] = caller_uid
+                except Exception:
+                    pass
+                rows_by_user = conn.execute(
+                    text(
+                        "SELECT CAST(user_id AS TEXT) AS uid, COUNT(*) AS cnt "
+                        "FROM leads GROUP BY CAST(user_id AS TEXT) ORDER BY cnt DESC LIMIT 20"
+                    )
+                ).fetchall()
+                result["local_rows_per_user"] = {r[0]: r[1] for r in rows_by_user}
+        except Exception as local_exc:
+            result["local_db_error"] = str(local_exc)
+
+        # ── Supabase count (no user filter) ────────────────────────────
+        if result["supabase_enabled"]:
+            try:
+                sb = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+                if sb is not None:
+                    all_ids = supabase_select_rows(sb, "leads", columns="user_id")
+                    result["total_rows"] = len(all_ids)
+                    user_counts: dict[str, int] = {}
+                    for r in all_ids:
+                        uid = str(r.get("user_id") or "")
+                        user_counts[uid] = user_counts.get(uid, 0) + 1
+                    result["rows_per_user"] = dict(sorted(user_counts.items(), key=lambda x: -x[1])[:20])
+            except Exception as sb_exc:
+                result["supabase_error"] = str(sb_exc)
+
+        return result
 
     @app.post("/api/supabase/sync-all")
     def supabase_sync_all() -> dict:
