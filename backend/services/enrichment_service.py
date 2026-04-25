@@ -44,6 +44,30 @@ _DOMAIN_SCORE_CACHE_TTL = 30 * 24 * 3600  # 30 days in seconds
 _DOMAIN_SCORE_CACHE: dict[str, Tuple[int, str, str, dict, float]] = {}
 
 
+KEYWORD_NICHE_HINTS: list[tuple[list[str], str]] = [
+    (
+        ["roof", "roofer", "roofing", "storm", "hail", "gutter"],
+        "For roofing businesses, prioritize storm damage demand, emergency repair intent, insurance/claim readiness, and seasonal urgency signals.",
+    ),
+    (
+        ["dental", "dentist", "orthodont", "implant", "invisalign", "cosmetic"],
+        "For dental businesses, prioritize cosmetic treatment offers (implants, veneers, whitening, Invisalign), trust/review proof, and conversion friction in consultation booking.",
+    ),
+    (
+        ["hvac", "air conditioning", "heating", "furnace", "heat pump"],
+        "For HVAC businesses, prioritize emergency service availability, financing mentions, maintenance-plan offers, and local seasonality capture.",
+    ),
+    (
+        ["solar", "photovoltaic", "panel"],
+        "For solar businesses, prioritize incentive clarity, financing options, proof/case studies, and homeowner trust signals.",
+    ),
+    (
+        ["plumb", "plumber", "drain", "water heater"],
+        "For plumbing businesses, prioritize emergency response intent, service-area clarity, and quote friction reduction.",
+    ),
+]
+
+
 def _clean_for_ai(text: str) -> str:
     """Regex-only clean: strip HTML tags, <script> blocks, and collapse whitespace."""
     if not text:
@@ -101,7 +125,7 @@ class LeadEnricher:
     def run(
         self,
         limit: Optional[int] = None,
-        progress_callback: Optional[Callable[[int, int, int, Optional[str]], None]] = None,
+        progress_callback: Optional[Callable[[int, int, int, Optional[str], Optional[str]], None]] = None,
     ) -> tuple[int, int]:
         leads = self._fetch_leads_for_enrichment(limit=limit)
         if not leads:
@@ -112,11 +136,20 @@ class LeadEnricher:
         with_email = 0
         total = len(leads)
 
-        if progress_callback:
+        def _emit_progress(
+            processed_count: int,
+            with_email_count: int,
+            current_lead: Optional[str],
+            phase: Optional[str],
+        ) -> None:
+            if not progress_callback:
+                return
             try:
-                progress_callback(0, total, 0, None)
+                progress_callback(processed_count, total, with_email_count, current_lead, phase)
             except Exception:
-                logging.exception("Enrichment progress callback failed at start")
+                logging.exception("Enrichment progress callback failed")
+
+        _emit_progress(0, 0, None, "starting")
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
@@ -137,6 +170,8 @@ class LeadEnricher:
                 for lead in leads:
                     try:
                         self._mark_lead_processing(int(lead["id"]))
+                        lead_name = str(lead.get("business_name") or "").strip() or f"lead-{lead.get('id')}"
+                        _emit_progress(processed, with_email, lead_name, "checking_website")
                         email = None
                         insecure_site = False
                         website_excerpt = ""
@@ -151,6 +186,7 @@ class LeadEnricher:
                         website_url = self._normalize_website(lead["website_url"])
                         if website_url:
                             email, insecure_site, website_excerpt, website_signals = self._audit_website(page=page, website_url=website_url)
+                            _emit_progress(processed, with_email, lead_name, "discovering_email")
                             social_profiles = self._discover_social_profiles(
                                 business_name=str(lead.get("business_name") or ""),
                                 website_url=website_url,
@@ -160,6 +196,7 @@ class LeadEnricher:
                             )
                             social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
+                            _emit_progress(processed, with_email, lead_name, "discovering_email")
                             city = self._extract_city(lead["address"])
                             email = self._find_email_via_google(
                                 page=page,
@@ -193,6 +230,7 @@ class LeadEnricher:
                             email = None
                             email_invalid = True
 
+                        _emit_progress(processed, with_email, lead_name, "analyzing_ai")
                         ai_score, ai_summary, competitive_hook, deep_intelligence = self._score_lead_priority(
                             business_name=lead["business_name"],
                             website_url=website_url,
@@ -236,6 +274,7 @@ class LeadEnricher:
                         if enrichment_payload:
                             enrichment_data = json.dumps(enrichment_payload, ensure_ascii=False)
 
+                        _emit_progress(processed, with_email, lead_name, "finalizing")
                         self._update_lead_enrichment(
                             lead_id=lead["id"],
                             email=email,
@@ -257,16 +296,13 @@ class LeadEnricher:
                         processed += 1
                         if email:
                             with_email += 1
+                        _emit_progress(processed, with_email, lead_name, "completed_lead")
                     except Exception as exc:
                         lead_name = str(lead["business_name"] or "").strip() or f"lead-{lead['id']}"
                         self._mark_lead_failed(int(lead["id"]))
                         logging.exception("Skipping lead after enrichment error: %s (%s)", lead_name, exc)
 
-                    if progress_callback:
-                        try:
-                            progress_callback(processed, total, with_email, str(lead["business_name"] or "").strip() or None)
-                        except Exception:
-                            logging.exception("Enrichment progress callback failed")
+                    _emit_progress(processed, with_email, str(lead["business_name"] or "").strip() or None, "enriching")
 
                     random_delay(250, 700)
             finally:
@@ -280,6 +316,19 @@ class LeadEnricher:
                     pass
 
         return processed, with_email
+
+    @staticmethod
+    def _build_keyword_niche_guidance(search_keyword: str) -> str:
+        keyword_text = str(search_keyword or "").strip().lower()
+        if not keyword_text:
+            return ""
+        for needles, instruction in KEYWORD_NICHE_HINTS:
+            if any(needle in keyword_text for needle in needles):
+                return instruction
+        return (
+            "Use the scrape keyword as the primary niche intent signal and prioritize offer-fit, "
+            "commercial urgency, and conversion blockers specific to that keyword category."
+        )
 
     def export_ai_mailer_ready(self, output_csv: str = "ai_mailer_ready.csv") -> int:
         rows = self._fetch_ai_mailer_rows()
@@ -1478,6 +1527,14 @@ class LeadEnricher:
                     logging.warning("Lead qualification check failed for %s: %s", business_name, qexc)
 
             system_prompt = factory.get_enrichment_system_prompt(user_niche=self.user_niche)
+            keyword_guidance = self._build_keyword_niche_guidance(search_keyword)
+            if keyword_guidance:
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    "KEYWORD-SPECIFIC DIRECTIVE (MANDATORY):\n"
+                    f"Scrape keyword: {search_keyword}\n"
+                    f"{keyword_guidance}\n"
+                )
             social_activity_score = round(
                 min(
                     10.0,
@@ -1500,6 +1557,8 @@ class LeadEnricher:
                 "google_maps_claimed": google_claimed,
                 "audit_findings": shortcoming,
                 "shortcoming": shortcoming,
+                "search_keyword": search_keyword,
+                "keyword_niche_guidance": keyword_guidance,
                 "has_website": bool(website_url),
                 "insecure_site": insecure_site,
                 "has_email": has_email,

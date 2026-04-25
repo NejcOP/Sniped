@@ -8160,6 +8160,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             "with_email": 0,
             "total": requested_limit,
             "current_lead": None,
+            "status_message": "Queued for enrichment...",
         }
         update_task_progress(db_path, task_id, progress_state)
 
@@ -8178,12 +8179,31 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
         )
 
-        def _on_enrich_progress(processed_count: int, total_count: int, with_email_count: int, current_lead: Optional[str]) -> None:
+        phase_labels = {
+            "starting": "Preparing enrichment engine...",
+            "checking_website": "Checking website and loading page signals...",
+            "discovering_email": "Finding contact details and social profiles...",
+            "analyzing_ai": "Analyzing SEO, conversion gaps, and intent signals...",
+            "finalizing": "Saving enrichment data to database...",
+            "completed_lead": "Lead enrichment complete.",
+            "enriching": "Enrichment in progress...",
+        }
+
+        def _on_enrich_progress(
+            processed_count: int,
+            total_count: int,
+            with_email_count: int,
+            current_lead: Optional[str],
+            phase: Optional[str] = None,
+        ) -> None:
+            phase_key = str(phase or "enriching").strip().lower() or "enriching"
             progress_state["phase"] = "enriching"
             progress_state["processed"] = int(processed_count)
             progress_state["with_email"] = int(with_email_count)
             progress_state["total"] = int(total_count)
             progress_state["current_lead"] = current_lead
+            progress_state["current_phase"] = phase_key
+            progress_state["status_message"] = phase_labels.get(phase_key, phase_labels["enriching"])
             update_task_progress(db_path, task_id, progress_state)
 
         enrich_semaphore = getattr(_app.state, "enrich_semaphore", None)
@@ -8259,6 +8279,8 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             task_id,
             status="completed",
             result_payload={
+                "requested_limit": int(payload_data.get("requested_limit") or payload_data.get("limit") or 0),
+                "effective_limit": int(payload_data.get("limit") or 0),
                 "processed": processed,
                 "with_email": with_email,
                 "queued_for_mail": queued_for_mail,
@@ -13375,8 +13397,11 @@ def create_app() -> FastAPI:
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))
         payload_data["_plan_type"] = str(access.get("plan_type") or billing.get("plan_key") or DEFAULT_PLAN_KEY)
         requested_limit = int(payload_data.get("limit") or 50)
+        effective_limit = max(1, min(requested_limit, 200))
+        payload_data["limit"] = effective_limit
+        payload_data["requested_limit"] = requested_limit
         reserve_ai_credits_or_raise(user_id, feature_key="enrich", db_path=db_path)
-        consume_ai_usage_or_raise(session_token, units=max(1, min(requested_limit, 500)), db_path=db_path)
+        consume_ai_usage_or_raise(session_token, units=max(1, min(effective_limit, 500)), db_path=db_path)
         payload_data["_credits_per_success"] = get_ai_credit_cost("enrich")
 
         # High-scale mode guard: production throughput should run on Supabase/PostgreSQL primary mode.

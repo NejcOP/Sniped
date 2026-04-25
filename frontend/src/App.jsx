@@ -2503,12 +2503,14 @@ function App({ initialTab = 'leads' }) {
   const enrichProgress = useMemo(() => {
     const status = String(enrichTask.status || 'idle').toLowerCase()
     const result = enrichTask.result && typeof enrichTask.result === 'object' ? enrichTask.result : {}
-    const requestedLimit = Number(enrichTask.last_request?.limit || enrichForm.limit || 50)
+    const requestedLimit = Number(result.effective_limit || enrichTask.last_request?.limit || enrichForm.limit || 50)
     const totalFromTask = Number(result.total || requestedLimit || 0)
     const processed = Number(result.processed || 0)
     const queued = Number(result.queued_for_mail || 0)
     const withEmail = Number(result.with_email || 0)
     const currentLead = String(result.current_lead || '').trim()
+    const statusMessage = String(result.status_message || '').trim()
+    const currentPhase = String(result.current_phase || '').trim().toLowerCase()
 
     const total = totalFromTask > 0 ? totalFromTask : requestedLimit
 
@@ -2526,6 +2528,8 @@ function App({ initialTab = 'leads' }) {
       queued,
       withEmail,
       currentLead,
+      currentPhase,
+      statusMessage,
       percent,
       isVisible: ['running', 'completed', 'failed'].includes(status),
     }
@@ -5227,8 +5231,13 @@ function App({ initialTab = 'leads' }) {
       toast.error('Out of credits. Please upgrade or buy more credits.')
       return
     }
+    const requested = Number(enrichForm.limit)
+    const normalizedBatchSize = Math.max(1, Math.min(Number.isFinite(requested) ? Math.floor(requested) : 50, 200))
+    if (normalizedBatchSize !== requested) {
+      setEnrichForm((prev) => ({ ...prev, limit: normalizedBatchSize }))
+    }
     void startTask('enrich', '/api/enrich', {
-      limit: Number(enrichForm.limit),
+      limit: normalizedBatchSize,
       headless: Boolean(enrichForm.headless),
       skip_export: Boolean(enrichForm.skipExport),
       token: getStoredValue('lf_token') || undefined,
@@ -6205,7 +6214,7 @@ function App({ initialTab = 'leads' }) {
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="field-label">
                   <span className="mb-1.5 block">Batch size</span>
-                  <input className="glass-input" type="number" min="1" value={enrichForm.limit} onChange={(e) => setEnrichForm({ ...enrichForm, limit: e.target.value })} />
+                  <input className="glass-input" type="number" min="1" max="200" value={enrichForm.limit} onChange={(e) => setEnrichForm({ ...enrichForm, limit: e.target.value })} />
                 </label>
                 <div className="grid gap-2">
                   <CheckboxField label="Headless" checked={enrichForm.headless} onChange={(v) => setEnrichForm({ ...enrichForm, headless: v })} />
@@ -6255,7 +6264,8 @@ function App({ initialTab = 'leads' }) {
                   {enrichProgress.status === 'running' ? (
                     <p className="scrape-progress-copy">
                       ✨ Processing <span className="scrape-count-pulse">{enrichProgress.processed}</span> / {enrichProgress.total} leads, please wait...
-                      {enrichProgress.currentLead ? ` Now analyzing: ${enrichProgress.currentLead}` : ''}
+                      {enrichProgress.currentLead ? ` Lead: ${enrichProgress.currentLead}` : ''}
+                      {enrichProgress.statusMessage ? ` ${enrichProgress.statusMessage}` : ''}
                     </p>
                   ) : null}
                   {enrichProgress.status === 'completed' ? (

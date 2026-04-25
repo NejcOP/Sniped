@@ -41,7 +41,7 @@ def get_plan_feature_access(plan_key_raw: Any) -> dict[str, Any]:
         "plan_type": PLAN_TYPE_LABELS.get(normalized, "Starter"),
         "basic_search": True,
         "mailer_send": True,
-        "deep_analysis": False,
+        "deep_analysis": True,
         "bulk_export": False,
         "drip_campaigns": False,
         "ai_lead_scoring": False,
