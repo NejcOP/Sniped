@@ -592,6 +592,14 @@ class GoogleMapsScraper:
 
                 lead = self._extract_business(keyword)
                 if not lead:
+                    screenshot_path = self._capture_debug_screenshot(reason=f"scanned_no_data_{card_title or idx}")
+                    logging.warning(
+                        "Scanned business yielded no extractable data idx=%s title=%r url=%s screenshot=%s",
+                        idx,
+                        card_title,
+                        str(self.page.url or ""),
+                        screenshot_path or "<none>",
+                    )
                     self._log_card_preview(card, idx, reason="extract_business_empty")
                     self._dump_first_result_html(reason="extract_business_empty")
                     continue
@@ -1240,6 +1248,15 @@ class GoogleMapsScraper:
                         return False
                     continue
 
+            # Mandatory post-click wait for the details panel root.
+            try:
+                self.page.wait_for_selector("[role='main']", timeout=10000)
+            except PlaywrightTimeoutError:
+                logging.warning("Main details panel did not appear after card click attempt=%s", attempt)
+                if attempt == 1:
+                    return False
+                continue
+
             # Emergency force-wait: proxy/Hobby environments need extra time for panel hydration.
             try:
                 self.page.wait_for_timeout(5000)
@@ -1576,6 +1593,26 @@ class GoogleMapsScraper:
     def _extract_website(self) -> Optional[str]:
         assert self.page is not None
 
+        # Prefer canonical Google Maps website field first when present.
+        strict_selectors = [
+            "a[data-item-id='authority']",
+            "a[data-item-id*='authority']",
+            "a[aria-label*='Website']",
+        ]
+        for selector in strict_selectors:
+            try:
+                locator = self.page.locator(selector)
+                total = min(locator.count(), 8)
+            except Exception:
+                total = 0
+            for idx in range(total):
+                try:
+                    href = str(locator.nth(idx).get_attribute("href") or "").strip().rstrip(".,)")
+                except Exception:
+                    href = ""
+                if self._is_external_website_candidate(href):
+                    return href
+
         candidate = self._find_external_website_candidate(limit=100)
         if candidate:
             return candidate
@@ -1609,6 +1646,21 @@ class GoogleMapsScraper:
 
     def _extract_phone(self) -> Optional[str]:
         assert self.page is not None
+
+        # First pass: explicit tel hrefs are usually the most stable signal.
+        try:
+            tel_links = self.page.locator("a[href*='tel:'], a[href^='tel:']")
+            total_tel = min(tel_links.count(), 12)
+        except Exception:
+            total_tel = 0
+        for idx in range(total_tel):
+            try:
+                href = str(tel_links.nth(idx).get_attribute("href") or "").strip()
+            except Exception:
+                href = ""
+            match = self._find_phone_match(href)
+            if match:
+                return match
 
         candidates = [
             self.page.locator("button[data-item-id^='phone:tel:']").first,

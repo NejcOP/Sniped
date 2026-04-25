@@ -803,6 +803,9 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
         # Deduplicate within current batch to avoid conflicting updates on the same key in one statement.
         payload_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         for lead in leads:
+            business_name = str(getattr(lead, "business_name", "") or "").strip() or "<unknown>"
+            print(f"DEBUG: Attempting to save {business_name} to DB...", flush=True)
+            logging.info("DEBUG: Attempting to save %s to DB...", business_name)
             payload = _lead_to_create_payload(lead, normalized_user_id)
             key = _lead_identity_from_payload(payload)
             payload_by_key[key] = payload
