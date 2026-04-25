@@ -7,42 +7,10 @@
     "functions": {
         "api/[...path].js": {
             "maxDuration": 30
-        },
-        "api/auth/register.js": {
-            "maxDuration": 15
-        },
-        "api/auth/login.js": {
-            "maxDuration": 15
-        },
-        "api/auth/profile.js": {
-            "maxDuration": 15
-        },
-        "api/config.js": {
-            "maxDuration": 15
-        },
-        "api/health.js": {
-            "maxDuration": 10
-        },
-        "api/stats.js": {
-            "maxDuration": 15
-        },
-        "api/tasks.js": {
-            "maxDuration": 10
-        },
-        "api/auth/personal-goal.js": {
-            "maxDuration": 10
-        },
-        "api/recommend-niche.js": {
-            "maxDuration": 20
-        },
-        "api/leads.js": {
-            "maxDuration": 20
-        },
-        "api/mailer/[...path].js": {
-            "maxDuration": 15
         }
     },
     "rewrites": [
+        { "source": "/api/:path*", "destination": "/api/[...path]" },
         { "source": "/((?!api(?:/|$))(?!.*\\..*).*)", "destination": "/index.html" }
     ]
 }

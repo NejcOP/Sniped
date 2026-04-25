@@ -36,7 +36,11 @@ function buildQueryString(query) {
 }
 
 function extractPathParts(pathValue) {
-  if (Array.isArray(pathValue)) return pathValue.map((part) => String(part).replace(/^\/+|\/+$/g, '')).filter(Boolean)
+  if (Array.isArray(pathValue)) {
+    return pathValue
+      .map((part) => String(part).replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean)
+  }
   const single = String(pathValue || '').replace(/^\/+|\/+$/g, '')
   return single ? [single] : []
 }
@@ -51,162 +55,8 @@ function resolveCatchAllPathParts(req) {
   return extractPathParts(match ? match[1] : '')
 }
 
-async function readRawBody(req) {
-  if (req.body === undefined || req.body === null) return null
-  if (Buffer.isBuffer(req.body)) return req.body
-  if (typeof req.body === 'string') return req.body
-  if (typeof req.body === 'object') return JSON.stringify(req.body)
-  return null
-}
-
-// ── Supabase helpers ────────────────────────────────────────────────────────
-function getTokenFromCatchAll(req) {
-  const auth = String(req.headers?.authorization || '')
-  if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
-  return String(req.query?.token || '').trim()
-}
-
-async function resolveUserId(supabaseUrl, supabaseKey, token) {
-  const r = await fetch(
-    `${supabaseUrl}/rest/v1/users?token=eq.${encodeURIComponent(token)}&select=id&limit=1`,
-    { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
-  )
-  if (!r.ok) return null
-  const rows = await r.json()
-  return Array.isArray(rows) && rows.length ? rows[0].id : null
-}
-
-function dbHeaders(supabaseKey) {
-  return { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }
-}
-
-// ── Native route: /api/saved-segments ───────────────────────────────────────
-async function handleSavedSegments(req, res, supabaseUrl, supabaseKey) {
-  const token = getTokenFromCatchAll(req)
-  if (!token) return res.status(401).json({ detail: 'Unauthorized' })
-  const userId = await resolveUserId(supabaseUrl, supabaseKey, token)
-  if (!userId) return res.status(401).json({ detail: 'Unauthorized' })
-
-  const hdrs = dbHeaders(supabaseKey)
-
-  if (req.method === 'GET') {
-    const r = await fetch(
-      `${supabaseUrl}/rest/v1/SavedSegments?user_id=eq.${encodeURIComponent(userId)}&select=id,user_id,name,filters_json,created_at,updated_at&order=updated_at.desc&limit=100`,
-      { headers: hdrs },
-    )
-    const rows = r.ok ? await r.json() : []
-    return res.status(200).json({ items: rows })
-  }
-
-  if (req.method === 'POST') {
-    const body = typeof req.body === 'object' && req.body !== null ? req.body : {}
-    const name = String(body.name || '').trim()
-    if (!name) return res.status(400).json({ detail: 'name is required' })
-    const filtersJson = JSON.stringify(body.filters || {})
-    const now = new Date().toISOString()
-    // Check for existing
-    const chk = await fetch(
-      `${supabaseUrl}/rest/v1/SavedSegments?user_id=eq.${encodeURIComponent(userId)}&name=eq.${encodeURIComponent(name)}&select=id&limit=1`,
-      { headers: hdrs },
-    )
-    const existing = chk.ok ? await chk.json() : []
-    let saved
-    if (Array.isArray(existing) && existing.length) {
-      const segId = existing[0].id
-      const upd = await fetch(
-        `${supabaseUrl}/rest/v1/SavedSegments?id=eq.${segId}&user_id=eq.${encodeURIComponent(userId)}`,
-        { method: 'PATCH', headers: hdrs, body: JSON.stringify({ filters_json: filtersJson, updated_at: now }) },
-      )
-      const updRows = upd.ok ? await upd.json() : []
-      saved = Array.isArray(updRows) && updRows.length ? updRows[0] : null
-    } else {
-      const ins = await fetch(
-        `${supabaseUrl}/rest/v1/SavedSegments`,
-        { method: 'POST', headers: hdrs, body: JSON.stringify({ user_id: userId, name, filters_json: filtersJson, created_at: now, updated_at: now }) },
-      )
-      const insRows = ins.ok ? await ins.json() : []
-      saved = Array.isArray(insRows) && insRows.length ? insRows[0] : null
-    }
-    if (!saved) return res.status(500).json({ detail: 'Could not save segment' })
-    return res.status(200).json(saved)
-  }
-
-  return res.status(405).json({ detail: 'Method not allowed' })
-}
-
-// ── Native route: /api/saved-segments/:id (DELETE) ──────────────────────────
-async function handleSavedSegmentsDelete(req, res, supabaseUrl, supabaseKey, segmentId) {
-  const token = getTokenFromCatchAll(req)
-  if (!token) return res.status(401).json({ detail: 'Unauthorized' })
-  const userId = await resolveUserId(supabaseUrl, supabaseKey, token)
-  if (!userId) return res.status(401).json({ detail: 'Unauthorized' })
-
-  const hdrs = dbHeaders(supabaseKey)
-  const chk = await fetch(
-    `${supabaseUrl}/rest/v1/SavedSegments?id=eq.${encodeURIComponent(segmentId)}&user_id=eq.${encodeURIComponent(userId)}&select=id&limit=1`,
-    { headers: hdrs },
-  )
-  const rows = chk.ok ? await chk.json() : []
-  if (!Array.isArray(rows) || !rows.length) return res.status(404).json({ detail: 'Not found' })
-  await fetch(
-    `${supabaseUrl}/rest/v1/SavedSegments?id=eq.${encodeURIComponent(segmentId)}&user_id=eq.${encodeURIComponent(userId)}`,
-    { method: 'DELETE', headers: hdrs },
-  )
-  return res.status(200).json({ status: 'deleted', id: segmentId })
-}
-
-// ── Native route: /api/blacklist ─────────────────────────────────────────────
-async function handleBlacklist(req, res, supabaseUrl, supabaseKey) {
-  const token = getTokenFromCatchAll(req)
-  if (!token) return res.status(401).json({ detail: 'Unauthorized' })
-  const userId = await resolveUserId(supabaseUrl, supabaseKey, token)
-  if (!userId) return res.status(401).json({ detail: 'Unauthorized' })
-
-  const hdrs = dbHeaders(supabaseKey)
-
-  if (req.method === 'GET') {
-    const r = await fetch(
-      `${supabaseUrl}/rest/v1/lead_blacklist?select=id,kind,value,reason,created_at&order=created_at.desc&limit=200`,
-      { headers: hdrs },
-    )
-    const rows = r.ok ? await r.json() : []
-    return res.status(200).json({ items: rows, count: rows.length })
-  }
-
-  if (req.method === 'POST') {
-    const body = typeof req.body === 'object' && req.body !== null ? req.body : {}
-    const kind = String(body.kind || '').trim()
-    const value = String(body.value || '').trim()
-    const reason = String(body.reason || 'Manual blacklist').trim()
-    if (!kind || !value) return res.status(400).json({ detail: 'kind and value are required' })
-    const now = new Date().toISOString()
-    const ins = await fetch(
-      `${supabaseUrl}/rest/v1/lead_blacklist`,
-      { method: 'POST', headers: hdrs, body: JSON.stringify({ kind, value, reason, created_at: now }) },
-    )
-    const rows = ins.ok ? await ins.json() : []
-    const created = Array.isArray(rows) && rows.length ? rows[0] : { kind, value, reason, created_at: now }
-    return res.status(200).json({ status: 'added', item: created })
-  }
-
-  if (req.method === 'DELETE') {
-    const kind = String(req.query?.kind || '').trim()
-    const value = String(req.query?.value || '').trim()
-    if (!kind || !value) return res.status(400).json({ detail: 'kind and value query params required' })
-    await fetch(
-      `${supabaseUrl}/rest/v1/lead_blacklist?kind=eq.${encodeURIComponent(kind)}&value=eq.${encodeURIComponent(value)}`,
-      { method: 'DELETE', headers: hdrs },
-    )
-    return res.status(200).json({ status: 'removed' })
-  }
-
-  return res.status(405).json({ detail: 'Method not allowed' })
-}
-
-// ── Main handler ─────────────────────────────────────────────────────────────
 function setCorsHeaders(req, res) {
-  const origin = req.headers?.origin || ''
-  // Allow any vercel.app subdomain or localhost
+  const origin = String(req.headers?.origin || '')
   if (origin && (origin.endsWith('.vercel.app') || origin.startsWith('http://localhost'))) {
     res.setHeader('Access-Control-Allow-Origin', origin)
   } else {
@@ -217,34 +67,20 @@ function setCorsHeaders(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type')
 }
 
+async function readRawBody(req) {
+  if (req.body === undefined || req.body === null) return null
+  if (Buffer.isBuffer(req.body)) return req.body
+  if (typeof req.body === 'string') return req.body
+  if (typeof req.body === 'object') return JSON.stringify(req.body)
+  return null
+}
+
 module.exports = async (req, res) => {
   setCorsHeaders(req, res)
   if (req.method === 'OPTIONS') {
     return res.status(204).end()
   }
-  const pathParts = resolveCatchAllPathParts(req)
-  const nativePath = pathParts.join('/')
 
-  const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '')
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-
-  // saved-segments
-  if (nativePath === 'saved-segments') {
-     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
-    return handleSavedSegments(req, res, supabaseUrl, supabaseKey)
-  }
-  // saved-segments/:id DELETE
-  if (pathParts[0] === 'saved-segments' && pathParts.length === 2 && req.method === 'DELETE') {
-     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
-    return handleSavedSegmentsDelete(req, res, supabaseUrl, supabaseKey, pathParts[1])
-  }
-  // blacklist
-  if (nativePath === 'blacklist') {
-     if (!supabaseUrl || !supabaseKey) return res.status(503).json({ detail: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel env vars.' })
-    return handleBlacklist(req, res, supabaseUrl, supabaseKey)
-  }
-
-  // In non-production environments fall back to local Python backend so dev works without env vars.
   const isDev = process.env.VERCEL_ENV !== 'production'
   const devFallback = isDev ? 'http://localhost:8000' : ''
   const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || devFallback)
@@ -255,6 +91,7 @@ module.exports = async (req, res) => {
     })
   }
 
+  const pathParts = resolveCatchAllPathParts(req)
   const pathSuffix = pathParts.length ? `/${pathParts.join('/')}` : ''
   const queryString = buildQueryString(req.query)
   const targetUrl = `${backendBase}/api${pathSuffix}${queryString}`
