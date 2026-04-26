@@ -10,6 +10,10 @@ const HOP_BY_HOP_HEADERS = new Set([
   'host',
 ])
 
+function isCorsHeader(key) {
+  return String(key || '').toLowerCase().startsWith('access-control-')
+}
+
 function normalizeBaseUrl(value) {
   const raw = String(value || '').trim()
   if (!raw) return ''
@@ -120,10 +124,12 @@ module.exports = async (req, res) => {
 
     res.status(upstream.status)
     upstream.headers.forEach((value, key) => {
-      if (!HOP_BY_HOP_HEADERS.has(String(key || '').toLowerCase())) {
+      const lower = String(key || '').toLowerCase()
+      if (!HOP_BY_HOP_HEADERS.has(lower) && !isCorsHeader(lower)) {
         res.setHeader(key, value)
       }
     })
+    setCorsHeaders(req, res)
 
     const arrayBuffer = await upstream.arrayBuffer()
     return res.send(Buffer.from(arrayBuffer))
