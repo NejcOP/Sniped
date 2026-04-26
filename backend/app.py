@@ -3967,12 +3967,16 @@ def load_config_health(config_path: Path) -> dict:
     ).strip()
     supabase_ok = bool(_HAS_SUPABASE and supabase_url and supabase_key)
 
+    # In hosted environments we often rely on env vars only.
+    # Report file read issues only when no config source appears usable.
+    effective_error = file_error if not (openai_ok or smtp_ok or supabase_ok) else None
+
     return {
         "ok": openai_ok and smtp_ok,
         "openai_ok": openai_ok,
         "smtp_ok": smtp_ok,
         "supabase_ok": supabase_ok,
-        "error": file_error,
+        "error": effective_error,
     }
 
 
