@@ -3931,19 +3931,19 @@ def recover_pending_topup_credits_from_stripe(
 
 
 def load_config_health(config_path: Path) -> dict:
+    config: dict[str, Any] = {}
+    file_error: Optional[str] = None
     try:
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
     except Exception as exc:
-        return {
-            "ok": False,
-            "openai_ok": False,
-            "smtp_ok": False,
-            "error": f"Could not read environment settings: {exc}",
-        }
+        # In production we rely primarily on env vars; missing local settings file
+        # should not hard-fail health checks.
+        config = {}
+        file_error = f"Could not read environment settings: {exc}"
 
     openai_cfg = config.get("openai", {}) if isinstance(config, dict) else {}
-    api_key = str(openai_cfg.get("api_key", "") or "").strip()
+    api_key = str(os.environ.get("OPENAI_API_KEY") or openai_cfg.get("api_key", "") or "").strip()
     openai_ok = bool(api_key and api_key != "YOUR_OPENAI_API_KEY")
 
     smtp_accounts = config.get("smtp_accounts", []) if isinstance(config, dict) else []
@@ -3972,7 +3972,7 @@ def load_config_health(config_path: Path) -> dict:
         "openai_ok": openai_ok,
         "smtp_ok": smtp_ok,
         "supabase_ok": supabase_ok,
-        "error": None,
+        "error": file_error,
     }
 
 
