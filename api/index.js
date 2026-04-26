@@ -22,15 +22,9 @@ function normalizeBaseUrl(value) {
 }
 
 function setCorsHeaders(req, res) {
-  const origin = String(req.headers?.origin || '')
-  if (origin && (origin.endsWith('.vercel.app') || origin.startsWith('http://localhost'))) {
-    res.setHeader('Access-Control-Allow-Origin', origin)
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', 'https://sniped-one.vercel.app')
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true')
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type')
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
 
 function buildQueryString(query) {
@@ -79,6 +73,14 @@ module.exports = async (req, res) => {
     return res.status(204).end()
   }
 
+  // Emergency loop breaker: keep frontend stable even if upstream saved-segments
+  // endpoint is intermittently unavailable.
+  const apiPath = resolveApiPath(req)
+  if (req.method === 'GET' && (apiPath === '/saved-segments' || apiPath.startsWith('/saved-segments/'))) {
+    res.setHeader('Content-Type', 'application/json')
+    return res.status(200).send('[]')
+  }
+
   const isDev = process.env.VERCEL_ENV !== 'production'
   const devFallback = isDev ? 'http://localhost:8000' : ''
   const backendBase = normalizeBaseUrl(
@@ -95,7 +97,7 @@ module.exports = async (req, res) => {
     })
   }
 
-  const pathSuffix = resolveApiPath(req)
+  const pathSuffix = apiPath
   const queryString = buildQueryString(req.query)
   const targetUrl = `${backendBase}/api${pathSuffix}${queryString}`
 

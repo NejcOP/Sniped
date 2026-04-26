@@ -1749,6 +1749,7 @@ function App({ initialTab = 'leads' }) {
   const [lastError, setLastError] = useState('')
   const [enrichRetrySeconds, setEnrichRetrySeconds] = useState(0)
   const [enrichRunRequested, setEnrichRunRequested] = useState(false)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [activeTab, setActiveTab] = useState(initialTabResolved)
   const [countdown, setCountdown] = useState(null)
   const [digestCountdown, setDigestCountdown] = useState(() => fmtDigestCountdown())
@@ -4941,21 +4942,35 @@ function App({ initialTab = 'leads' }) {
     setLastResult('')
     if (action === 'enrich') {
       setEnrichRetrySeconds(0)
+      setIsAnalyzing(true)
     }
     try {
       let data
       if (action === 'enrich') {
         const token = getStoredValue('lf_token')
-        const response = await axios.post(
-          endpoint,
-          payload,
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-          },
-        )
+        const headers = {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        }
+        const directBaseRaw = String(import.meta.env.VITE_DIRECT_RAILWAY_URL || import.meta.env.VITE_API_BASE_URL || '').trim()
+        const directBase = directBaseRaw ? directBaseRaw.replace(/\/$/, '') : ''
+        const directUrl = directBase && endpoint.startsWith('/api') ? `${directBase}${endpoint}` : ''
+
+        let response
+        try {
+          response = await axios.post(endpoint, payload, { headers })
+        } catch (primaryError) {
+          const status = axios.isAxiosError(primaryError) ? Number(primaryError.response?.status || 0) : 0
+          const shouldTryDirect = Boolean(
+            directUrl
+            && directUrl !== endpoint
+            && (status >= 500 || status === 0),
+          )
+          if (!shouldTryDirect) {
+            throw primaryError
+          }
+          response = await axios.post(directUrl, payload, { headers })
+        }
         data = response.data
       } else {
         data = await fetchJson(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
@@ -5000,6 +5015,9 @@ function App({ initialTab = 'leads' }) {
         setEnrichRunRequested(false)
       }
     } finally {
+      if (action === 'enrich') {
+        setIsAnalyzing(false)
+      }
       setPendingRequest('')
     }
   }
@@ -5007,6 +5025,7 @@ function App({ initialTab = 'leads' }) {
   function resetEnrichUiState() {
     setEnrichRetrySeconds(0)
     setEnrichRunRequested(false)
+    setIsAnalyzing(false)
     setPendingRequest((prev) => (prev === 'enrich' ? '' : prev))
     setTasks((prev) => ({
       ...prev,
@@ -6285,8 +6304,8 @@ function App({ initialTab = 'leads' }) {
                   Heavy traffic! We are processing other leads. Retry in <strong>{enrichRetrySeconds}s</strong>.
                 </div>
               ) : null}
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
-                {pendingRequest === 'enrich' || (enrichRunRequested && enrichTask.running) ? (
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
+                {pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" /> AI is analyzing...
                   </>
@@ -6300,7 +6319,7 @@ function App({ initialTab = 'leads' }) {
                   </>
                 )}
               </button>
-              {(pendingRequest === 'enrich' || enrichRunRequested || enrichTask.running || enrichRetrySeconds > 0) ? (
+              {(pendingRequest === 'enrich' || isAnalyzing || enrichRunRequested || enrichTask.running || enrichRetrySeconds > 0) ? (
                 <button className="workflow-btn" type="button" onClick={resetEnrichUiState} style={{ marginTop: '0.6rem', background: 'linear-gradient(135deg,#334155,#0f172a)' }}>
                   Reset Enrichment Status
                 </button>
