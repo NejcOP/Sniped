@@ -92,9 +92,12 @@ def get_allowed_cors_origins() -> list[str]:
         origins = [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
         if "https://sniped-one.vercel.app" not in origins:
             origins.append("https://sniped-one.vercel.app")
+        if "https://sniped-production.up.railway.app" not in origins:
+            origins.append("https://sniped-production.up.railway.app")
         return origins
     return [
         "https://sniped-one.vercel.app",
+        "https://sniped-production.up.railway.app",
         "http://localhost:5173",
         "http://localhost:3000",
         "http://localhost:8000",
@@ -9417,6 +9420,7 @@ def create_app() -> FastAPI:
     from concurrent.futures import ThreadPoolExecutor as _TPE
     _thread_pool = _TPE(max_workers=APP_THREADPOOL_WORKERS, thread_name_prefix="lf-worker")
     allowed_cors_origins = get_allowed_cors_origins()
+    allow_all_cors = str(os.environ.get("CORS_ALLOW_ALL", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
     app = FastAPI(title="LeadGen Full Stack API", version="1.1.0")
     app.state.task_lock = Lock()
@@ -9432,9 +9436,13 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_cors_origins,
-        allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^http:\/\/localhost(:\d+)?$",
-        allow_credentials=True,
+        allow_origins=["*"] if allow_all_cors else allowed_cors_origins,
+        allow_origin_regex=(
+            r".*"
+            if allow_all_cors
+            else r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^https:\/\/sniped-production\.up\.railway\.app$|^http:\/\/localhost(:\d+)?$"
+        ),
+        allow_credentials=not allow_all_cors,
         # Explicitly include the critical cross-origin flow used by Vercel and localhost.
         allow_methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],

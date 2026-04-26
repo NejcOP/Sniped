@@ -81,11 +81,17 @@ module.exports = async (req, res) => {
 
   const isDev = process.env.VERCEL_ENV !== 'production'
   const devFallback = isDev ? 'http://localhost:8000' : ''
-  const backendBase = normalizeBaseUrl(process.env.BACKEND_URL || process.env.VITE_API_URL || devFallback)
+  const backendBase = normalizeBaseUrl(
+    process.env.BACKEND_URL
+      || process.env.RAILWAY_BACKEND_URL
+      || process.env.RAILWAY_STATIC_URL
+      || process.env.VITE_API_URL
+      || devFallback,
+  )
   if (!backendBase) {
     res.setHeader('Content-Type', 'application/json')
     return res.status(503).json({
-      detail: 'Backend is not configured. Set BACKEND_URL in Vercel environment variables.',
+      detail: 'Backend is not configured. Set BACKEND_URL (or RAILWAY_BACKEND_URL / RAILWAY_STATIC_URL) in Vercel environment variables.',
     })
   }
 
