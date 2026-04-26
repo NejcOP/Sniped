@@ -1748,6 +1748,7 @@ function App({ initialTab = 'leads' }) {
   const [, setLastResult] = useState('')
   const [lastError, setLastError] = useState('')
   const [enrichRetrySeconds, setEnrichRetrySeconds] = useState(0)
+  const [enrichRunRequested, setEnrichRunRequested] = useState(false)
   const [activeTab, setActiveTab] = useState(initialTabResolved)
   const [countdown, setCountdown] = useState(null)
   const [digestCountdown, setDigestCountdown] = useState(() => fmtDigestCountdown())
@@ -2075,6 +2076,13 @@ function App({ initialTab = 'leads' }) {
       setMailerStopRequested(false)
     }
   }, [mailerTask.running])
+
+  useEffect(() => {
+    const status = String(enrichTask.status || 'idle').toLowerCase()
+    if (!enrichTask.running && ['completed', 'failed', 'idle', 'stopped'].includes(status)) {
+      setEnrichRunRequested(false)
+    }
+  }, [enrichTask.running, enrichTask.status])
 
   useEffect(() => {
     localStorage.setItem(TASK_MANAGER_STORAGE_KEY, JSON.stringify(customTasks))
@@ -4988,10 +4996,26 @@ function App({ initialTab = 'leads' }) {
         window.setTimeout(() => {
           void startTask(action, endpoint, payload, retries + 1)
         }, 5000)
+      } else if (action === 'enrich') {
+        setEnrichRunRequested(false)
       }
     } finally {
       setPendingRequest('')
     }
+  }
+
+  function resetEnrichUiState() {
+    setEnrichRetrySeconds(0)
+    setEnrichRunRequested(false)
+    setPendingRequest((prev) => (prev === 'enrich' ? '' : prev))
+    setTasks((prev) => ({
+      ...prev,
+      enrich: {
+        ...(prev?.enrich || getIdleTask('enrich')),
+        running: false,
+        status: 'idle',
+      },
+    }))
   }
 
   async function retryTask(taskId) {
@@ -5260,8 +5284,11 @@ function App({ initialTab = 'leads' }) {
 
     if (!selectedLeadIds.length) {
       toast('No eligible leads to enrich in current view.', { icon: 'ℹ️' })
+      setEnrichRunRequested(false)
       return
     }
+
+    setEnrichRunRequested(true)
 
     void startTask('enrich', '/api/enrich', {
       limit: normalizedBatchSize,
@@ -6236,7 +6263,7 @@ function App({ initialTab = 'leads' }) {
               step="02"
               title={<span className="flex items-center gap-2">AI Enrichment</span>}
               summary={`${workflowStats.scraped} raw leads need scoring and email discovery`}
-              status={String(enrichTask.status || '').toLowerCase() === 'queued' ? 'Queued' : enrichTask.running ? 'Running' : 'Ready'}
+              status={String(enrichTask.status || '').toLowerCase() === 'queued' ? 'Queued' : (enrichRunRequested && enrichTask.running) ? 'Running' : 'Ready'}
               accent="teal"
             >
               <div className="grid gap-3 sm:grid-cols-2">
@@ -6258,8 +6285,8 @@ function App({ initialTab = 'leads' }) {
                   Heavy traffic! We are processing other leads. Retry in <strong>{enrichRetrySeconds}s</strong>.
                 </div>
               ) : null}
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || enrichTask.running || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
-                {pendingRequest === 'enrich' || enrichTask.running ? (
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
+                {pendingRequest === 'enrich' || (enrichRunRequested && enrichTask.running) ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" /> AI is analyzing...
                   </>
@@ -6273,6 +6300,11 @@ function App({ initialTab = 'leads' }) {
                   </>
                 )}
               </button>
+              {(pendingRequest === 'enrich' || enrichRunRequested || enrichTask.running || enrichRetrySeconds > 0) ? (
+                <button className="workflow-btn" type="button" onClick={resetEnrichUiState} style={{ marginTop: '0.6rem', background: 'linear-gradient(135deg,#334155,#0f172a)' }}>
+                  Reset Enrichment Status
+                </button>
+              ) : null}
               {enrichProgress.isVisible ? (
                 <div style={{ marginTop: '1.5rem' }}>
                   <div
