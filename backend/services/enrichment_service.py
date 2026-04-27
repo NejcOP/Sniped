@@ -207,26 +207,13 @@ class LeadEnricher:
                             social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
                             logging.warning(
-                                "Lead %s (%s) has no website URL. Skipping website audit and using fallback discovery.",
+                                "Lead %s (%s) has no website URL. Marking failed_no_url and skipping.",
                                 lead_name,
                                 lead.get("id"),
                             )
-                            _emit_progress(processed, with_email, lead_name, "discovering_email")
-                            city = self._extract_city(lead["address"])
-                            email = self._find_email_via_google(
-                                page=page,
-                                context=context,
-                                business_name=lead["business_name"],
-                                city=city,
-                            )
-                            social_profiles = self._discover_social_profiles(
-                                business_name=str(lead.get("business_name") or ""),
-                                website_url=website_url,
-                                address=str(lead.get("address") or ""),
-                                existing_profiles=social_profiles,
-                                website_signals=website_signals,
-                            )
-                            social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
+                            self._mark_lead_failed_no_url(int(lead["id"]))
+                            _emit_progress(processed, with_email, lead_name, "enriching")
+                            continue
 
                         shortcoming = self._infer_main_shortcoming(
                             website_url=lead["website_url"],
@@ -262,6 +249,7 @@ class LeadEnricher:
                             social_profiles=social_profiles,
                             social_metrics=social_metrics,
                         )
+                        print(f"AI Response for {website_url}: {deep_intelligence}")
 
                         if not website_url:
                             ai_score = 10
@@ -291,7 +279,7 @@ class LeadEnricher:
 
                         _emit_progress(processed, with_email, lead_name, "finalizing")
                         try:
-                            self._update_lead_enrichment(
+                            updated_rows = self._update_lead_enrichment(
                                 lead_id=lead["id"],
                                 email=email,
                                 insecure_site=insecure_site,
@@ -317,6 +305,16 @@ class LeadEnricher:
                             )
                             self._mark_lead_failed(int(lead["id"]))
                             raise
+
+                        if int(updated_rows or 0) <= 0:
+                            self._mark_lead_failed(int(lead["id"]))
+                            logging.warning(
+                                "Lead %s (%s) computed enrichment but persisted 0 rows; marked failed.",
+                                lead_name,
+                                lead.get("id"),
+                            )
+                            _emit_progress(processed, with_email, lead_name, "enriching")
+                            continue
 
                         processed += 1
                         if email:
@@ -430,9 +428,11 @@ class LeadEnricher:
                 FROM leads
                 WHERE 1=1
             """
+            scoped_by_user = False
             if self.user_id:
                 query += " AND user_id = :user_id"
                 params["user_id"] = self.user_id
+                scoped_by_user = True
 
             id_params: list[str] = []
             for idx, lead_id in enumerate(normalized_ids[:500]):
@@ -448,6 +448,13 @@ class LeadEnricher:
                 params["limit"] = int(limit)
 
             rows = self._fetchall(text(query), params)
+            if scoped_by_user and not rows:
+                # Emergency fallback for legacy rows still carrying hardcoded/old user ids.
+                fallback_query = query.replace(" AND user_id = :user_id", "")
+                rows = self._fetchall(text(fallback_query), {k: v for k, v in params.items() if k != "user_id"})
+                if rows:
+                    logging.warning(
+                        "Targeted lead_ids matched only without user_id scope. Possible legacy user_id mismatch in DB.")
             logging.info(
                 "Lead-id targeted enrichment query matched %s/%s rows",
                 len(rows),
@@ -523,6 +530,21 @@ class LeadEnricher:
             {"lead_id": int(lead_id)},
         )
 
+    def _mark_lead_failed_no_url(self, lead_id: int) -> None:
+        self._execute(
+            text(
+                """
+                UPDATE leads
+                SET
+                    enrichment_status = 'failed_no_url',
+                    status = 'failed enrichment',
+                    status_updated_at = CURRENT_TIMESTAMP::text
+                WHERE id = :lead_id
+                """
+            ),
+            {"lead_id": int(lead_id)},
+        )
+
     def _update_lead_enrichment(
         self,
         lead_id: int,
@@ -540,7 +562,7 @@ class LeadEnricher:
         instagram_url: Optional[str] = None,
         facebook_url: Optional[str] = None,
         qualification_score: Optional[float] = None,
-    ) -> None:
+    ) -> int:
         new_status = "invalid_email" if invalid_email else "enriched"
 
         # Normalize phone number during enrichment
@@ -600,11 +622,13 @@ class LeadEnricher:
                 params,
             )
 
-        if int(getattr(result, "rowcount", 0) or 0) == 0:
+        rowcount = int(getattr(result, "rowcount", 0) or 0)
+        if rowcount == 0:
             logging.warning(
                 "Enrichment update wrote 0 rows for lead_id=%s (likely not found or filtered by ownership).",
                 int(lead_id),
             )
+        return rowcount
 
     def _fetch_ai_mailer_rows(self) -> List[dict[str, Any]]:
         query = """
@@ -1827,7 +1851,10 @@ class LeadEnricher:
                         .get("message", {})
                         .get("content", "{}")
                     )
-                    return json.loads(content or "{}")
+                    parsed = json.loads(content or "{}")
+                    if not isinstance(parsed, dict) or not parsed:
+                        logging.warning("OpenAI returned empty/invalid JSON payload for enrichment request.")
+                    return parsed if isinstance(parsed, dict) else {}
 
         raise RuntimeError("OpenAI scoring failed after retry attempts.")
 

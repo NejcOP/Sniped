@@ -3071,9 +3071,12 @@ function App({ initialTab = 'leads' }) {
           setLastResult('')
         } else if (cur.result) {
           if (taskType === 'enrich') {
-            const nextBalance = Number(cur.result?.credits_balance)
+            const processedCount = Number(cur.result?.processed ?? cur.result?.enriched_count ?? cur.result?.updated_rows ?? 0)
+            const rawBalance = cur.result?.credits_balance
+            const nextBalance = Number(rawBalance)
             const nextLimit = Number(cur.result?.credits_limit)
-            if (Number.isFinite(nextBalance)) {
+            const hasConcreteBalance = rawBalance !== null && rawBalance !== undefined && Number.isFinite(nextBalance)
+            if (processedCount > 0 && hasConcreteBalance) {
               setUser((prevUser) => ({
                 ...prevUser,
                 credits: Math.max(0, nextBalance),

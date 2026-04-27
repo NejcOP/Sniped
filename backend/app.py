@@ -8325,6 +8325,8 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
                 "effective_limit": int(payload_data.get("limit") or 0),
                 "requested_lead_ids": int(len(payload_data.get("lead_ids") or [])),
                 "processed": processed,
+                "updated_rows": processed,
+                "enriched_count": processed,
                 "with_email": with_email,
                 "queued_for_mail": queued_for_mail,
                 "exported": exported,
