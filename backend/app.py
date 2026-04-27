@@ -5617,6 +5617,33 @@ def load_openai_client(config_path: Path) -> tuple[Optional[OpenAI], str]:
         return None, model_name
 
 
+def has_any_ai_api_key(config_path: Path) -> bool:
+    openai_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+    anthropic_key = str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip()
+
+    if openai_key and openai_key != "YOUR_OPENAI_API_KEY":
+        return True
+    if anthropic_key and anthropic_key != "YOUR_ANTHROPIC_API_KEY":
+        return True
+
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            cfg = json.load(handle)
+        if isinstance(cfg, dict):
+            openai_cfg = cfg.get("openai", {}) if isinstance(cfg.get("openai"), dict) else {}
+            anthropic_cfg = cfg.get("anthropic", {}) if isinstance(cfg.get("anthropic"), dict) else {}
+            cfg_openai = str(openai_cfg.get("api_key", "") or "").strip()
+            cfg_anthropic = str(anthropic_cfg.get("api_key", "") or "").strip()
+            if cfg_openai and cfg_openai != "YOUR_OPENAI_API_KEY":
+                return True
+            if cfg_anthropic and cfg_anthropic != "YOUR_ANTHROPIC_API_KEY":
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 def extract_keyword_performance(db_path: Path, limit: int = 8) -> list[dict]:
     # Use Supabase primary when enabled so niche advisor reflects live cloud data
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
@@ -8308,7 +8335,10 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
                 "billing_warning": billing_warning,
                 "ai_key_configured": ai_key_configured,
                 "status_message": (
-                    f"No eligible leads found for enrichment (requested ids: {len(payload_data.get('lead_ids') or [])})."
+                    (
+                        f"No eligible leads found for enrichment (requested ids: {len(payload_data.get('lead_ids') or [])}). "
+                        "Requested IDs may already be completed or missing in the database."
+                    )
                     if int(processed or 0) == 0
                     else "Enrichment completed."
                 ),
@@ -13405,6 +13435,9 @@ def create_app() -> FastAPI:
     def run_enrichment(payload: EnrichRequest, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
         print(f"[enrich] POST /api/enrich â€” limit={payload.limit}")
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
+        config_path = resolve_path(None, DEFAULT_CONFIG_PATH)
+        if not has_any_ai_api_key(config_path):
+            raise HTTPException(status_code=503, detail="Missing AI API Key")
         try:
             ensure_system_tables(db_path)
         except Exception as _db_exc:
@@ -13436,6 +13469,7 @@ def create_app() -> FastAPI:
             payload_data["lead_ids"] = [int(x) for x in raw_lead_ids if str(x).strip().isdigit()][:500]
         else:
             payload_data["lead_ids"] = []
+        print(f"DEBUG: Received {len(payload_data['lead_ids'])} for enrichment: {payload_data['lead_ids']}")
 
         # High-scale mode guard: production throughput should run on Supabase/PostgreSQL primary mode.
         if os.environ.get("SNIPED_SCALE_MODE", os.environ.get("LEADFLOW_SCALE_MODE", "0")) == "1" and not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):

@@ -128,7 +128,16 @@ class LeadEnricher:
         lead_ids: Optional[list[int]] = None,
         progress_callback: Optional[Callable[[int, int, int, Optional[str], Optional[str]], None]] = None,
     ) -> tuple[int, int]:
+        debug_lead_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
+        print(f"DEBUG: Received {len(debug_lead_ids)} for enrichment: {debug_lead_ids}")
         leads = self._fetch_leads_for_enrichment(limit=limit, lead_ids=lead_ids)
+        logging.info(
+            "Enrichment selection: requested_ids=%s selected_rows=%s limit=%s user_id=%s",
+            len(debug_lead_ids),
+            len(leads),
+            int(limit or 0),
+            self.user_id,
+        )
         if not leads:
             logging.info("No scraped leads available for enrichment.")
             return 0, 0
@@ -197,6 +206,11 @@ class LeadEnricher:
                             )
                             social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
+                            logging.warning(
+                                "Lead %s (%s) has no website URL. Skipping website audit and using fallback discovery.",
+                                lead_name,
+                                lead.get("id"),
+                            )
                             _emit_progress(processed, with_email, lead_name, "discovering_email")
                             city = self._extract_city(lead["address"])
                             email = self._find_email_via_google(
@@ -276,23 +290,33 @@ class LeadEnricher:
                             enrichment_data = json.dumps(enrichment_payload, ensure_ascii=False)
 
                         _emit_progress(processed, with_email, lead_name, "finalizing")
-                        self._update_lead_enrichment(
-                            lead_id=lead["id"],
-                            email=email,
-                            insecure_site=insecure_site,
-                            main_shortcoming=shortcoming,
-                            ai_score=ai_score,
-                            ai_description=ai_summary,
-                            client_tier=client_tier,
-                            enrichment_data=enrichment_data,
-                            invalid_email=email_invalid,
-                            phone_number=lead["phone_number"],
-                            address=lead["address"],
-                            linkedin_url=social_profiles.get("linkedin"),
-                            instagram_url=social_profiles.get("instagram"),
-                            facebook_url=social_profiles.get("facebook"),
-                            qualification_score=deep_intelligence.get("qualification_score"),
-                        )
+                        try:
+                            self._update_lead_enrichment(
+                                lead_id=lead["id"],
+                                email=email,
+                                insecure_site=insecure_site,
+                                main_shortcoming=shortcoming,
+                                ai_score=ai_score,
+                                ai_description=ai_summary,
+                                client_tier=client_tier,
+                                enrichment_data=enrichment_data,
+                                invalid_email=email_invalid,
+                                phone_number=lead["phone_number"],
+                                address=lead["address"],
+                                linkedin_url=social_profiles.get("linkedin"),
+                                instagram_url=social_profiles.get("instagram"),
+                                facebook_url=social_profiles.get("facebook"),
+                                qualification_score=deep_intelligence.get("qualification_score"),
+                            )
+                        except Exception as save_exc:
+                            logging.exception(
+                                "Failed to save enrichment update for lead %s (%s): %s",
+                                lead_name,
+                                lead.get("id"),
+                                save_exc,
+                            )
+                            self._mark_lead_failed(int(lead["id"]))
+                            raise
 
                         processed += 1
                         if email:
@@ -385,6 +409,52 @@ class LeadEnricher:
             self._execute(text(statement))
 
     def _fetch_leads_for_enrichment(self, limit: Optional[int] = None, lead_ids: Optional[list[int]] = None) -> List[dict[str, Any]]:
+        normalized_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
+        params: dict[str, Any] = {}
+
+        if normalized_ids:
+            query = """
+                SELECT
+                    id,
+                    business_name,
+                    website_url,
+                    rating,
+                    review_count,
+                    google_claimed,
+                    linkedin_url,
+                    instagram_url,
+                    facebook_url,
+                    address,
+                    search_keyword,
+                    phone_number
+                FROM leads
+                WHERE 1=1
+            """
+            if self.user_id:
+                query += " AND user_id = :user_id"
+                params["user_id"] = self.user_id
+
+            id_params: list[str] = []
+            for idx, lead_id in enumerate(normalized_ids[:500]):
+                key = f"lead_id_{idx}"
+                id_params.append(f":{key}")
+                params[key] = int(lead_id)
+            query += f" AND id IN ({', '.join(id_params)})"
+            query += " AND COALESCE(LOWER(enrichment_status), 'pending') != 'completed'"
+            query += " ORDER BY id ASC"
+
+            if limit and limit > 0:
+                query += " LIMIT :limit"
+                params["limit"] = int(limit)
+
+            rows = self._fetchall(text(query), params)
+            logging.info(
+                "Lead-id targeted enrichment query matched %s/%s rows",
+                len(rows),
+                len(normalized_ids),
+            )
+            return rows
+
         query = """
                 SELECT
                     id,
@@ -410,20 +480,10 @@ class LeadEnricher:
                     )
                     AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
             """
-        params: dict[str, Any] = {}
 
         if self.user_id:
             query += " AND user_id = :user_id"
             params["user_id"] = self.user_id
-
-        normalized_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
-        if normalized_ids:
-            id_params: list[str] = []
-            for idx, lead_id in enumerate(normalized_ids[:500]):
-                key = f"lead_id_{idx}"
-                id_params.append(f":{key}")
-                params[key] = int(lead_id)
-            query += f" AND id IN ({', '.join(id_params)})"
 
         query += " ORDER BY id ASC"
 
@@ -494,49 +554,57 @@ class LeadEnricher:
                 phone_formatted = result["primary_number"]
                 phone_type = result["type"]
 
-        self._execute(
-            text(
-                """
-                UPDATE leads
-                SET
-                    email = COALESCE(:email, email),
-                    insecure_site = :insecure_site,
-                    main_shortcoming = :main_shortcoming,
-                    ai_score = :ai_score,
-                    qualification_score = COALESCE(:qualification_score, qualification_score),
-                    ai_description = :ai_description,
-                    client_tier = :client_tier,
-                    enrichment_data = COALESCE(:enrichment_data, enrichment_data),
-                    enrichment_status = 'completed',
-                    status = :new_status,
-                    status_updated_at = CURRENT_TIMESTAMP::text,
-                    enriched_at = CURRENT_TIMESTAMP::text,
-                    linkedin_url = COALESCE(:linkedin_url, linkedin_url),
-                    instagram_url = COALESCE(:instagram_url, instagram_url),
-                    facebook_url = COALESCE(:facebook_url, facebook_url),
-                    phone_formatted = COALESCE(:phone_formatted, phone_formatted),
-                    phone_type = COALESCE(:phone_type, phone_type)
-                WHERE id = :lead_id
-                """
-            ),
-            {
-                "email": email,
-                "insecure_site": 1 if insecure_site else 0,
-                "main_shortcoming": main_shortcoming,
-                "ai_score": ai_score,
-                "qualification_score": float(qualification_score) if qualification_score is not None else None,
-                "ai_description": ai_description,
-                "client_tier": client_tier,
-                "enrichment_data": enrichment_data,
-                "new_status": new_status,
-                "linkedin_url": linkedin_url,
-                "instagram_url": instagram_url,
-                "facebook_url": facebook_url,
-                "phone_formatted": phone_formatted,
-                "phone_type": phone_type,
-                "lead_id": int(lead_id),
-            },
-        )
+        params = {
+            "email": email,
+            "insecure_site": 1 if insecure_site else 0,
+            "main_shortcoming": main_shortcoming,
+            "ai_score": ai_score,
+            "qualification_score": float(qualification_score) if qualification_score is not None else None,
+            "ai_description": ai_description,
+            "client_tier": client_tier,
+            "enrichment_data": enrichment_data,
+            "new_status": new_status,
+            "linkedin_url": linkedin_url,
+            "instagram_url": instagram_url,
+            "facebook_url": facebook_url,
+            "phone_formatted": phone_formatted,
+            "phone_type": phone_type,
+            "lead_id": int(lead_id),
+        }
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE leads
+                    SET
+                        email = COALESCE(:email, email),
+                        insecure_site = :insecure_site,
+                        main_shortcoming = :main_shortcoming,
+                        ai_score = :ai_score,
+                        qualification_score = COALESCE(:qualification_score, qualification_score),
+                        ai_description = :ai_description,
+                        client_tier = :client_tier,
+                        enrichment_data = COALESCE(:enrichment_data, enrichment_data),
+                        enrichment_status = 'completed',
+                        status = :new_status,
+                        status_updated_at = CURRENT_TIMESTAMP::text,
+                        enriched_at = CURRENT_TIMESTAMP::text,
+                        linkedin_url = COALESCE(:linkedin_url, linkedin_url),
+                        instagram_url = COALESCE(:instagram_url, instagram_url),
+                        facebook_url = COALESCE(:facebook_url, facebook_url),
+                        phone_formatted = COALESCE(:phone_formatted, phone_formatted),
+                        phone_type = COALESCE(:phone_type, phone_type)
+                    WHERE id = :lead_id
+                    """
+                ),
+                params,
+            )
+
+        if int(getattr(result, "rowcount", 0) or 0) == 0:
+            logging.warning(
+                "Enrichment update wrote 0 rows for lead_id=%s (likely not found or filtered by ownership).",
+                int(lead_id),
+            )
 
     def _fetch_ai_mailer_rows(self) -> List[dict[str, Any]]:
         query = """
