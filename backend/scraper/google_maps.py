@@ -88,12 +88,34 @@ class GoogleMapsScraper:
             "on",
         }
 
+    # Tracking script URL fragments to block for bandwidth + speed gains.
+    _TRACKING_URL_FRAGMENTS = (
+        "google-analytics.com",
+        "googletagmanager.com",
+        "gtm.js",
+        "analytics.js",
+        "gtag/js",
+        "connect.facebook.net",
+        "fbevents.js",
+        "hotjar.com",
+        "clarity.ms",
+        "doubleclick.net",
+        "adservice.google",
+        "googlesyndication.com",
+        "scorecard.research.com",
+        "cdn.segment.com",
+        "intercom.io",
+        "crisp.chat",
+    )
+
     @staticmethod
     def _should_abort_resource(request) -> bool:
         resource_type = str(getattr(request, "resource_type", "") or "").lower()
         if resource_type in {"image", "media", "font", "stylesheet"}:
             return True
-
+        url = str(getattr(request, "url", "") or "").lower()
+        if any(fragment in url for fragment in GoogleMapsScraper._TRACKING_URL_FRAGMENTS):
+            return True
         return False
 
     def _next_proxy(self) -> str:
@@ -1391,6 +1413,19 @@ class GoogleMapsScraper:
             google_claimed=None,
         )
 
+        # Extract social links from current page HTML (fast, no extra navigation).
+        try:
+            panel_html = self.page.content()
+            social = self._extract_social_links_from_panel(panel_html)
+            if social.get("facebook") and not getattr(lead, "facebook_url", None):
+                lead.facebook_url = social["facebook"]
+            if social.get("instagram") and not getattr(lead, "instagram_url", None):
+                lead.instagram_url = social["instagram"]
+            if social.get("linkedin") and not getattr(lead, "linkedin_url", None):
+                lead.linkedin_url = social["linkedin"]
+        except Exception:
+            pass
+
         if self.inline_deep_scan:
             contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
             if contact_profile:
@@ -1584,6 +1619,24 @@ class GoogleMapsScraper:
             google_claimed=self._extract_google_claimed_status(),
         )
 
+        # Always extract social links directly from the Maps panel HTML (fast, no extra page load).
+        try:
+            panel_html = self.page.content()
+            social = self._extract_social_links_from_panel(panel_html)
+            if social.get("facebook"):
+                lead.facebook_url = social["facebook"]
+            if social.get("instagram"):
+                lead.instagram_url = social["instagram"]
+            if social.get("linkedin"):
+                lead.linkedin_url = social["linkedin"]
+            if social.get("youtube") and not getattr(lead, "youtube_url", None):
+                try:
+                    lead.youtube_url = social["youtube"]  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if self.inline_deep_scan:
             contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
             if contact_profile:
@@ -1593,6 +1646,25 @@ class GoogleMapsScraper:
                 lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
 
         return lead
+
+    @staticmethod
+    def _extract_social_links_from_panel(html: str) -> dict:
+        """Fast social link extraction from raw Maps panel HTML — no extra page load required."""
+        found: dict = {}
+        for href in re.findall(r'href=["\']([^"\']+)["\']', html or "", flags=re.IGNORECASE):
+            normalized = href.lower()
+            if "facebook.com" in normalized and "sharer" not in normalized and "/posts/" not in normalized:
+                found.setdefault("facebook", href.strip())
+            elif "instagram.com" in normalized and "/p/" not in normalized and "/reel/" not in normalized:
+                found.setdefault("instagram", href.strip())
+            elif "linkedin.com" in normalized and "/share" not in normalized and "/feed" not in normalized:
+                found.setdefault("linkedin", href.strip())
+            elif "youtube.com" in normalized or "youtu.be" in normalized:
+                if "/watch?" not in normalized and "/embed/" not in normalized:
+                    found.setdefault("youtube", href.strip())
+            elif "twitter.com" in normalized or "x.com" in normalized:
+                found.setdefault("twitter", href.strip())
+        return found
 
     def _extract_google_claimed_status(self) -> Optional[bool]:
         assert self.page is not None

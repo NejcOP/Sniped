@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import aiohttp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import text
 
 try:
@@ -36,7 +37,29 @@ FORCED_AI_MODEL = "gpt-4o-mini"          # never changed — no other models all
 OPENAI_REQUEST_TIMEOUT_SECONDS = 15.0    # friendly timeout on every AI call
 OPENAI_429_MAX_RETRIES = 3
 OPENAI_429_BACKOFF_BASE_SECONDS = 1.0
-PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 10000
+PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 15000
+
+# Tracking/analytics script URL fragments to block — saves 30-60% of page load time.
+_BLOCK_URL_FRAGMENTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "gtm.js",
+    "analytics.js",
+    "gtag/js",
+    "connect.facebook.net",
+    "fbevents.js",
+    "hotjar.com",
+    "clarity.ms",
+    "doubleclick.net",
+    "googlesyndication.com",
+    "adservice.google",
+    "cdn.segment.com",
+    "intercom.io",
+    "crisp.chat",
+    "hs-scripts.com",  # HubSpot
+    "zopim.com",       # Zendesk chat
+    "tawk.to",
+)
 PAGE_CONTENT_RETRY_SECONDS = 1.5
 _DOMAIN_SCORE_CACHE_TTL = 30 * 24 * 3600  # 30 days in seconds
 
@@ -92,6 +115,7 @@ class LeadEnricher:
         user_niche: Optional[str] = None,
         user_id: Optional[str] = None,
         model_name_override: Optional[str] = None,
+        speed_mode: bool = False,
     ) -> None:
         self.db_path = db_path
         self.headless = headless
@@ -100,6 +124,8 @@ class LeadEnricher:
         self.user_niche = user_niche
         self.user_id = str(user_id or "").strip() or None
         self.model_name_override = str(model_name_override or "").strip() or None
+        # Speed mode: skip social metrics (slower) and parallelize website scans.
+        self.speed_mode = bool(speed_mode)
 
         self.openai_api_key, self.ai_model = self._init_ai_client(
             config_path=config_path,
@@ -164,12 +190,24 @@ class LeadEnricher:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=["--disable-blink-features=AutomationControlled", "--disable-gpu", "--no-sandbox"],
             )
             context = browser.new_context(
                 user_agent=MODERN_USER_AGENT,
                 viewport={"width": 1366, "height": 768},
                 locale="en-US",
+            )
+            # Block non-essential resources: images, CSS, fonts, and tracking scripts.
+            def _should_block(request) -> bool:
+                rt = str(getattr(request, "resource_type", "") or "").lower()
+                if rt in {"image", "media", "font", "stylesheet"}:
+                    return True
+                url = str(getattr(request, "url", "") or "").lower()
+                return any(frag in url for frag in _BLOCK_URL_FRAGMENTS)
+
+            context.route(
+                "**/*",
+                lambda route, request: route.abort() if _should_block(request) else route.continue_(),
             )
             page = context.new_page()
             page.set_default_timeout(PLAYWRIGHT_DEFAULT_TIMEOUT_MS)
@@ -214,7 +252,9 @@ class LeadEnricher:
                                 existing_profiles=social_profiles,
                                 website_signals=website_signals,
                             )
-                            social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
+                            # Skip social metrics in speed mode — saves ~5-15s per lead.
+                            if not self.speed_mode:
+                                social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
                             logging.warning(
                                 "Lead %s (%s) has no website URL. Marking failed_no_url and skipping.",
@@ -773,6 +813,8 @@ class LeadEnricher:
                 found.setdefault("facebook", absolute)
             elif "twitter.com" in normalized or "x.com" in normalized:
                 found.setdefault("twitter", absolute)
+            elif ("youtube.com" in normalized or "youtu.be" in normalized) and "/watch?" not in normalized and "/embed/" not in normalized:
+                found.setdefault("youtube", absolute)
         return found
 
     def _discover_social_profiles(

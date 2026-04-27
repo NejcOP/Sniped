@@ -682,7 +682,7 @@ const TopUpCreditsModal = memo(function TopUpCreditsModal({
   )
 })
 
-const defaultScrape = { keyword: '', results: 25, country: 'US', headless: true, exportTargets: true }
+const defaultScrape = { keyword: '', results: 25, country: 'US', headless: true, exportTargets: true, speedMode: false }
 const defaultEnrich = { limit: 50, headless: true, skipExport: false }
 const defaultMailer = { limit: 10, delayMin: 7, delayMax: 15 }
 const defaultCampaignSequenceForm = {
@@ -5280,7 +5280,7 @@ function App({ initialTab = 'leads' }) {
       await fetchJson('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword, results: Number(scrapeForm.results), country: scrapeForm.country, headless: Boolean(scrapeForm.headless), export_targets: Boolean(scrapeForm.exportTargets), min_rating: 3.5 }),
+        body: JSON.stringify({ keyword, results: Number(scrapeForm.results), country: scrapeForm.country, headless: Boolean(scrapeForm.headless), export_targets: Boolean(scrapeForm.exportTargets), min_rating: 3.5, speed_mode: Boolean(scrapeForm.speedMode) }),
       })
       setTasks((prev) => ({
         ...prev,
@@ -6259,6 +6259,7 @@ function App({ initialTab = 'leads' }) {
                 </label>
                 <div className="grid gap-2">
                   <CheckboxField label="Headless" checked={scrapeForm.headless} onChange={(v) => setScrapeForm({ ...scrapeForm, headless: v })} />
+                  <CheckboxField label="Speed Mode" checked={scrapeForm.speedMode} onChange={(v) => setScrapeForm({ ...scrapeForm, speedMode: v })} title="Prioritize quantity — skips slow social metrics collection" />
                   <CheckboxField
                     label="Export targets"
                     checked={canBulkExport && scrapeForm.exportTargets}

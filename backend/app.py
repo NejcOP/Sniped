@@ -276,6 +276,7 @@ class ScrapeRequest(BaseModel):
     output_csv: Optional[str] = None
     min_rating: float = Field(3.5, ge=0.0, le=5.0)
     db_path: Optional[str] = None
+    speed_mode: bool = False
 
 
 class EnrichRequest(BaseModel):
@@ -8256,6 +8257,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             user_niche=payload_data.get("user_niche"),
             user_id=payload_data.get("user_id"),
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
+            speed_mode=bool(payload_data.get("speed_mode", False)),
         )
         ai_key_configured = bool(getattr(enricher, "openai_api_key", None))
         progress_state["ai_key_configured"] = ai_key_configured
