@@ -7,7 +7,9 @@ import json
 from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+import urllib.error
+import urllib.request
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -47,6 +49,7 @@ FORCED_WINDOWS_CHROME_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 GOOGLE_CONSENT_COOKIE = "YES+cb.20240101-00-p0.en+FX+123"
+EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
 
 
 class GoogleMapsScraper:
@@ -1367,7 +1370,7 @@ class GoogleMapsScraper:
         safe_website = str(website or "None").strip() or "None"
         safe_phone = str(phone or "None").strip() or "None"
 
-        return Lead(
+        lead = Lead(
             business_name=safe_name,
             website_url=safe_website,
             phone_number=safe_phone,
@@ -1377,6 +1380,15 @@ class GoogleMapsScraper:
             search_keyword=keyword,
             google_claimed=None,
         )
+
+        contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
+        if contact_profile:
+            lead.email = contact_profile.get("email") or lead.email
+            lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
+            lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
+            lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
+
+        return lead
 
     @staticmethod
     def _normalized_text(value: str) -> str:
@@ -1550,7 +1562,7 @@ class GoogleMapsScraper:
         rating_text = self._extract_rating_from_text(panel_text)
         review_text = self._extract_review_count_from_text(panel_text)
 
-        return Lead(
+        lead = Lead(
             business_name=name,
             website_url=website,
             phone_number=phone,
@@ -1560,6 +1572,15 @@ class GoogleMapsScraper:
             search_keyword=keyword,
             google_claimed=self._extract_google_claimed_status(),
         )
+
+        contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
+        if contact_profile:
+            lead.email = contact_profile.get("email") or lead.email
+            lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
+            lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
+            lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
+
+        return lead
 
     def _extract_google_claimed_status(self) -> Optional[bool]:
         assert self.page is not None
@@ -1913,6 +1934,148 @@ class GoogleMapsScraper:
                         stack.append(value)
 
         return {}
+
+    def _download_html(self, target_url: str, timeout_seconds: int = 8) -> tuple[str, str]:
+        request = urllib.request.Request(
+            target_url,
+            headers={
+                "User-Agent": self.user_agent or FORCED_WINDOWS_CHROME_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=max(4, int(timeout_seconds))) as response:
+            raw = response.read()
+            html = raw.decode("utf-8", errors="ignore")
+            return str(response.geturl() or target_url), html
+
+    @staticmethod
+    def _extract_emails_from_html(html: str) -> list[str]:
+        source = str(html or "")
+        found: list[str] = []
+        seen: set[str] = set()
+
+        for match in re.findall(r"mailto:([^\"'\s>?#]+)", source, flags=re.IGNORECASE):
+            value = str(match or "").strip().split("?")[0].lower()
+            if value and value not in seen:
+                seen.add(value)
+                found.append(value)
+
+        for match in EMAIL_PATTERN.findall(source):
+            value = str(match or "").strip().lower()
+            if not value or value in seen:
+                continue
+            if value.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+                continue
+            seen.add(value)
+            found.append(value)
+
+        return found
+
+    @staticmethod
+    def _extract_social_links_from_html(html: str, base_url: str) -> dict[str, Optional[str]]:
+        found: dict[str, Optional[str]] = {
+            "facebook_url": None,
+            "instagram_url": None,
+            "linkedin_url": None,
+            "twitter_url": None,
+        }
+
+        source = str(html or "")
+        candidates: list[str] = []
+        candidates.extend(re.findall(r"https?://[^\s\"'<>]+", source, flags=re.IGNORECASE))
+        candidates.extend(re.findall(r"href=[\"']([^\"']+)[\"']", source, flags=re.IGNORECASE))
+
+        for raw in candidates:
+            candidate = str(raw or "").strip()
+            if not candidate:
+                continue
+            absolute = urljoin(base_url, candidate)
+            host = str(urlparse(absolute).netloc or "").lower()
+            normalized = absolute.rstrip(".,)")
+
+            if "facebook.com" in host and not found["facebook_url"]:
+                found["facebook_url"] = normalized
+            elif "instagram.com" in host and not found["instagram_url"]:
+                found["instagram_url"] = normalized
+            elif "linkedin.com" in host and not found["linkedin_url"]:
+                found["linkedin_url"] = normalized
+            elif ("twitter.com" in host or host == "x.com" or host.endswith(".x.com")) and not found["twitter_url"]:
+                found["twitter_url"] = normalized
+
+        return found
+
+    @staticmethod
+    def _guess_email_from_domain(business_name: str, website_url: str) -> Optional[str]:
+        domain = str(urlparse(str(website_url or "")).netloc or "").lower().strip()
+        if not domain:
+            return None
+        if domain.startswith("www."):
+            domain = domain[4:]
+        if not re.search(r"\.[a-z]{2,}$", domain):
+            return None
+
+        name_token = re.sub(r"[^a-z0-9]+", "", str(business_name or "").lower())
+        prefixes = ["info", "contact", "hello", "support", "sales"]
+        if name_token and len(name_token) >= 4:
+            prefixes.insert(0, name_token[:24])
+
+        for prefix in prefixes:
+            if prefix:
+                return f"{prefix}@{domain}"
+        return None
+
+    def _deep_scan_contact_profile(self, business_name: str, website_url: str) -> dict[str, Optional[str]]:
+        normalized = str(website_url or "").strip()
+        if not normalized or normalized.lower() == "none":
+            return {}
+        if not normalized.startswith(("http://", "https://")):
+            normalized = f"https://{normalized}"
+
+        paths = ["", "/contact", "/contact-us", "/about", "/about-us"]
+        emails: list[str] = []
+        email_seen: set[str] = set()
+        socials: dict[str, Optional[str]] = {
+            "facebook_url": None,
+            "instagram_url": None,
+            "linkedin_url": None,
+            "twitter_url": None,
+        }
+
+        scanned_any = False
+        for path in paths:
+            target = urljoin(normalized.rstrip("/") + "/", path.lstrip("/")) if path else normalized
+            try:
+                final_url, html = self._download_html(target_url=target, timeout_seconds=8)
+                if not html:
+                    continue
+                scanned_any = True
+                for email in self._extract_emails_from_html(html):
+                    if email not in email_seen:
+                        email_seen.add(email)
+                        emails.append(email)
+                detected_socials = self._extract_social_links_from_html(html, final_url or target)
+                for key in socials.keys():
+                    if not socials.get(key) and detected_socials.get(key):
+                        socials[key] = detected_socials.get(key)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+                logging.debug("Deep scan skipped for %s (%s): %s", business_name, target, exc)
+            except Exception as exc:
+                logging.debug("Deep scan non-fatal error for %s (%s): %s", business_name, target, exc)
+
+        resolved_email = emails[0] if emails else None
+        if scanned_any and not resolved_email:
+            guessed = self._guess_email_from_domain(business_name=business_name, website_url=normalized)
+            if guessed:
+                logging.info("Deep scan fallback guessed email for %s: %s", business_name, guessed)
+                resolved_email = guessed
+
+        return {
+            "email": resolved_email,
+            "facebook_url": socials.get("facebook_url"),
+            "instagram_url": socials.get("instagram_url"),
+            "linkedin_url": socials.get("linkedin_url"),
+            "twitter_url": socials.get("twitter_url"),
+        }
 
     @staticmethod
     def _safe_text(locator) -> Optional[str]:

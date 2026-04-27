@@ -33,6 +33,7 @@ def _extract_social_links(html: str, base_url: str) -> dict[str, Optional[str]]:
         "instagram": None,
         "linkedin": None,
         "tiktok": None,
+        "twitter": None,
     }
 
     for anchor in soup.select("a[href]"):
@@ -52,21 +53,50 @@ def _extract_social_links(html: str, base_url: str) -> dict[str, Optional[str]]:
             found["linkedin"] = normalized
         elif "tiktok.com" in domain and not found["tiktok"]:
             found["tiktok"] = normalized
+        elif ("twitter.com" in domain or domain == "x.com" or domain.endswith(".x.com")) and not found["twitter"]:
+            found["twitter"] = normalized
 
     return found
 
 
 def _extract_emails(html: str) -> list[str]:
-    matches = EMAIL_REGEX.findall(html or "")
     unique: list[str] = []
     seen: set[str] = set()
-    for match in matches:
+
+    for match in re.findall(r"mailto:([^\"'\s>?#]+)", html or "", flags=re.IGNORECASE):
+        email = str(match or "").strip().split("?")[0].lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        unique.append(email)
+
+    for match in EMAIL_REGEX.findall(html or ""):
         email = str(match or "").strip().lower()
         if not email or email in seen:
             continue
         seen.add(email)
         unique.append(email)
     return unique
+
+
+def _guess_email_from_domain(website_url: str, business_name: str) -> Optional[str]:
+    domain = str(urlparse(str(website_url or "")).netloc or "").strip().lower()
+    if not domain:
+        return None
+    if domain.startswith("www."):
+        domain = domain[4:]
+    if not re.search(r"\.[a-z]{2,}$", domain):
+        return None
+
+    sanitized_name = re.sub(r"[^a-z0-9]+", "", str(business_name or "").lower())
+    prefixes = ["info", "contact", "hello", "sales", "support"]
+    if sanitized_name and len(sanitized_name) >= 4:
+        prefixes.insert(0, sanitized_name[:24])
+
+    for prefix in prefixes:
+        if prefix:
+            return f"{prefix}@{domain}"
+    return None
 
 
 def _detect_tech_stack(html: str) -> list[str]:
@@ -137,27 +167,36 @@ def _compute_qualification_score(
     return round(min(10.0, score), 2)
 
 
-async def _fetch_website_html(session: aiohttp.ClientSession, website_url: str) -> tuple[str, str]:
+async def _fetch_website_html(session: aiohttp.ClientSession, website_url: str) -> list[tuple[str, str]]:
     normalized = _normalize_website_url(website_url)
     if not normalized:
-        return "", ""
+        return []
 
     targets = [normalized]
     if normalized.startswith("https://"):
         targets.append(normalized.replace("https://", "http://", 1))
 
-    for target in targets:
-        try:
-            async with session.get(target, allow_redirects=True) as response:
-                if response.status >= 400:
-                    continue
-                body = await response.text(errors="ignore")
-                final_url = str(response.url)
-                return final_url, body
-        except Exception:
-            continue
+    page_paths = ["", "/contact", "/contact-us", "/about", "/about-us", "/kontakt"]
+    pages: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
 
-    return "", ""
+    for target in targets:
+        for path in page_paths:
+            crawl_target = target if not path else urljoin(target.rstrip("/") + "/", path.lstrip("/"))
+            try:
+                async with session.get(crawl_target, allow_redirects=True) as response:
+                    if response.status >= 400:
+                        continue
+                    body = await response.text(errors="ignore")
+                    final_url = str(response.url)
+                    if not body or final_url in seen_urls:
+                        continue
+                    seen_urls.add(final_url)
+                    pages.append((final_url, body))
+            except Exception:
+                continue
+
+    return pages
 
 
 async def _enrich_single_lead(
@@ -170,16 +209,31 @@ async def _enrich_single_lead(
         return False
 
     async with semaphore:
-        final_url, html = await _fetch_website_html(session, website)
+        pages = await _fetch_website_html(session, website)
 
-    if not html:
+    if not pages:
         return False
 
-    social_links = _extract_social_links(html, final_url or website)
-    emails = _extract_emails(html)
-    tech_stack = _detect_tech_stack(html)
-    has_pixel = _has_meta_pixel(html)
-    outdated_site = _is_outdated_site(html, final_url or website, tech_stack)
+    merged_html = "\n".join(str(item[1] or "") for item in pages)
+    canonical_url = str(pages[0][0] or website)
+
+    social_links: dict[str, Optional[str]] = {
+        "facebook": None,
+        "instagram": None,
+        "linkedin": None,
+        "tiktok": None,
+        "twitter": None,
+    }
+    for page_url, page_html in pages:
+        detected = _extract_social_links(page_html, page_url)
+        for key in social_links.keys():
+            if not social_links.get(key) and detected.get(key):
+                social_links[key] = detected.get(key)
+
+    emails = _extract_emails(merged_html)
+    tech_stack = _detect_tech_stack(merged_html)
+    has_pixel = _has_meta_pixel(merged_html)
+    outdated_site = _is_outdated_site(merged_html, canonical_url, tech_stack)
     qualification_score = _compute_qualification_score(social_links, has_pixel, outdated_site)
 
     lead.facebook_url = lead.facebook_url or social_links.get("facebook")
@@ -195,6 +249,10 @@ async def _enrich_single_lead(
 
     if emails and not str(getattr(lead, "email", "") or "").strip():
         lead.email = emails[0]
+    elif not str(getattr(lead, "email", "") or "").strip():
+        guessed_email = _guess_email_from_domain(canonical_url, str(getattr(lead, "business_name", "") or ""))
+        if guessed_email:
+            lead.email = guessed_email
 
     return True
 
