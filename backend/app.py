@@ -268,7 +268,7 @@ _NICHE_REC_CACHE: dict[str, dict[str, Any]] = {}
 class ScrapeRequest(BaseModel):
     keyword: str = Field(..., min_length=2)
     results: int = Field(25, ge=1, le=500)
-    headless: bool = False
+    headless: bool = True
     country: str = "US"
     country_code: Optional[str] = None
     user_data_dir: Optional[str] = None
@@ -7801,17 +7801,15 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 int(scanned_count),
             )
 
-            # ── Immediate per-lead commit to Supabase ────────────────────
-            # Commit each found lead to Supabase the moment it is discovered so
-            # the dashboard table updates in real-time and no data is lost if the
-            # scraper crashes mid-run.
-            if _lead is not None and task_user_id:
+            # Keep the Maps loop hot by default: per-lead persistence is opt-in.
+            progress_save_mode = str(os.environ.get("SCRAPE_PROGRESS_SAVE_MODE", "off") or "off").strip().lower()
+            if _lead is not None and task_user_id and progress_save_mode in {"local", "sync"}:
                 business_name_hint = str(getattr(_lead, "business_name", "") or "").strip() or "<unknown>"
                 print(f"DEBUG: Attempting to save {business_name_hint} to DB...", flush=True)
                 logging.info("[scrape-task:%s] Immediate save: %s", task_id, business_name_hint)
                 try:
                     _immediate_count = batch_upsert_leads([_lead], db_path=str(db_path), user_id=task_user_id)
-                    if _immediate_count > 0 and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+                    if _immediate_count > 0 and progress_save_mode == "sync" and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
                         try:
                             maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
                         except Exception as _sync_exc:
@@ -7933,7 +7931,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         progress_state["status_message"] = f"Found {total_scraped_from_maps} results from Google Maps."
         logging.info("[scrape-task:%s] Google Maps search finished | leads_found=%s", task_id, total_scraped_from_maps)
 
-        if leads:
+        deep_scan_mode = str(os.environ.get("SCRAPE_DEEP_SCAN_MODE", "off") or "off").strip().lower()
+        if leads and deep_scan_mode == "inline":
             try:
                 progress_state["phase"] = "deep_crawl"
                 progress_state["deep_crawled"] = 0
@@ -7981,6 +7980,12 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 )
             except Exception as deep_crawl_exc:
                 logging.warning("Deep crawl enrichment failed; continuing with Maps-only leads: %s", deep_crawl_exc)
+        elif leads:
+            logging.info(
+                "[scrape-task:%s] Inline deep crawl skipped (SCRAPE_DEEP_SCAN_MODE=%s).",
+                task_id,
+                deep_scan_mode,
+            )
 
         # When Supabase is the primary DB, deduplicate against Supabase too.
         # The local legacy store may be missing leads from previous sessions, so we
@@ -8154,6 +8159,42 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 "status_message": f"Completed. Inserted {inserted} leads.",
             },
         )
+
+        auto_enrich_queued = False
+        if inserted > 0 and deep_scan_mode == "async":
+            try:
+                enrich_payload = {
+                    "db_path": str(db_path),
+                    "config_path": str(DEFAULT_CONFIG_PATH),
+                    "limit": min(max(1, int(inserted)), int(requested_total or inserted or 1)),
+                    "user_id": task_user_id,
+                    "headless": True,
+                    "source": "scrape_auto_async_deep_scan",
+                    "_queue_priority": False,
+                }
+                enqueue_task(_app, None, db_path, task_user_id, "enrich", enrich_payload, source="scrape_auto_async_deep_scan")
+                auto_enrich_queued = True
+                logging.info("[scrape-task:%s] Auto async enrichment queued after scrape.", task_id)
+            except Exception as queue_exc:
+                logging.warning("[scrape-task:%s] Auto async enrichment queue failed: %s", task_id, queue_exc)
+
+        if auto_enrich_queued:
+            try:
+                latest = fetch_task_by_id(db_path, task_id)
+                latest_result = latest.get("result") if latest else {}
+                latest_payload = dict(latest_result) if isinstance(latest_result, dict) else {}
+                latest_payload["auto_enrich_queued"] = True
+                latest_payload["status_message"] = (
+                    "Completed. Leads saved fast; deep scan queued in background."
+                )
+                finish_task_record(
+                    db_path,
+                    task_id,
+                    status="completed",
+                    result_payload=latest_payload,
+                )
+            except Exception:
+                logging.debug("[scrape-task:%s] Could not append auto_enrich_queued result payload.", task_id)
         logging.info("[scrape-task:%s] Task completed successfully", task_id)
     except Exception as exc:
         logging.exception("Background scrape failed")

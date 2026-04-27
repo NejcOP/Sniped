@@ -81,16 +81,18 @@ class GoogleMapsScraper:
         self.page: Optional[Page] = None
         self._using_shared_browser = False
         self._first_result_snapshot_written = False
+        self.inline_deep_scan = str(os.environ.get("SCRAPE_INLINE_DEEP_SCAN", "0") or "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     @staticmethod
     def _should_abort_resource(request) -> bool:
         resource_type = str(getattr(request, "resource_type", "") or "").lower()
-        if resource_type in {"image", "media", "font"}:
+        if resource_type in {"image", "media", "font", "stylesheet"}:
             return True
-
-        if str(os.environ.get("SCRAPE_BLOCK_STYLESHEETS", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}:
-            if resource_type == "stylesheet":
-                return True
 
         return False
 
@@ -200,8 +202,8 @@ class GoogleMapsScraper:
                 lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
             )
         self.page = self._context.new_page()
-        self.page.set_default_timeout(12000)
-        self.page.set_default_navigation_timeout(nav_timeout_ms)
+        self.page.set_default_timeout(max(5000, min(10000, int(nav_timeout_ms))))
+        self.page.set_default_navigation_timeout(max(5000, min(10000, int(nav_timeout_ms))))
         self._apply_stealth()
         self._prime_google_consent_state()
         self._dismiss_google_overlays()
@@ -311,7 +313,7 @@ class GoogleMapsScraper:
         if self._browser is None:
             self._playwright = sync_playwright().start()
             launch_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_LAUNCH_TIMEOUT_MS", "15000") or "15000"))
-            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "15000") or "15000"))
+            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "10000") or "10000"))
             launch_targets = proxy_candidates or [""]
             last_exc: Optional[Exception] = None
             for proxy_candidate in launch_targets:
@@ -341,7 +343,7 @@ class GoogleMapsScraper:
                 raise RuntimeError(f"Browser launch failed after trying {len(launch_targets)} proxy option(s): {last_exc}")
             self._using_shared_browser = False
         if self._browser is not None and self.page is None:
-            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "15000") or "15000")))
+            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "10000") or "10000")))
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
     def _seed_google_consent_cookies(self) -> None:
@@ -691,13 +693,13 @@ class GoogleMapsScraper:
         url: str,
         wait_until: str = "domcontentloaded",
         max_retries: int = 1,
-        timeout_ms: int = 30000,
+        timeout_ms: int = 10000,
     ) -> None:
         """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
         assert self.page is not None
         for attempt in range(max_retries + 1):
             try:
-                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 30000)))
+                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 10000)))
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
@@ -1389,12 +1391,13 @@ class GoogleMapsScraper:
             google_claimed=None,
         )
 
-        contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
-        if contact_profile:
-            lead.email = contact_profile.get("email") or lead.email
-            lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
-            lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
-            lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
+        if self.inline_deep_scan:
+            contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
+            if contact_profile:
+                lead.email = contact_profile.get("email") or lead.email
+                lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
+                lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
+                lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
 
         return lead
 
@@ -1581,12 +1584,13 @@ class GoogleMapsScraper:
             google_claimed=self._extract_google_claimed_status(),
         )
 
-        contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
-        if contact_profile:
-            lead.email = contact_profile.get("email") or lead.email
-            lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
-            lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
-            lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
+        if self.inline_deep_scan:
+            contact_profile = self._deep_scan_contact_profile(lead.business_name, lead.website_url)
+            if contact_profile:
+                lead.email = contact_profile.get("email") or lead.email
+                lead.facebook_url = contact_profile.get("facebook_url") or lead.facebook_url
+                lead.instagram_url = contact_profile.get("instagram_url") or lead.instagram_url
+                lead.linkedin_url = contact_profile.get("linkedin_url") or lead.linkedin_url
 
         return lead
 
