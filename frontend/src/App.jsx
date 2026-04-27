@@ -14,6 +14,7 @@ import {
   Eye,
   EyeOff,
   Facebook,
+  Globe,
   Instagram,
   LayoutDashboard,
   Linkedin,
@@ -7032,7 +7033,7 @@ function App({ initialTab = 'leads' }) {
                         ].filter((item) => item.url)
                         const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                         const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
-                        const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : 'Not found')
+                        const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : '—')
                         return (
                         <tr key={lead.id} className="td-row">
                           {/* Business + Niche + Contact merged */}
@@ -7061,6 +7062,17 @@ function App({ initialTab = 'leads' }) {
                               {auditHighlights.length > 0 && (
                                 <span className="text-[10px] text-slate-400 truncate block">Audit: {auditHighlights.join(' • ')}</span>
                               )}
+                              {lead.website_url ? (
+                                <a
+                                  href={lead.website_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mt-1 inline-flex w-fit items-center gap-1 text-[10px] font-medium text-cyan-300 hover:text-cyan-100"
+                                  title="Open website"
+                                >
+                                  <Globe className="h-2.5 w-2.5" /> Website
+                                </a>
+                              ) : null}
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                 <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold ${pipelineStageBadgeClass(pipelineStage)}`}>
                                   {pipelineStage}
@@ -7072,16 +7084,16 @@ function App({ initialTab = 'leads' }) {
                                 )}
                                 {socialLinks.length > 0 && (
                                   <div className="inline-flex items-center gap-1">
-                                    {socialLinks.map(({ key, url, label, Icon }) => (
+                                    {socialLinks.map((social) => (
                                       <a
-                                        key={`${lead.id}-${key}`}
-                                        href={url}
+                                        key={`${lead.id}-${social.key}`}
+                                        href={social.url}
                                         target="_blank"
                                         rel="noreferrer"
-                                        title={label}
+                                        title={social.label}
                                         className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-sky-500/30 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:text-sky-50"
                                       >
-                                        <Icon className="h-3 w-3" />
+                                        <social.Icon className="h-3 w-3" />
                                       </a>
                                     ))}
                                   </div>
@@ -7315,7 +7327,7 @@ function App({ initialTab = 'leads' }) {
                       ].filter((item) => item.url)
                       const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                       const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
-                      const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : 'Not found')
+                      const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : '—')
                       return (
                         <article key={`mobile-${lead.id}`} className="rounded-[22px] border border-slate-700/50 bg-slate-900/70 p-4 shadow-[0_8px_24px_rgba(2,6,23,0.2)]">
                           <div className="flex items-start justify-between gap-3">
@@ -7330,20 +7342,25 @@ function App({ initialTab = 'leads' }) {
 
                           <div className="mt-3 space-y-2 text-sm text-slate-300">
                             <p className={`truncate ${lead.email ? 'text-slate-300' : shouldShowSearchingEmail ? 'text-cyan-300' : 'text-slate-500'}`}>{emailDisplay}</p>
+                            {lead.website_url ? (
+                              <a href={lead.website_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-100">
+                                <Globe className="h-3.5 w-3.5" /> Website
+                              </a>
+                            ) : null}
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
                               <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Score {formatLeadScoreValue(bestLeadScore)}/10</span>
                               {Number(lead.qualification_score || 0) > 0 && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-100">Q {Math.round(Number(lead.qualification_score || 0))}/100</span>}
-                              {socialLinks.map(({ key, url, label, Icon }) => (
+                              {socialLinks.map((social) => (
                                 <a
-                                  key={`mobile-${lead.id}-${key}`}
-                                  href={url}
+                                  key={`mobile-${lead.id}-${social.key}`}
+                                  href={social.url}
                                   target="_blank"
                                   rel="noreferrer"
-                                  title={label}
+                                  title={social.label}
                                   className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-sky-500/30 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:text-sky-50"
                                 >
-                                  <Icon className="h-3.5 w-3.5" />
+                                  <social.Icon className="h-3.5 w-3.5" />
                                 </a>
                               ))}
                               {techStack.map((stack) => (

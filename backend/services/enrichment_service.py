@@ -36,7 +36,7 @@ FORCED_AI_MODEL = "gpt-4o-mini"          # never changed — no other models all
 OPENAI_REQUEST_TIMEOUT_SECONDS = 15.0    # friendly timeout on every AI call
 OPENAI_429_MAX_RETRIES = 3
 OPENAI_429_BACKOFF_BASE_SECONDS = 1.0
-PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 15000
+PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 10000
 PAGE_CONTENT_RETRY_SECONDS = 1.5
 _DOMAIN_SCORE_CACHE_TTL = 30 * 24 * 3600  # 30 days in seconds
 
@@ -197,6 +197,16 @@ class LeadEnricher:
                         if website_url:
                             email, insecure_site, website_excerpt, website_signals = self._audit_website(page=page, website_url=website_url)
                             _emit_progress(processed, with_email, lead_name, "discovering_email")
+                            if not email:
+                                recovered_email = self._recover_email_with_ai_or_search(
+                                    page=page,
+                                    context=context,
+                                    business_name=lead_name,
+                                    website_url=website_url,
+                                    city=self._extract_city(str(lead.get("address") or "")),
+                                )
+                                if recovered_email:
+                                    email = recovered_email
                             social_profiles = self._discover_social_profiles(
                                 business_name=str(lead.get("business_name") or ""),
                                 website_url=website_url,
@@ -389,6 +399,9 @@ class LeadEnricher:
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_url text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS insecure_site bigint DEFAULT 0',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS main_shortcoming text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_at text',
@@ -614,6 +627,9 @@ class LeadEnricher:
                         linkedin_url = COALESCE(:linkedin_url, linkedin_url),
                         instagram_url = COALESCE(:instagram_url, instagram_url),
                         facebook_url = COALESCE(:facebook_url, facebook_url),
+                        linkedin = COALESCE(:linkedin_url, linkedin),
+                        instagram = COALESCE(:instagram_url, instagram),
+                        facebook = COALESCE(:facebook_url, facebook),
                         phone_formatted = COALESCE(:phone_formatted, phone_formatted),
                         phone_type = COALESCE(:phone_type, phone_type)
                     WHERE id = :lead_id
@@ -655,7 +671,7 @@ class LeadEnricher:
 
     def _audit_website(self, page, website_url: str) -> tuple[Optional[str], bool, str, dict[str, Any]]:
         try:
-            page.goto(website_url, wait_until="domcontentloaded", timeout=15000)
+            page.goto(website_url, wait_until="domcontentloaded", timeout=10000)
         except PlaywrightTimeoutError:
             logging.warning("Timeout while loading website: %s", website_url)
             return None, not website_url.lower().startswith("https://"), "", {}
@@ -686,7 +702,7 @@ class LeadEnricher:
         contact_page = self._discover_contact_page(page=page, base_url=final_url)
         if contact_page:
             try:
-                page.goto(contact_page, wait_until="domcontentloaded", timeout=12000)
+                page.goto(contact_page, wait_until="domcontentloaded", timeout=10000)
                 random_delay(250, 600)
                 try:
                     contact_html = page.content()
@@ -755,6 +771,8 @@ class LeadEnricher:
                 found.setdefault("instagram", absolute)
             elif "facebook.com" in normalized and "sharer" not in normalized and "/posts/" not in normalized:
                 found.setdefault("facebook", absolute)
+            elif "twitter.com" in normalized or "x.com" in normalized:
+                found.setdefault("twitter", absolute)
         return found
 
     def _discover_social_profiles(
@@ -977,7 +995,7 @@ class LeadEnricher:
         search_url = f"https://www.google.com/search?q={quote_plus(query)}"
 
         try:
-            page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=10000)
         except Exception:
             return None
 
@@ -1002,7 +1020,7 @@ class LeadEnricher:
             sub_page = context.new_page()
             apply_stealth(sub_page)
             try:
-                sub_page.goto(link, wait_until="domcontentloaded", timeout=12000)
+                sub_page.goto(link, wait_until="domcontentloaded", timeout=10000)
                 random_delay(250, 700)
                 try:
                     _sub_html = sub_page.content()
@@ -1145,6 +1163,80 @@ class LeadEnricher:
                     return email
 
         return sorted(pool)[0]
+
+    @staticmethod
+    def _guess_common_email_from_domain(website_url: str, business_name: str) -> Optional[str]:
+        domain = str(urlparse(str(website_url or "")).netloc or "").strip().lower()
+        if not domain:
+            return None
+        if domain.startswith("www."):
+            domain = domain[4:]
+        if not re.search(r"\.[a-z]{2,}$", domain):
+            return None
+
+        name_token = re.sub(r"[^a-z0-9]+", "", str(business_name or "").lower())
+        prefixes = ["info", "contact", "hello", "sales", "support"]
+        if len(name_token) >= 4:
+            prefixes.insert(0, name_token[:24])
+
+        for prefix in prefixes:
+            email = f"{prefix}@{domain}"
+            if EMAIL_REGEX.fullmatch(email):
+                return email
+        return None
+
+    def _ai_guess_email_pattern(self, *, business_name: str, website_url: str) -> Optional[str]:
+        if self.openai_api_key is None:
+            return None
+
+        try:
+            parsed = urlparse(str(website_url or ""))
+            domain = str(parsed.netloc or "").lower().replace("www.", "").strip()
+        except Exception:
+            domain = ""
+        if not domain:
+            return None
+
+        payload = {
+            "business_name": str(business_name or "").strip(),
+            "website_url": str(website_url or "").strip(),
+            "instruction": "Suggest one likely public contact email in JSON {\"email\":\"...\"}. Use common patterns like info@domain, contact@domain, hello@domain. Return null if uncertain.",
+        }
+
+        try:
+            parsed_response = asyncio.run(
+                self._score_lead_priority_async(
+                    system_prompt="You are an email pattern inference assistant. Return strict JSON only.",
+                    payload=payload,
+                    temperature=0.0,
+                )
+            )
+        except Exception:
+            return None
+
+        candidate = str(parsed_response.get("email") or "").strip().lower()
+        if candidate and EMAIL_REGEX.fullmatch(candidate):
+            return candidate
+        return None
+
+    def _recover_email_with_ai_or_search(
+        self,
+        *,
+        page,
+        context,
+        business_name: str,
+        website_url: str,
+        city: str,
+    ) -> Optional[str]:
+        from_search = self._find_email_via_google(page=page, context=context, business_name=business_name, city=city)
+        if from_search:
+            return from_search
+
+        ai_candidate = self._ai_guess_email_pattern(business_name=business_name, website_url=website_url)
+        if ai_candidate:
+            return ai_candidate
+
+        return self._guess_common_email_from_domain(website_url=website_url, business_name=business_name)
 
     @staticmethod
     def _normalize_website(website_url: Optional[str]) -> Optional[str]:

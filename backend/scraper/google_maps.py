@@ -8,8 +8,6 @@ from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
-import urllib.error
-import urllib.request
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -477,6 +475,16 @@ class GoogleMapsScraper:
                 logging.warning("playwright_stealth.stealth_sync failed, trying fallback stealth adapter.")
 
         apply_stealth(self.page)
+
+    @staticmethod
+    def _apply_stealth_to_page(target_page) -> None:
+        if PLAYWRIGHT_STEALTH_SYNC_AVAILABLE and stealth_sync is not None:
+            try:
+                stealth_sync(target_page)
+                return
+            except Exception:
+                logging.debug("playwright_stealth failed on auxiliary page; falling back.")
+        apply_stealth(target_page)
 
     def _handle_startup_consent(self) -> None:
         assert self.page is not None
@@ -1935,18 +1943,25 @@ class GoogleMapsScraper:
 
         return {}
 
-    def _download_html(self, target_url: str, timeout_seconds: int = 8) -> tuple[str, str]:
-        request = urllib.request.Request(
-            target_url,
-            headers={
-                "User-Agent": self.user_agent or FORCED_WINDOWS_CHROME_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=max(4, int(timeout_seconds))) as response:
-            raw = response.read()
-            html = raw.decode("utf-8", errors="ignore")
-            return str(response.geturl() or target_url), html
+    def _download_html_via_playwright(self, target_url: str, timeout_ms: int = 10000) -> tuple[str, str]:
+        page = None
+        try:
+            if self._context is None:
+                return target_url, ""
+            page = self._context.new_page()
+            page.set_default_timeout(max(4000, int(timeout_ms)))
+            page.set_default_navigation_timeout(max(4000, int(timeout_ms)))
+            self._apply_stealth_to_page(page)
+            page.goto(target_url, wait_until="domcontentloaded", timeout=max(4000, int(timeout_ms)))
+            final_url = str(page.url or target_url)
+            html = str(page.content() or "")
+            return final_url, html
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _extract_emails_from_html(html: str) -> list[str]:
@@ -2045,7 +2060,7 @@ class GoogleMapsScraper:
         for path in paths:
             target = urljoin(normalized.rstrip("/") + "/", path.lstrip("/")) if path else normalized
             try:
-                final_url, html = self._download_html(target_url=target, timeout_seconds=8)
+                final_url, html = self._download_html_via_playwright(target_url=target, timeout_ms=10000)
                 if not html:
                     continue
                 scanned_any = True
@@ -2057,7 +2072,7 @@ class GoogleMapsScraper:
                 for key in socials.keys():
                     if not socials.get(key) and detected_socials.get(key):
                         socials[key] = detected_socials.get(key)
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            except (PlaywrightTimeoutError, TimeoutError, ValueError) as exc:
                 logging.debug("Deep scan skipped for %s (%s): %s", business_name, target, exc)
             except Exception as exc:
                 logging.debug("Deep scan non-fatal error for %s (%s): %s", business_name, target, exc)
