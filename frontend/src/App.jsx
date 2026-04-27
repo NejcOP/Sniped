@@ -3418,7 +3418,7 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     const checkoutStatus = String(searchParams.get('checkout') || '').trim().toLowerCase()
     const topupStatus = String(searchParams.get('topup') || '').trim().toLowerCase()
-    const topupCreditsParam = Number(searchParams.get('topup_credits') || 0)
+    const paymentStatus = String(searchParams.get('payment') || '').trim().toLowerCase()
     const storedCheckoutPlanKey = (() => {
       try {
         return String(window.localStorage.getItem('lf_pending_checkout_plan') || '').trim().toLowerCase()
@@ -3426,8 +3426,21 @@ function App({ initialTab = 'leads' }) {
         return ''
       }
     })()
+    const storedTopupCredits = (() => {
+      try {
+        return Number(window.localStorage.getItem('lf_pending_topup_credits') || 0)
+      } catch {
+        return 0
+      }
+    })()
     const checkoutPlanKey = String(searchParams.get('plan') || storedCheckoutPlanKey || '').trim().toLowerCase()
-    if (!checkoutStatus && !topupStatus) return
+    const topupCreditsParam = Number(searchParams.get('topup_credits') || storedTopupCredits || 0)
+    const inferredTopupSuccess = !topupStatus && paymentStatus === 'success' && storedTopupCredits > 0
+    const inferredCheckoutSuccess = !checkoutStatus && paymentStatus === 'success' && Boolean(checkoutPlanKey) && !inferredTopupSuccess
+    const resolvedCheckoutStatus = checkoutStatus || (inferredCheckoutSuccess ? 'success' : '')
+    const resolvedTopupStatus = topupStatus || (inferredTopupSuccess ? 'success' : '')
+
+    if (!resolvedCheckoutStatus && !resolvedTopupStatus && !paymentStatus) return
 
     let cancelled = false
     const finalizeCheckoutRedirect = () => {
@@ -3439,27 +3452,30 @@ function App({ initialTab = 'leads' }) {
       nextParams.delete('topup_credits')
       nextParams.delete('plan')
       nextParams.delete('session_id')
+      nextParams.delete('payment')
       setSearchParams(nextParams, { replace: true })
       try {
         window.localStorage.removeItem('lf_pending_checkout_plan')
+        window.localStorage.removeItem('lf_pending_topup_package')
+        window.localStorage.removeItem('lf_pending_topup_credits')
       } catch {
         // Ignore storage failures.
       }
     }
 
     const runCheckoutRedirectSync = async () => {
-      if (checkoutStatus === 'success') {
+      if (resolvedCheckoutStatus === 'success') {
         if (checkoutPlanKey) {
           applyOptimisticSubscriptionState(checkoutPlanKey)
         }
         const nextPlanName = SUBSCRIPTION_PLAN_DETAILS[checkoutPlanKey]?.displayName || 'your subscription'
         toast.success(`Payment successful — ${nextPlanName} is now active`)
         await syncBillingStateAfterCheckout(checkoutPlanKey)
-      } else if (checkoutStatus === 'cancel') {
+      } else if (resolvedCheckoutStatus === 'cancel') {
         toast('Subscription checkout cancelled', { icon: 'ℹ️' })
       }
 
-      if (topupStatus === 'success') {
+      if (resolvedTopupStatus === 'success') {
         if (Number.isFinite(topupCreditsParam) && topupCreditsParam > 0) {
           setUser((prev) => {
             const currentBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
@@ -3484,8 +3500,15 @@ function App({ initialTab = 'leads' }) {
           preserveCreditsBalance: currentBalance + optimisticTopupDelta,
           preserveTopupBalance: currentTopup + optimisticTopupDelta,
         })
-      } else if (topupStatus === 'cancel') {
+      } else if (resolvedTopupStatus === 'cancel') {
         toast('Top-up checkout cancelled', { icon: 'ℹ️' })
+      }
+
+      if (paymentStatus === 'success' && resolvedCheckoutStatus !== 'success' && resolvedTopupStatus !== 'success') {
+        toast.success('Payment successful. Billing updated.')
+        await syncBillingStateAfterCheckout('')
+      } else if (paymentStatus === 'cancelled' && resolvedCheckoutStatus !== 'cancel' && resolvedTopupStatus !== 'cancel') {
+        toast('Payment cancelled', { icon: 'ℹ️' })
       }
 
       finalizeCheckoutRedirect()
@@ -3587,15 +3610,29 @@ function App({ initialTab = 'leads' }) {
 
   const startTopUpCheckout = useCallback(async (packageId) => {
     const normalizedPackageId = String(packageId || '').trim()
+    const selectedPackage = TOP_UP_PACKAGES.find((pkg) => pkg.id === normalizedPackageId)
+    const selectedCredits = Math.max(0, Number(selectedPackage?.credits || 0))
     setTopUpLoadingPackageId(normalizedPackageId)
     try {
       const checkoutUrl = await requestTopUpCheckoutUrl(normalizedPackageId, { markPreparing: true })
       if (checkoutUrl) {
+        try {
+          window.localStorage.setItem('lf_pending_topup_package', normalizedPackageId)
+          window.localStorage.setItem('lf_pending_topup_credits', String(selectedCredits))
+        } catch {
+          // Ignore storage failures.
+        }
         navigateToCheckoutWithFallback(checkoutUrl)
         return
       }
       toast.error('Could not open Stripe checkout.')
     } catch (error) {
+      try {
+        window.localStorage.removeItem('lf_pending_topup_package')
+        window.localStorage.removeItem('lf_pending_topup_credits')
+      } catch {
+        // Ignore storage failures.
+      }
       const message = error instanceof Error ? error.message : 'Top-up checkout failed.'
       setLastError(message)
       toast.error(message)
