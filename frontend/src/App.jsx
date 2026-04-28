@@ -7135,20 +7135,20 @@ function App({ initialTab = 'leads' }) {
                     id="leads-table"
                     className="hidden overflow-hidden rounded-[24px] border border-slate-700/50 bg-slate-900/70 shadow-[0_10px_40px_rgba(2,6,23,0.28)] lg:block"
                   >
-                <div className="max-h-[68vh] overflow-auto">
+                <div className="max-h-[68vh] overflow-auto" style={{overflowX: 'auto'}}>
                   <table className="apollo-table w-full table-fixed text-xs tracking-tight">
                     <colgroup>
-                      <col style={{width: '22%'}} />
-                      <col style={{width: '13%'}} />
-                      <col style={{width: '11%'}} />
+                      <col style={{width: '20%'}} />
+                      <col style={{width: '12%'}} />
+                      <col style={{width: '10%'}} />
                       <col style={{width: '4%'}} />
                       <col style={{width: '4%'}} />
                       <col style={{width: '4%'}} />
                       <col style={{width: '5%'}} />
-                      <col style={{width: '9%'}} />
+                      <col style={{width: '8%'}} />
                       <col style={{width: '11%'}} />
                       <col style={{width: '9%'}} />
-                      <col style={{width: '8%'}} />
+                      <col style={{minWidth: '160px', width: '13%'}} />
                     </colgroup>
                     <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-xl">
                       <tr>
@@ -7354,17 +7354,15 @@ function App({ initialTab = 'leads' }) {
                                 </div>
                                 {bestLeadScore > 0 && (
                                   <span className="text-[10px] font-semibold text-cyan-200">
-                                    AI {formatLeadScoreValue(bestLeadScore)}/10{lead.lead_priority ? ` · ${lead.lead_priority}` : ''}
+                                    AI {formatLeadScoreValue(bestLeadScore)}/10
                                   </span>
                                 )}
-                                {isQualifiedLead(lead) ? (
-                                  <span className="text-[10px] font-semibold text-emerald-200">Qualified</span>
-                                ) : (
-                                  <span className="text-[10px] font-semibold text-amber-200">Needs work</span>
-                                )}
+                                <span className={`text-[10px] font-semibold ${isQualifiedLead(lead) ? 'text-emerald-300' : 'text-amber-300'}`}>
+                                  {isQualifiedLead(lead) ? 'Qualified' : 'Needs work'}
+                                </span>
                                 {Number(lead.qualification_score || 0) > 0 && (
-                                  <span className="text-[10px] font-semibold text-amber-200">
-                                    Qualified {Math.round(Number(lead.qualification_score || 0))}/100
+                                  <span className="text-[10px] text-slate-400">
+                                    Q: {Math.round(Number(lead.qualification_score || 0))}/100
                                   </span>
                                 )}
                               </div>
@@ -7439,8 +7437,8 @@ function App({ initialTab = 'leads' }) {
                             </div>
                           </td>
                           {/* Actions — icon-only buttons */}
-                          <td className="td-cell">
-                            <div className="flex items-center justify-center gap-1">
+                          <td className="td-cell" style={{overflow: 'visible'}}>
+                            <div className="flex items-center justify-center gap-2" style={{flexShrink: 0, flexWrap: 'nowrap'}}>
                               <button type="button" className="icon-action-btn" onClick={() => openLeadDetailsModal(lead)} title="View lead details">
                                 <Eye className="h-3.5 w-3.5" />
                               </button>
@@ -7451,7 +7449,11 @@ function App({ initialTab = 'leads' }) {
                                 type="button"
                                 className="icon-action-btn"
                                 disabled={pendingBlacklistLeadId === lead.id || isBlacklistedLeadStatus(lead.status)}
-                                onClick={() => void blacklistLead(lead.id)}
+                                onClick={() => {
+                                  if (window.confirm('Blacklist this lead? They will be hidden from active views.')) {
+                                    void blacklistLead(lead.id)
+                                  }
+                                }}
                                 title={pendingBlacklistLeadId === lead.id ? 'Blacklisting…' : 'Blacklist'}
                               >
                                 <Ban className="h-3.5 w-3.5" />
@@ -7460,7 +7462,11 @@ function App({ initialTab = 'leads' }) {
                                 type="button"
                                 className="icon-action-btn"
                                 disabled={pendingBlacklistLeadId === lead.id}
-                                onClick={() => void removeLeadFromActiveView(lead)}
+                                onClick={() => {
+                                  if (window.confirm('Remove this lead from the active view?')) {
+                                    void removeLeadFromActiveView(lead)
+                                  }
+                                }}
                                 title={pendingBlacklistLeadId === lead.id ? 'Removing…' : 'Remove from active view'}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />

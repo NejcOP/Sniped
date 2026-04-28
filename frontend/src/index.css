@@ -900,7 +900,7 @@
   .td-cell {
     padding: 0.9rem 0.75rem;
     vertical-align: middle;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .code-block {
@@ -1029,6 +1029,7 @@
     border-color: rgba(56, 189, 248, 0.4);
     background: rgba(30, 41, 59, 0.95);
     color: #e2e8f0;
+    transform: scale(1.12);
   }
 
   .icon-action-btn:disabled {
