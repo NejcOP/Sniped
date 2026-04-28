@@ -4,6 +4,7 @@ import {
   Activity,
   Ban,
   Briefcase,
+  Building2,
   CheckCircle2,
   ChevronDown,
   Clipboard,
@@ -11,6 +12,7 @@ import {
   Database,
   DollarSign,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
   Facebook,
@@ -20,7 +22,9 @@ import {
   Linkedin,
   Lock,
   Mail,
+  MapPin,
   MessageCircle,
+  Phone,
   PlusCircle,
   RefreshCw,
   Save,
@@ -29,11 +33,13 @@ import {
   Settings,
   Sparkles,
   Rocket,
+  Star,
   Target,
   TerminalSquare,
   Trash2,
   GripVertical,
   TrendingUp,
+  User,
   Users,
   Zap,
 } from 'lucide-react'
@@ -9535,62 +9541,221 @@ function App({ initialTab = 'leads' }) {
         </div>
       )}
 
-      {leadDetailsPreviewLead && (
-        <div
-          className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/80 px-4"
-          onClick={(e) => { if (e.target === e.currentTarget) closeLeadDetailsModal() }}
-        >
-          <div className="w-full max-w-3xl rounded-3xl border border-white/10 bg-slate-900 p-5 shadow-2xl">
-            <div className="mb-4 flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-xl font-semibold text-white">Lead Details</h3>
-                <p className="text-sm text-slate-400">{leadDetailsPreviewLead.business_name || 'Unknown business'}</p>
+      {leadDetailsPreviewLead && (() => {
+        const ld = leadDetailsPreviewLead
+        const ldScore = resolveBestLeadScore(ld)
+        const ldStage = resolvePipelineStage(ld)
+        const ldStatus = normalizeLeadStatus(ld.status)
+        const ldQualified = isQualifiedLead(ld)
+        const ldTechStack = normalizeLeadInsightList(ld.tech_stack, 8)
+        const ldIntentSignals = normalizeLeadInsightList(ld.intent_signals, 6)
+        const ldRating = Number(ld.rating || 0)
+        const ldReviews = Number(ld.review_count || 0)
+        const ldGoogleClaimed = Boolean(ld.google_claimed)
+        const ldPhone = ld.phone_formatted || ld.phone_number
+        return (
+          <div
+            className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/85 px-4"
+            style={{backdropFilter: 'blur(8px)'}}
+            onClick={(e) => { if (e.target === e.currentTarget) closeLeadDetailsModal() }}
+          >
+            <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#0d1424] shadow-[0_28px_80px_rgba(2,6,23,0.6)] overflow-hidden">
+
+              {/* Header */}
+              <div className="flex items-start justify-between gap-3 border-b border-white/8 bg-gradient-to-r from-slate-900 to-slate-900/60 px-6 py-5">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-cyan-500/15 border border-cyan-500/25">
+                    <Building2 className="h-5 w-5 text-cyan-300" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-lg font-semibold text-white truncate">{ld.business_name || 'Unknown business'}</h3>
+                    <p className="text-xs text-slate-400 truncate">{ld.search_keyword || ld.address || ''}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {ldScore > 0 && (
+                    <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold ${ldQualified ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200'}`}>
+                      <Sparkles className="h-3 w-3" /> {formatLeadScoreValue(ldScore)}/10
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 text-slate-400 transition hover:bg-white/10 hover:text-white"
+                    onClick={closeLeadDetailsModal}
+                    aria-label="Close"
+                  >✕</button>
+                </div>
               </div>
-              <button type="button" className="copy-btn" onClick={closeLeadDetailsModal} title="Close">×</button>
-            </div>
 
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Contact</p>
-                <p className="mt-1 text-slate-100">{leadDetailsPreviewLead.contact_name || '—'}</p>
-                <p className="mt-1 text-slate-300">{leadDetailsPreviewLead.email || '—'}</p>
-                <p className="mt-1 text-slate-300">{leadDetailsPreviewLead.phone_formatted || leadDetailsPreviewLead.phone_number || '—'}</p>
+              <div className="max-h-[70vh] overflow-y-auto p-6 space-y-4">
+
+                {/* Contact + Business Info row */}
+                <div className="grid gap-3 sm:grid-cols-2">
+
+                  {/* Contact */}
+                  <div className="rounded-2xl border border-white/8 bg-slate-900/60 p-4 space-y-2.5">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Contact</p>
+                    {ld.contact_name ? (
+                      <div className="flex items-center gap-2">
+                        <User className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+                        <span className="text-sm text-slate-200">{ld.contact_name}</span>
+                      </div>
+                    ) : null}
+                    {ld.email ? (
+                      <div className="flex items-center gap-2">
+                        <Mail className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+                        <span className="text-sm text-slate-200 truncate flex-1">{ld.email}</span>
+                        <button
+                          type="button"
+                          className="flex-shrink-0 rounded-md border border-slate-700/50 bg-slate-800/60 p-1 text-slate-400 transition hover:border-cyan-500/40 hover:text-cyan-300"
+                          onClick={() => copyEmail(ld.email)}
+                          title="Copy email"
+                        ><Clipboard className="h-3 w-3" /></button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Mail className="h-3.5 w-3.5 flex-shrink-0 text-slate-600" />
+                        <span className="text-sm text-slate-600">No email found</span>
+                      </div>
+                    )}
+                    {ldPhone ? (
+                      <div className="flex items-center gap-2">
+                        <Phone className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+                        <a href={`tel:${ldPhone.replace(/\s/g,'')}`} className="text-sm text-cyan-300 hover:text-cyan-100 transition font-mono">{ldPhone}</a>
+                      </div>
+                    ) : null}
+                    {ld.address ? (
+                      <div className="flex items-start gap-2">
+                        <MapPin className="h-3.5 w-3.5 flex-shrink-0 text-slate-500 mt-0.5" />
+                        <span className="text-sm text-slate-300 leading-tight">{ld.address}</span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Business insights */}
+                  <div className="rounded-2xl border border-white/8 bg-slate-900/60 p-4 space-y-2.5">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Business</p>
+                    <div className="flex items-center gap-2">
+                      <div className={`h-2 w-2 flex-shrink-0 rounded-full ${ldQualified ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                      <span className={`text-sm font-semibold ${ldQualified ? 'text-emerald-300' : 'text-amber-300'}`}>{ldQualified ? 'Qualified lead' : 'Needs qualification'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Target className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+                      <span className="text-sm text-slate-300">Status: <span className="text-slate-100 font-medium">{ldStatus}</span></span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+                      <span className="text-sm text-slate-300">Stage: <span className="text-slate-100 font-medium">{ldStage}</span></span>
+                    </div>
+                    {ldRating > 0 && (
+                      <div className="flex items-center gap-2">
+                        <Star className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+                        <span className="text-sm text-slate-300">
+                          {ldRating.toFixed(1)} rating
+                          {ldReviews > 0 ? <span className="text-slate-500"> · {ldReviews} reviews</span> : null}
+                        </span>
+                      </div>
+                    )}
+                    {ldGoogleClaimed && (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
+                        <span className="text-sm text-emerald-300">Google verified</span>
+                      </div>
+                    )}
+                    {Number(ld.qualification_score || 0) > 0 && (
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-violet-400" />
+                        <span className="text-sm text-slate-300">Qualification: <span className="text-violet-300 font-semibold">{Math.round(Number(ld.qualification_score))}/100</span></span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Website CTA */}
+                {ld.website_url ? (
+                  <a
+                    href={ld.website_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/20 hover:text-cyan-100"
+                  >
+                    <ExternalLink className="h-4 w-4" /> Open Website
+                  </a>
+                ) : (
+                  <div className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-800/30 py-2.5 text-sm text-slate-600">
+                    <Globe className="h-4 w-4" /> No website on record
+                  </div>
+                )}
+
+                {/* AI Insights */}
+                {(ld.ai_description || ldTechStack.length > 0 || ldIntentSignals.length > 0) && (
+                  <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-violet-400">AI Insights</p>
+                    {ld.ai_description && (
+                      <p className="text-sm text-slate-200 leading-relaxed">{ld.ai_description}</p>
+                    )}
+                    {ldTechStack.length > 0 && (
+                      <div>
+                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Tech stack</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {ldTechStack.map((t) => (
+                            <span key={t} className="inline-flex items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[11px] font-medium text-violet-200">{t}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {ldIntentSignals.length > 0 && (
+                      <div>
+                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Intent signals</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {ldIntentSignals.map((s) => (
+                            <span key={s} className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-200">{s}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Social links */}
+                {(ld.linkedin_url || ld.instagram_url || ld.facebook_url) && (
+                  <div className="flex items-center gap-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mr-1">Social</p>
+                    {ld.linkedin_url && (
+                      <a href={ld.linkedin_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/10 text-sky-300 transition hover:bg-sky-500/25"><Linkedin className="h-4 w-4" /></a>
+                    )}
+                    {ld.instagram_url && (
+                      <a href={ld.instagram_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-pink-500/30 bg-pink-500/10 text-pink-300 transition hover:bg-pink-500/25"><Instagram className="h-4 w-4" /></a>
+                    )}
+                    {ld.facebook_url && (
+                      <a href={ld.facebook_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-300 transition hover:bg-blue-500/25"><Facebook className="h-4 w-4" /></a>
+                    )}
+                  </div>
+                )}
+
+                {/* Footer actions */}
+                <div className="flex gap-2 border-t border-white/8 pt-4">
+                  <button
+                    type="button"
+                    className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/20"
+                    onClick={() => { closeLeadDetailsModal(); void moveLeadToMailer(ld) }}
+                  >
+                    <Mail className="h-4 w-4" /> Move to Mailer
+                  </button>
+                  <button
+                    type="button"
+                    className="flex items-center justify-center gap-2 rounded-2xl border border-slate-700/50 bg-slate-800/50 px-4 py-2.5 text-sm font-semibold text-slate-300 transition hover:bg-slate-700/60"
+                    onClick={closeLeadDetailsModal}
+                  >
+                    Close
+                  </button>
+                </div>
+
               </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Pipeline</p>
-                <p className="mt-1 text-slate-100">Status: {normalizeLeadStatus(leadDetailsPreviewLead.status)}</p>
-                <p className="mt-1 text-slate-300">Stage: {resolvePipelineStage(leadDetailsPreviewLead)}</p>
-                <p className="mt-1 text-slate-300">Score: {formatLeadScoreValue(resolveBestLeadScore(leadDetailsPreviewLead))}/10</p>
-              </div>
-            </div>
-
-            {leadDetailsPreviewLead.website_url ? (
-              <a
-                className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-cyan-300 hover:text-cyan-100"
-                href={leadDetailsPreviewLead.website_url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <Globe className="h-4 w-4" /> Open Website
-              </a>
-            ) : null}
-
-            <div className="mt-4">
-              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">AI Summary</p>
-              <pre className="code-block mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words text-slate-100">
-                {String(leadDetailsPreviewLead.ai_description || 'No AI summary available.')}
-              </pre>
-            </div>
-
-            <div className="mt-4">
-              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Raw Lead Data</p>
-              <pre className="code-block mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-slate-100">
-                {JSON.stringify(leadDetailsPreviewLead, null, 2)}
-              </pre>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {aiSummaryPreviewLead && (
         <div
