@@ -49,6 +49,8 @@ class LeadRecord(Base):
     instagram_url: Mapped[Optional[str]] = mapped_column(Text)
     facebook_url: Mapped[Optional[str]] = mapped_column(Text)
     tiktok_url: Mapped[Optional[str]] = mapped_column(Text)
+    twitter_url: Mapped[Optional[str]] = mapped_column(Text)
+    youtube_url: Mapped[Optional[str]] = mapped_column(Text)
     ig_link: Mapped[Optional[str]] = mapped_column(Text)
     fb_link: Mapped[Optional[str]] = mapped_column(Text)
     has_pixel: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -453,6 +455,8 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
         "instagram_url": record.instagram_url,
         "facebook_url": record.facebook_url,
         "tiktok_url": record.tiktok_url,
+        "twitter_url": record.twitter_url,
+        "youtube_url": record.youtube_url,
         "ig_link": record.ig_link,
         "fb_link": record.fb_link,
         "has_pixel": bool(record.has_pixel) if record.has_pixel is not None else False,
@@ -662,6 +666,8 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
 
     optional_fields = {
         "tiktok_url": lead.tiktok_url,
+        "twitter_url": getattr(lead, "twitter_url", None),
+        "youtube_url": getattr(lead, "youtube_url", None),
         "ig_link": lead.ig_link,
         "fb_link": lead.fb_link,
         "has_pixel": _to_int_flag(lead.has_pixel),

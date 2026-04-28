@@ -16,6 +16,8 @@ class Lead:
     instagram_url: Optional[str] = None
     facebook_url: Optional[str] = None
     tiktok_url: Optional[str] = None
+    twitter_url: Optional[str] = None
+    youtube_url: Optional[str] = None
     ig_link: Optional[str] = None
     fb_link: Optional[str] = None
     has_pixel: Optional[int] = None

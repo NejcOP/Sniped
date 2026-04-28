@@ -938,6 +938,8 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "instagram": "ALTER TABLE leads ADD COLUMN instagram TEXT",
         "facebook": "ALTER TABLE leads ADD COLUMN facebook TEXT",
         "tiktok_url": "ALTER TABLE leads ADD COLUMN tiktok_url TEXT",
+        "twitter_url": "ALTER TABLE leads ADD COLUMN twitter_url TEXT",
+        "youtube_url": "ALTER TABLE leads ADD COLUMN youtube_url TEXT",
         "ig_link": "ALTER TABLE leads ADD COLUMN ig_link TEXT",
         "fb_link": "ALTER TABLE leads ADD COLUMN fb_link TEXT",
         "has_pixel": "ALTER TABLE leads ADD COLUMN has_pixel INTEGER DEFAULT 0",
@@ -10583,7 +10585,7 @@ def create_app() -> FastAPI:
 
             supabase_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,twitter_url,youtube_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,generated_email_body,crm_comment,status_updated_at,last_sender_email,"
                 "is_ads_client,is_website_client,worker_id,assigned_worker_at,paid_at,enrichment_data,pipeline_stage,client_folder_id,"
                 "open_tracking_token,open_count,first_opened_at,last_opened_at,"
@@ -10591,7 +10593,7 @@ def create_app() -> FastAPI:
             )
             legacy_columns = (
                 "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
+                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,twitter_url,youtube_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
                 "worker_id,assigned_worker_at,paid_at"
             )
@@ -10666,6 +10668,8 @@ def create_app() -> FastAPI:
                     row.setdefault("instagram_url", None)
                     row.setdefault("facebook_url", None)
                     row.setdefault("tiktok_url", None)
+                    row.setdefault("twitter_url", None)
+                    row.setdefault("youtube_url", None)
                     row.setdefault("ig_link", row.get("instagram_url"))
                     row.setdefault("fb_link", row.get("facebook_url"))
                     row.setdefault("has_pixel", 0)

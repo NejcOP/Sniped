@@ -34,6 +34,8 @@ import {
   Sparkles,
   Rocket,
   Star,
+  Twitter,
+  Youtube,
   Target,
   TerminalSquare,
   Trash2,
@@ -7187,6 +7189,8 @@ function App({ initialTab = 'leads' }) {
                           { key: 'linkedin', url: lead.linkedin_url, label: 'LinkedIn', Icon: Linkedin },
                           { key: 'instagram', url: lead.instagram_url, label: 'Instagram', Icon: Instagram },
                           { key: 'facebook', url: lead.facebook_url, label: 'Facebook', Icon: Facebook },
+                          { key: 'twitter', url: lead.twitter_url, label: 'Twitter / X', Icon: Twitter },
+                          { key: 'youtube', url: lead.youtube_url, label: 'YouTube', Icon: Youtube },
                         ].filter((item) => item.url)
                         const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                         const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
@@ -7493,11 +7497,13 @@ function App({ initialTab = 'leads' }) {
                       const bestLeadScore = resolveBestLeadScore(lead)
                       const pipelineStage = resolvePipelineStage(lead)
                       const techStack = normalizeLeadInsightList(lead.tech_stack, 2)
-                      const socialLinks = [
-                        { key: 'linkedin', url: lead.linkedin_url, label: 'LinkedIn', Icon: Linkedin },
-                        { key: 'instagram', url: lead.instagram_url, label: 'Instagram', Icon: Instagram },
-                        { key: 'facebook', url: lead.facebook_url, label: 'Facebook', Icon: Facebook },
-                      ].filter((item) => item.url)
+                        const socialLinks = [
+                          { key: 'linkedin', url: lead.linkedin_url, label: 'LinkedIn', Icon: Linkedin },
+                          { key: 'instagram', url: lead.instagram_url, label: 'Instagram', Icon: Instagram },
+                          { key: 'facebook', url: lead.facebook_url, label: 'Facebook', Icon: Facebook },
+                          { key: 'twitter', url: lead.twitter_url, label: 'Twitter / X', Icon: Twitter },
+                          { key: 'youtube', url: lead.youtube_url, label: 'YouTube', Icon: Youtube },
+                        ].filter((item) => item.url)
                       const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                       const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
                       const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : '—')
@@ -9711,7 +9717,7 @@ function App({ initialTab = 'leads' }) {
                 )}
 
                 {/* Social links */}
-                {(ld.linkedin_url || ld.instagram_url || ld.facebook_url) && (
+                {(ld.linkedin_url || ld.instagram_url || ld.facebook_url || ld.twitter_url || ld.youtube_url) && (
                   <div className="flex items-center gap-2">
                     <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mr-1">Social</p>
                     {ld.linkedin_url && (
@@ -9722,6 +9728,12 @@ function App({ initialTab = 'leads' }) {
                     )}
                     {ld.facebook_url && (
                       <a href={ld.facebook_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-300 transition hover:bg-blue-500/25"><Facebook className="h-4 w-4" /></a>
+                    )}
+                    {ld.twitter_url && (
+                      <a href={ld.twitter_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-slate-500/30 bg-slate-800/50 text-slate-300 transition hover:bg-slate-700/60"><Twitter className="h-4 w-4" /></a>
+                    )}
+                    {ld.youtube_url && (
+                      <a href={ld.youtube_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 transition hover:bg-red-500/25"><Youtube className="h-4 w-4" /></a>
                     )}
                   </div>
                 )}

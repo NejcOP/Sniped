@@ -26,37 +26,72 @@ def _normalize_website_url(raw_url: str) -> str:
     return value
 
 
+_SOCIAL_REGEX: dict[str, re.Pattern[str]] = {
+    "facebook": re.compile(r'https?://(?:www\.)?facebook\.com/[^\s"\'<>]{3,}', re.IGNORECASE),
+    "instagram": re.compile(r'https?://(?:www\.)?instagram\.com/[^\s"\'<>]{3,}', re.IGNORECASE),
+    "linkedin": re.compile(r'https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\s"\'<>]{3,}', re.IGNORECASE),
+    "tiktok": re.compile(r'https?://(?:www\.)?tiktok\.com/@[^\s"\'<>]{3,}', re.IGNORECASE),
+    "twitter": re.compile(r'https?://(?:www\.)?(?:twitter|x)\.com/[^\s"\'<>]{3,}', re.IGNORECASE),
+    "youtube": re.compile(r'https?://(?:www\.)?youtube\.com/(?:channel|c|user|@)[^\s"\'<>]{3,}', re.IGNORECASE),
+}
+
+# Paths that are useless for social hunting (share buttons, login, etc.)
+_SOCIAL_NOISE: re.Pattern[str] = re.compile(
+    r'(?:sharer|share|intent/tweet|login|signup|l\.facebook\.com|facebook\.com/tr|ads|pixel)',
+    re.IGNORECASE,
+)
+
+
+def _pick_best_linkedin(candidates: list[str]) -> Optional[str]:
+    """Prefer company pages over personal profiles."""
+    company = [u for u in candidates if "/company/" in u.lower()]
+    return company[0] if company else (candidates[0] if candidates else None)
+
+
 def _extract_social_links(html: str, base_url: str) -> dict[str, Optional[str]]:
     soup = BeautifulSoup(html or "", "html.parser")
-    found: dict[str, Optional[str]] = {
-        "facebook": None,
-        "instagram": None,
-        "linkedin": None,
-        "tiktok": None,
-        "twitter": None,
-    }
+    raw_text = html or ""
 
+    found: dict[str, list[str]] = {k: [] for k in _SOCIAL_REGEX}
+
+    # Pass 1: structured <a href> links
     for anchor in soup.select("a[href]"):
         href = str(anchor.get("href") or "").strip()
-        if not href:
+        if not href or _SOCIAL_NOISE.search(href):
             continue
         absolute = urljoin(base_url, href)
         parsed = urlparse(absolute)
-        domain = str(parsed.netloc or "").lower()
+        domain = str(parsed.netloc or "").lower().lstrip("www.")
         normalized = absolute.strip()
 
-        if "facebook.com" in domain and not found["facebook"]:
-            found["facebook"] = normalized
-        elif "instagram.com" in domain and not found["instagram"]:
-            found["instagram"] = normalized
-        elif "linkedin.com" in domain and not found["linkedin"]:
-            found["linkedin"] = normalized
-        elif "tiktok.com" in domain and not found["tiktok"]:
-            found["tiktok"] = normalized
-        elif ("twitter.com" in domain or domain == "x.com" or domain.endswith(".x.com")) and not found["twitter"]:
-            found["twitter"] = normalized
+        if "facebook.com" in domain:
+            found["facebook"].append(normalized)
+        elif "instagram.com" in domain:
+            found["instagram"].append(normalized)
+        elif "linkedin.com" in domain:
+            found["linkedin"].append(normalized)
+        elif "tiktok.com" in domain:
+            found["tiktok"].append(normalized)
+        elif "twitter.com" in domain or domain == "x.com":
+            found["twitter"].append(normalized)
+        elif "youtube.com" in domain:
+            found["youtube"].append(normalized)
 
-    return found
+    # Pass 2: regex fallback on raw HTML (catches JS-embedded links & onclick URLs)
+    for key, pattern in _SOCIAL_REGEX.items():
+        for match in pattern.findall(raw_text):
+            url = str(match).rstrip('"\' ')
+            if not _SOCIAL_NOISE.search(url) and url not in found[key]:
+                found[key].append(url)
+
+    result: dict[str, Optional[str]] = {}
+    for key, candidates in found.items():
+        if key == "linkedin":
+            result[key] = _pick_best_linkedin(candidates)
+        else:
+            result[key] = candidates[0] if candidates else None
+
+    return result
 
 
 def _extract_emails(html: str) -> list[str]:
@@ -167,6 +202,25 @@ def _compute_qualification_score(
     return round(min(10.0, score), 2)
 
 
+_PAGE_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
+
+
+async def _fetch_page(session: aiohttp.ClientSession, url: str, seen_urls: set[str]) -> Optional[tuple[str, str]]:
+    """Fetch a single page with a hard 10-second timeout. Returns (final_url, html) or None."""
+    try:
+        async with session.get(url, allow_redirects=True, timeout=_PAGE_TIMEOUT) as response:
+            if response.status >= 400:
+                return None
+            body = await response.text(errors="ignore")
+            final_url = str(response.url)
+            if not body or final_url in seen_urls:
+                return None
+            seen_urls.add(final_url)
+            return (final_url, body)
+    except Exception:
+        return None
+
+
 async def _fetch_website_html(session: aiohttp.ClientSession, website_url: str) -> list[tuple[str, str]]:
     normalized = _normalize_website_url(website_url)
     if not normalized:
@@ -176,25 +230,32 @@ async def _fetch_website_html(session: aiohttp.ClientSession, website_url: str) 
     if normalized.startswith("https://"):
         targets.append(normalized.replace("https://", "http://", 1))
 
+    # Homepage first; sub-pages only scanned if homepage loads successfully
     page_paths = ["", "/contact", "/contact-us", "/about", "/about-us", "/kontakt"]
     pages: list[tuple[str, str]] = []
     seen_urls: set[str] = set()
 
     for target in targets:
-        for path in page_paths:
-            crawl_target = target if not path else urljoin(target.rstrip("/") + "/", path.lstrip("/"))
-            try:
-                async with session.get(crawl_target, allow_redirects=True) as response:
-                    if response.status >= 400:
-                        continue
-                    body = await response.text(errors="ignore")
-                    final_url = str(response.url)
-                    if not body or final_url in seen_urls:
-                        continue
-                    seen_urls.add(final_url)
-                    pages.append((final_url, body))
-            except Exception:
-                continue
+        homepage_url = target
+        result = await _fetch_page(session, homepage_url, seen_urls)
+        if result:
+            pages.append(result)
+            break  # Got the homepage — no need to try http fallback
+
+    if not pages:
+        return []
+
+    # Scan sub-pages in parallel for social links
+    sub_tasks = []
+    for path in page_paths[1:]:
+        base = pages[0][0].rstrip("/")
+        sub_url = f"{base}/{path.lstrip('/')}"
+        sub_tasks.append(_fetch_page(session, sub_url, seen_urls))
+
+    sub_results = await asyncio.gather(*sub_tasks)
+    for result in sub_results:
+        if result:
+            pages.append(result)
 
     return pages
 
@@ -223,6 +284,7 @@ async def _enrich_single_lead(
         "linkedin": None,
         "tiktok": None,
         "twitter": None,
+        "youtube": None,
     }
     for page_url, page_html in pages:
         detected = _extract_social_links(page_html, page_url)
@@ -240,6 +302,8 @@ async def _enrich_single_lead(
     lead.instagram_url = lead.instagram_url or social_links.get("instagram")
     lead.linkedin_url = lead.linkedin_url or social_links.get("linkedin")
     lead.tiktok_url = social_links.get("tiktok")
+    lead.twitter_url = lead.twitter_url or social_links.get("twitter")  # type: ignore[attr-defined]
+    lead.youtube_url = social_links.get("youtube")  # type: ignore[attr-defined]
 
     lead.fb_link = social_links.get("facebook")
     lead.ig_link = social_links.get("instagram")
