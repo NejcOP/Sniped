@@ -3047,14 +3047,6 @@ function App({ initialTab = 'leads' }) {
     return () => window.clearInterval(id)
   }, [enrichRetrySeconds])
 
-  useEffect(() => {
-    void refreshUserProfile()
-    const profileId = window.setInterval(() => {
-      void refreshUserProfile()
-    }, 30000)
-    return () => window.clearInterval(profileId)
-  }, [refreshUserProfile])
-
   const fetchNicheAdvice = useCallback(async ({ silent = false, forceRefresh = false, countryCode = null } = {}) => {
     try {
       setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
@@ -3410,6 +3402,14 @@ function App({ initialTab = 'leads' }) {
       return null
     }
   }, [tasks?.enrich?.status, pendingRequest, enrichRunRequested])
+
+  useEffect(() => {
+    void refreshUserProfile()
+    const profileId = window.setInterval(() => {
+      void refreshUserProfile()
+    }, 30000)
+    return () => window.clearInterval(profileId)
+  }, [refreshUserProfile])
 
   const applyOptimisticSubscriptionState = useCallback((rawPlanKey) => {
     const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
