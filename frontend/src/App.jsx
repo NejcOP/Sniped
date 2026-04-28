@@ -17,6 +17,7 @@ import {
   EyeOff,
   Facebook,
   Globe,
+  Info,
   Instagram,
   LayoutDashboard,
   Linkedin,
@@ -1190,6 +1191,40 @@ function normalizeLeadInsightList(value, limit = 3) {
     .slice(0, limit)
 }
 
+function parseLeadEnrichmentData(lead) {
+  const raw = lead?.enrichment_data ?? lead?.enrichmentData ?? null
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function resolveLeadScoreBreakdown(lead) {
+  const payload = parseLeadEnrichmentData(lead)
+  const rows = Array.isArray(payload?.score_breakdown) ? payload.score_breakdown : []
+  return rows
+    .map((item) => {
+      const impact = Number(item?.impact ?? 0)
+      const label = String(item?.label || '').trim()
+      const detail = String(item?.detail || '').trim()
+      if (!Number.isFinite(impact) || !label) return null
+      return {
+        impact: Math.round(impact * 10) / 10,
+        type: impact >= 0 ? 'positive' : 'negative',
+        label,
+        detail,
+      }
+    })
+    .filter(Boolean)
+}
+
 function resolvePipelineStage(lead) {
   const explicit = String(lead?.pipeline_stage || '').trim().toLowerCase()
   if (explicit === 'contacted') return 'Contacted'
@@ -2088,6 +2123,7 @@ function App({ initialTab = 'leads' }) {
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
   const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
+  const [showLeadScoreBreakdown, setShowLeadScoreBreakdown] = useState(false)
   const [taskAiPreviewLead, setTaskAiPreviewLead] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [activeMailPack, setActiveMailPack] = useState('')
@@ -5540,10 +5576,12 @@ function App({ initialTab = 'leads' }) {
 
   function openLeadDetailsModal(lead) {
     setLeadDetailsPreviewLead(lead || null)
+    setShowLeadScoreBreakdown(false)
   }
 
   function closeLeadDetailsModal() {
     setLeadDetailsPreviewLead(null)
+    setShowLeadScoreBreakdown(false)
   }
 
   function openAiSummaryModal(lead) {
@@ -9555,6 +9593,9 @@ function App({ initialTab = 'leads' }) {
         const ldReviews = Number(ld.review_count || 0)
         const ldGoogleClaimed = Boolean(ld.google_claimed)
         const ldPhone = ld.phone_formatted || ld.phone_number
+        const ldEnrichmentPayload = parseLeadEnrichmentData(ld)
+        const ldScoreBreakdown = resolveLeadScoreBreakdown(ld)
+        const ldNicheName = String(ldEnrichmentPayload?.user_niche || user?.niche || getStoredValue('lf_niche') || '').trim() || 'Current Niche'
         return (
           <div
             className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/85 px-4"
@@ -9580,6 +9621,16 @@ function App({ initialTab = 'leads' }) {
                       <Sparkles className="h-3 w-3" /> Niche {formatLeadScoreValue(ldScore)}/10
                     </span>
                   )}
+                  {ldScoreBreakdown.length > 0 && (
+                    <button
+                      type="button"
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${showLeadScoreBreakdown ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-200' : 'border-slate-600/60 bg-slate-800/70 text-slate-300 hover:border-cyan-500/40 hover:text-cyan-200'}`}
+                      onClick={() => setShowLeadScoreBreakdown((prev) => !prev)}
+                      title="Show Niche Suitability Breakdown"
+                    >
+                      <Info className="h-3.5 w-3.5" /> Breakdown
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 text-slate-400 transition hover:bg-white/10 hover:text-white"
@@ -9590,6 +9641,33 @@ function App({ initialTab = 'leads' }) {
               </div>
 
               <div className="max-h-[70vh] overflow-y-auto p-6 space-y-4">
+
+                {showLeadScoreBreakdown && ldScoreBreakdown.length > 0 && (
+                  <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">Niche Suitability Breakdown</p>
+                      <span className="text-[10px] text-slate-400">{ldNicheName}</span>
+                    </div>
+                    <div className="space-y-2">
+                      {ldScoreBreakdown.map((row, index) => {
+                        const positive = Number(row?.impact || 0) >= 0
+                        const impactValue = Number(row?.impact || 0)
+                        const impactLabel = `${positive ? '+' : ''}${impactValue.toFixed(1)}`
+                        return (
+                          <div key={`score-breakdown-${index}-${row.label}`} className="flex items-start gap-2 rounded-xl border border-white/10 bg-slate-900/60 px-3 py-2">
+                            <span className={`min-w-[3.1rem] rounded-md border px-1.5 py-0.5 text-center text-xs font-bold ${positive ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/30 bg-rose-500/10 text-rose-300'}`}>
+                              {impactLabel}
+                            </span>
+                            <div className="min-w-0">
+                              <p className={`text-sm font-semibold ${positive ? 'text-emerald-200' : 'text-rose-200'}`}>{row.label}</p>
+                              {row.detail ? <p className="text-xs text-slate-400">{row.detail}</p> : null}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Contact + Business Info row */}
                 <div className="grid gap-3 sm:grid-cols-2">

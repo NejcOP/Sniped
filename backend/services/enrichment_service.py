@@ -456,70 +456,184 @@ class LeadEnricher:
         website_signals: Optional[dict[str, Any]],
         social_profiles: Optional[dict[str, str]],
         page_excerpt: str,
-    ) -> tuple[int, list[str], str]:
+    ) -> tuple[int, list[dict[str, Any]], str]:
         niche_key = self._normalized_niche_label(self.user_niche)
         signals = dict(website_signals or {})
         social = dict(social_profiles or {})
-        issues: list[str] = []
         adjusted = float(base_score)
+        breakdown: list[dict[str, Any]] = []
+
+        def _add_factor(*, impact: float, label: str, detail: str) -> None:
+            nonlocal adjusted
+            adjusted += impact
+            breakdown.append(
+                {
+                    "impact": round(float(impact), 1),
+                    "type": "positive" if impact > 0 else "negative",
+                    "label": str(label).strip(),
+                    "detail": str(detail).strip(),
+                }
+            )
 
         has_meta_pixel = bool(signals.get("has_meta_pixel"))
         has_ga_or_gtm = bool(signals.get("has_google_analytics"))
         has_contact_form = bool(signals.get("has_contact_form"))
         modern_design = bool(signals.get("modern_design"))
+        has_any_social = any(str(url or "").strip() for url in social.values())
         tech_stack = [str(item or "").strip().lower() for item in (signals.get("tech_stack") or [])]
         summary_blob = f"{str(shortcoming or '').lower()} {str(page_excerpt or '').lower()}"
 
+        if has_any_social:
+            _add_factor(
+                impact=0.5,
+                label="Active social footprint",
+                detail="Social profiles are present and can support trust + retargeting plays.",
+            )
+        if has_email:
+            _add_factor(
+                impact=0.4,
+                label="Business email reachable",
+                detail="Email channel exists, which improves outbound conversion readiness.",
+            )
+
         if niche_key == "web_design":
             if insecure_site:
-                adjusted -= 2.0
-                issues.append("Missing HTTPS")
+                _add_factor(
+                    impact=-2.0,
+                    label="Missing HTTPS",
+                    detail="Browser trust and conversion confidence are reduced without SSL.",
+                )
+            else:
+                _add_factor(
+                    impact=0.6,
+                    label="HTTPS enabled",
+                    detail="SSL trust baseline is in place.",
+                )
             if not modern_design:
-                adjusted -= 2.0
-                issues.append("Weak mobile responsiveness / outdated UX")
+                _add_factor(
+                    impact=-2.0,
+                    label="Weak mobile responsiveness / outdated UX",
+                    detail="Layout and UX likely underperform on mobile traffic.",
+                )
+            else:
+                _add_factor(
+                    impact=0.7,
+                    label="Modern mobile-ready design",
+                    detail="The site shows modern UX patterns suitable for redesign upsell.",
+                )
             if "slow" in summary_blob or "page speed" in summary_blob:
-                adjusted -= 1.5
-                issues.append("Likely page-speed bottleneck")
+                _add_factor(
+                    impact=-1.5,
+                    label="Likely page-speed bottleneck",
+                    detail="Speed issues indicate direct conversion and SEO opportunity.",
+                )
             if not tech_stack or "unknown" in tech_stack:
-                adjusted -= 0.8
-                issues.append("CMS/stack is unclear")
+                _add_factor(
+                    impact=-0.8,
+                    label="CMS/stack is unclear",
+                    detail="Unclear stack suggests technical debt and migration opportunity.",
+                )
+            else:
+                _add_factor(
+                    impact=0.5,
+                    label="CMS/stack detected",
+                    detail="Platform signals are available for focused redesign recommendations.",
+                )
 
         elif niche_key == "paid_ads":
             if not has_meta_pixel:
-                adjusted -= 3.0
-                issues.append("Missing Meta Pixel")
+                _add_factor(
+                    impact=-3.0,
+                    label="Missing Meta Pixel",
+                    detail="Retargeting + conversion attribution for paid social is missing.",
+                )
+            else:
+                _add_factor(
+                    impact=0.9,
+                    label="Meta Pixel detected",
+                    detail="Tracking foundation exists for paid acquisition scaling.",
+                )
             if not has_ga_or_gtm:
-                adjusted -= 1.8
-                issues.append("Missing Google Analytics / GTM")
+                _add_factor(
+                    impact=-1.8,
+                    label="Missing Google Analytics / GTM",
+                    detail="Cross-channel measurement is weak or incomplete.",
+                )
+            else:
+                _add_factor(
+                    impact=0.7,
+                    label="GA/GTM present",
+                    detail="Measurement stack supports campaign optimization work.",
+                )
             if not has_contact_form or not modern_design:
-                adjusted -= 1.2
-                issues.append("Landing page quality likely weak")
+                _add_factor(
+                    impact=-1.2,
+                    label="Landing page quality likely weak",
+                    detail="Page UX/contact flow likely leaks paid traffic value.",
+                )
+            else:
+                _add_factor(
+                    impact=0.6,
+                    label="Landing conversion basics are present",
+                    detail="Form and modern page structure support ad traffic capture.",
+                )
 
         elif niche_key in {"lead_gen", "b2b_service"}:
             if not has_contact_form:
-                adjusted -= 2.2
-                issues.append("No clear contact form")
+                _add_factor(
+                    impact=-2.2,
+                    label="No clear contact form",
+                    detail="Lead capture friction is high without a clear inbound form.",
+                )
+            else:
+                _add_factor(
+                    impact=0.8,
+                    label="Contact form present",
+                    detail="Core inbound lead capture path exists.",
+                )
             if not self._linkedin_company_present(social):
-                adjusted -= 1.8
-                issues.append("No clear LinkedIn company presence")
+                _add_factor(
+                    impact=-1.8,
+                    label="No clear LinkedIn company presence",
+                    detail="Company trust/distribution channel on LinkedIn is weak.",
+                )
+            else:
+                _add_factor(
+                    impact=0.7,
+                    label="LinkedIn company profile found",
+                    detail="Business has a viable professional social proof channel.",
+                )
             if not has_email:
-                adjusted -= 1.6
-                issues.append("No valid business email")
+                _add_factor(
+                    impact=-1.6,
+                    label="No valid business email",
+                    detail="Outbound and follow-up reliability is reduced.",
+                )
             if not self._has_clear_offer_signal(page_excerpt):
-                adjusted -= 1.2
-                issues.append("Offer clarity is weak")
+                _add_factor(
+                    impact=-1.2,
+                    label="Offer clarity is weak",
+                    detail="Positioning and value proposition are not obvious.",
+                )
+            else:
+                _add_factor(
+                    impact=0.6,
+                    label="Offer clarity detected",
+                    detail="Service proposition is understandable for prospects.",
+                )
 
-        if not issues:
+        negatives = [item for item in breakdown if item.get("impact", 0) < 0]
+        if not negatives:
             tone = "Strong niche fit with no major blockers detected."
         elif niche_key == "web_design":
-            tone = f"Site is outdated and conversion-limited for web design goals: {issues[0]}."
+            tone = f"Site is outdated and conversion-limited for web design goals: {negatives[0].get('label', 'core UX issue')}."
         elif niche_key == "paid_ads":
-            tone = f"Missing core ad-tracking foundations ({issues[0]}), which creates immediate paid media leakage."
+            tone = f"Missing core ad-tracking foundations ({negatives[0].get('label', 'tracking gap')}), which creates immediate paid media leakage."
         else:
-            tone = f"Lead capture trust stack is weak for B2B outreach: {issues[0]}."
+            tone = f"Lead capture trust stack is weak for B2B outreach: {negatives[0].get('label', 'conversion blocker')}."
 
         final_score = max(1, min(10, int(round(adjusted))))
-        return final_score, issues, tone
+        return final_score, breakdown, tone
 
     def export_ai_mailer_ready(self, output_csv: str = "ai_mailer_ready.csv") -> int:
         rows = self._fetch_ai_mailer_rows()
@@ -1889,13 +2003,22 @@ class LeadEnricher:
             return score, summary, hook, deep_payload
 
         if self.openai_api_key is None:
-            heuristic_score = self._heuristic_score(
+            base_heuristic = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
                 website_signals=website_signals,
                 social_profiles=social_profiles,
                 page_excerpt=page_excerpt,
-                user_niche=self.user_niche,
+                user_niche=None,
+            )
+            heuristic_score, score_breakdown, niche_tone = self._apply_niche_suitability_adjustment(
+                base_score=base_heuristic,
+                shortcoming=shortcoming,
+                insecure_site=insecure_site,
+                has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -1915,9 +2038,14 @@ class LeadEnricher:
             )
             deep_payload["user_niche"] = str(self.user_niche or "").strip()
             deep_payload["niche_suitability_score"] = heuristic_score
+            deep_payload["niche_base_score"] = base_heuristic
+            deep_payload["score_breakdown"] = score_breakdown
+            deep_payload["niche_focus_issues"] = [
+                item.get("label") for item in score_breakdown if float(item.get("impact") or 0) < 0
+            ]
             return (
                 heuristic_score,
-                str(shortcoming or "").strip() or "Heuristic scoring used (OpenAI unavailable).",
+                niche_tone or str(shortcoming or "").strip() or "Heuristic scoring used (OpenAI unavailable).",
                 str(deep_payload.get("competitive_hook") or "").strip(),
                 deep_payload,
             )
@@ -1947,9 +2075,18 @@ class LeadEnricher:
                             "Lead REJECTED by qualification: %s (confidence=%d) — %s",
                             business_name, confidence, reason,
                         )
-                        heuristic_score = self._heuristic_score(
+                        base_heuristic = self._heuristic_score(
                             website_url=website_url, rating=rating, review_count=review_count,
                             shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
+                        )
+                        heuristic_score, score_breakdown, _niche_tone = self._apply_niche_suitability_adjustment(
+                            base_score=base_heuristic,
+                            shortcoming=shortcoming,
+                            insecure_site=insecure_site,
+                            has_email=has_email,
+                            website_signals=website_signals,
+                            social_profiles=social_profiles,
+                            page_excerpt=page_excerpt,
                         )
                         deep_payload = self._build_deep_intelligence_payload(
                             business_name=business_name, website_url=website_url, rating=rating,
@@ -1959,6 +2096,10 @@ class LeadEnricher:
                         )
                         deep_payload["qualification_rejected"] = True
                         deep_payload["qualification_reason"] = reason
+                        deep_payload["user_niche"] = str(self.user_niche or "").strip()
+                        deep_payload["niche_suitability_score"] = heuristic_score
+                        deep_payload["niche_base_score"] = base_heuristic
+                        deep_payload["score_breakdown"] = score_breakdown
                         return (
                             heuristic_score,
                             f"[Category Mismatch] {reason}",
@@ -2025,7 +2166,7 @@ class LeadEnricher:
             if not ai_summary:
                 ai_summary = str(shortcoming or "").strip() or "AI scoring completed."
 
-            score, niche_issues, niche_tone = self._apply_niche_suitability_adjustment(
+            score, score_breakdown, niche_tone = self._apply_niche_suitability_adjustment(
                 base_score=base_score,
                 shortcoming=shortcoming,
                 insecure_site=insecure_site,
@@ -2034,8 +2175,10 @@ class LeadEnricher:
                 social_profiles=social_profiles,
                 page_excerpt=page_excerpt,
             )
-            if niche_issues:
-                ai_summary = f"{niche_tone} Recommended fix: prioritize {niche_issues[0].lower()}."
+            negative_items = [item for item in score_breakdown if float(item.get("impact") or 0) < 0]
+            if negative_items:
+                first_issue = str(negative_items[0].get("label") or "").strip().lower()
+                ai_summary = f"{niche_tone} Recommended fix: prioritize {first_issue}."
 
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -2056,8 +2199,11 @@ class LeadEnricher:
             )
             deep_payload["user_niche"] = str(self.user_niche or "").strip()
             deep_payload["niche_suitability_score"] = score
-            deep_payload["niche_focus_issues"] = niche_issues
+            deep_payload["niche_focus_issues"] = [
+                item.get("label") for item in score_breakdown if float(item.get("impact") or 0) < 0
+            ]
             deep_payload["niche_base_score"] = base_score
+            deep_payload["score_breakdown"] = score_breakdown
             if competitive_hook and not str(deep_payload.get("competitive_hook") or "").strip():
                 deep_payload["competitive_hook"] = competitive_hook
 
@@ -2100,13 +2246,22 @@ class LeadEnricher:
 
         except (TimeoutError, asyncio.TimeoutError):
             logging.warning("OpenAI timeout for %s — using heuristic score.", business_name)
-            heuristic_score = self._heuristic_score(
+            base_heuristic = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
                 website_signals=website_signals,
                 social_profiles=social_profiles,
                 page_excerpt=page_excerpt,
-                user_niche=self.user_niche,
+                user_niche=None,
+            )
+            heuristic_score, score_breakdown, niche_tone = self._apply_niche_suitability_adjustment(
+                base_score=base_heuristic,
+                shortcoming=shortcoming,
+                insecure_site=insecure_site,
+                has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -2124,21 +2279,34 @@ class LeadEnricher:
                 social_profiles=social_profiles,
                 social_metrics=social_metrics,
             )
+            deep_payload["user_niche"] = str(self.user_niche or "").strip()
+            deep_payload["niche_suitability_score"] = heuristic_score
+            deep_payload["niche_base_score"] = base_heuristic
+            deep_payload["score_breakdown"] = score_breakdown
             return (
                 heuristic_score,
-                "AI scoring timed out (15s limit). Heuristic score used.",
+                niche_tone or "AI scoring timed out (15s limit). Heuristic score used.",
                 str(deep_payload.get("competitive_hook") or "").strip(),
                 deep_payload,
             )
         except Exception as exc:
             logging.warning("AI score generation failed for %s: %s", business_name, exc)
-            heuristic_score = self._heuristic_score(
+            base_heuristic = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
                 website_signals=website_signals,
                 social_profiles=social_profiles,
                 page_excerpt=page_excerpt,
-                user_niche=self.user_niche,
+                user_niche=None,
+            )
+            heuristic_score, score_breakdown, niche_tone = self._apply_niche_suitability_adjustment(
+                base_score=base_heuristic,
+                shortcoming=shortcoming,
+                insecure_site=insecure_site,
+                has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -2156,9 +2324,13 @@ class LeadEnricher:
                 social_profiles=social_profiles,
                 social_metrics=social_metrics,
             )
+            deep_payload["user_niche"] = str(self.user_niche or "").strip()
+            deep_payload["niche_suitability_score"] = heuristic_score
+            deep_payload["niche_base_score"] = base_heuristic
+            deep_payload["score_breakdown"] = score_breakdown
             return (
                 heuristic_score,
-                str(shortcoming or "").strip() or "Heuristic scoring used after AI failure.",
+                niche_tone or str(shortcoming or "").strip() or "Heuristic scoring used after AI failure.",
                 str(deep_payload.get("competitive_hook") or "").strip(),
                 deep_payload,
             )
