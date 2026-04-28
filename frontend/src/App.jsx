@@ -21,7 +21,6 @@ import {
   Lock,
   Mail,
   MessageCircle,
-  PhoneCall,
   PlusCircle,
   RefreshCw,
   Save,
@@ -1152,7 +1151,7 @@ const repliedLeadStatuses = new Set([
 
 function isQualifiedLead(lead) {
   const status = String(lead?.status || '').toLowerCase().trim()
-  const score = Number(lead?.ai_score || 0)
+  const score = resolveBestLeadScore(lead)
   return qualifiedLeadStatuses.has(status) || score >= 7
 }
 
@@ -1211,6 +1210,49 @@ function normalizeLeadScoreTen(rawScore) {
   return Math.max(0, Math.min(10, Math.round(normalized * 10) / 10))
 }
 
+function normalizeLeadTechSignals(lead) {
+  const signals = []
+  const rawTech = lead?.tech_stack
+  if (Array.isArray(rawTech)) {
+    signals.push(...rawTech)
+  } else if (typeof rawTech === 'string') {
+    signals.push(...rawTech.split(/[\n,;|]/))
+  }
+
+  const websiteSignals = lead?.website_signals && typeof lead.website_signals === 'object' ? lead.website_signals : {}
+  if (websiteSignals.cms) signals.push(websiteSignals.cms)
+  if (websiteSignals.platform) signals.push(websiteSignals.platform)
+
+  const audit = lead?.company_audit && typeof lead.company_audit === 'object' ? lead.company_audit : {}
+  if (Array.isArray(audit.tech_stack)) signals.push(...audit.tech_stack)
+
+  return signals
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter(Boolean)
+}
+
+function deriveLeadTechScoreAdjustment(lead) {
+  const websiteUrl = String(lead?.website_url || lead?.website || '').trim().toLowerCase()
+  const hasWebsite = Boolean(websiteUrl)
+  const techSignals = normalizeLeadTechSignals(lead)
+
+  const modernIndicators = [
+    'shopify', 'wordpress', 'webflow', 'next.js', 'react', 'gatsby', 'wix', 'squarespace',
+    'hubspot', 'ga4', 'google analytics', 'google tag manager', 'gtm', 'meta pixel',
+  ]
+  const datedIndicators = ['joomla', 'drupal', 'flash', 'magento 1', 'legacy', 'outdated']
+
+  const modernHits = modernIndicators.reduce((acc, token) => (techSignals.some((signal) => signal.includes(token)) ? acc + 1 : acc), 0)
+  const datedHits = datedIndicators.reduce((acc, token) => (techSignals.some((signal) => signal.includes(token)) ? acc + 1 : acc), 0)
+
+  let adjustment = hasWebsite ? 0.4 : -2.2
+  adjustment += Math.min(1.6, modernHits * 0.35)
+  adjustment -= Math.min(1.8, datedHits * 0.45)
+
+  if (!lead?.email) adjustment -= 0.35
+  return Math.max(-3, Math.min(2.2, adjustment))
+}
+
 function formatLeadScoreValue(rawScore) {
   const normalized = normalizeLeadScoreTen(rawScore)
   if (normalized <= 0) return '0'
@@ -1218,14 +1260,16 @@ function formatLeadScoreValue(rawScore) {
 }
 
 function resolveBestLeadScore(lead) {
+  const techAdjustment = deriveLeadTechScoreAdjustment(lead)
+
   const aiScore = Number(lead?.ai_score ?? 0)
   if (Number.isFinite(aiScore) && aiScore > 0) {
-    return normalizeLeadScoreTen(aiScore)
+    return normalizeLeadScoreTen(aiScore + techAdjustment)
   }
 
   const directScore = Number(lead?.best_lead_score ?? lead?.lead_score_100 ?? lead?.score_100 ?? 0)
   if (Number.isFinite(directScore) && directScore > 0) {
-    return normalizeLeadScoreTen(directScore)
+    return normalizeLeadScoreTen(directScore + techAdjustment)
   }
 
   const aiSentiment = Number(lead?.ai_sentiment_score ?? (aiScore <= 10 ? aiScore * 10 : aiScore) ?? 0)
@@ -1233,7 +1277,7 @@ function resolveBestLeadScore(lead) {
   const emailComponent = lead?.email ? 40 : 8
   const sizeComponent = employeeCount >= 100 ? 30 : employeeCount >= 40 ? 26 : employeeCount >= 15 ? 22 : employeeCount >= 5 ? 16 : 10
   const fallbackScore = Math.min(100, emailComponent + sizeComponent + Math.max(0, Math.min(100, aiSentiment)) * 0.3)
-  return normalizeLeadScoreTen(fallbackScore)
+  return normalizeLeadScoreTen(fallbackScore + (techAdjustment * 10))
 }
 
 function resolveLeadSignalScore(lead) {
@@ -2035,6 +2079,7 @@ function App({ initialTab = 'leads' }) {
   const [coldOutreachError, setColdOutreachError] = useState('')
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
+  const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
   const [taskAiPreviewLead, setTaskAiPreviewLead] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [activeMailPack, setActiveMailPack] = useState('')
@@ -3008,7 +3053,7 @@ function App({ initialTab = 'leads' }) {
       void refreshUserProfile()
     }, 30000)
     return () => window.clearInterval(profileId)
-  }, [])
+  }, [refreshUserProfile])
 
   const fetchNicheAdvice = useCallback(async ({ silent = false, forceRefresh = false, countryCode = null } = {}) => {
     try {
@@ -3210,7 +3255,7 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function refreshUserProfile(options = {}) {
+  const refreshUserProfile = useCallback(async (options = {}) => {
     const token = getStoredValue('lf_token')
     if (!token) return null
 
@@ -3219,6 +3264,8 @@ function App({ initialTab = 'leads' }) {
     const preserveCreditsLimit = Math.max(0, Number(options?.preserveCreditsLimit || 0))
     const preserveCreditsBalance = Math.max(0, Number(options?.preserveCreditsBalance || 0))
     const preserveTopupBalance = Math.max(0, Number(options?.preserveTopupBalance || 0))
+    const enrichStatus = String(tasks?.enrich?.status || '').toLowerCase().trim()
+    const freezeEnrichmentCredits = ['queued', 'running'].includes(enrichStatus) || pendingRequest === 'enrich' || enrichRunRequested
 
     try {
       const data = await fetchJson('/api/auth/profile', {
@@ -3244,6 +3291,18 @@ function App({ initialTab = 'leads' }) {
       )
 
       setUser((prev) => {
+        const prevCreditsBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
+        const incomingCreditsBalance = Number(data?.credits_balance ?? data?.credits ?? prevCreditsBalance)
+        const guardedCreditsBalance = freezeEnrichmentCredits
+          ? Math.max(prevCreditsBalance, incomingCreditsBalance)
+          : incomingCreditsBalance
+
+        const prevTopupBalance = Number(prev?.topup_credits_balance ?? 0)
+        const incomingTopupBalance = Number(data?.topup_credits_balance ?? prevTopupBalance)
+        const guardedTopupBalance = freezeEnrichmentCredits
+          ? Math.max(prevTopupBalance, incomingTopupBalance)
+          : incomingTopupBalance
+
         const resolvedFeatureAccess = resolveFeatureAccess(
           data?.plan_type ?? data?.plan_key ?? prev?.plan_type ?? prev?.plan_key ?? 'free',
           data?.feature_access ?? prev?.feature_access,
@@ -3251,13 +3310,13 @@ function App({ initialTab = 'leads' }) {
         const nextState = {
           ...prev,
           ...data,
-          credits: Number(data?.credits ?? data?.credits_balance ?? prev.credits ?? prev.credits_balance ?? 0),
+          credits: guardedCreditsBalance,
           creditLimit: Number(data?.creditLimit ?? data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? prev.creditLimit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          credits_balance: Number(data?.credits_balance ?? prev.credits_balance ?? 0),
+          credits_balance: guardedCreditsBalance,
           credits_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
           monthly_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? prev.monthly_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
           monthly_quota: Number(data?.monthly_quota ?? prev.monthly_quota ?? prev.monthly_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          topup_credits_balance: Number(data?.topup_credits_balance ?? prev.topup_credits_balance ?? 0),
+          topup_credits_balance: guardedTopupBalance,
           next_reset_at: data?.next_reset_at ?? prev.next_reset_at,
           next_reset_in_days: data?.next_reset_in_days ?? prev.next_reset_in_days,
           isSubscribed: Boolean(data?.isSubscribed ?? prev.isSubscribed ?? false),
@@ -3327,9 +3386,17 @@ function App({ initialTab = 'leads' }) {
         localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
         localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
       } else {
-        localStorage.setItem('lf_credits', String(Number(data?.credits ?? data?.credits_balance ?? 0)))
-        localStorage.setItem('lf_credits_balance', String(Number(data?.credits_balance ?? data?.credits ?? 0)))
-        localStorage.setItem('lf_topup_credits_balance', String(Number(data?.topup_credits_balance ?? 0)))
+        const currentStoredBalance = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
+        const currentStoredTopup = Number(getStoredValue('lf_topup_credits_balance') || 0)
+        const nextStoredBalance = freezeEnrichmentCredits
+          ? Math.max(currentStoredBalance, Number(data?.credits ?? data?.credits_balance ?? 0))
+          : Number(data?.credits ?? data?.credits_balance ?? 0)
+        const nextStoredTopup = freezeEnrichmentCredits
+          ? Math.max(currentStoredTopup, Number(data?.topup_credits_balance ?? 0))
+          : Number(data?.topup_credits_balance ?? 0)
+        localStorage.setItem('lf_credits', String(nextStoredBalance))
+        localStorage.setItem('lf_credits_balance', String(nextStoredBalance))
+        localStorage.setItem('lf_topup_credits_balance', String(nextStoredTopup))
         localStorage.setItem('lf_credits_limit', String(Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? data?.creditLimit ?? DEFAULT_FREE_CREDIT_LIMIT)))
         localStorage.setItem('lf_plan_key', String(data?.plan_key ?? 'free').toLowerCase().trim() || 'free')
         localStorage.setItem('lf_plan_name', String(data?.currentPlanName ?? 'Free Plan').trim() || 'Free Plan')
@@ -3342,7 +3409,7 @@ function App({ initialTab = 'leads' }) {
       // Keep existing credits values if profile call fails.
       return null
     }
-  }
+  }, [tasks?.enrich?.status, pendingRequest, enrichRunRequested])
 
   const applyOptimisticSubscriptionState = useCallback((rawPlanKey) => {
     const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
@@ -3413,7 +3480,7 @@ function App({ initialTab = 'leads' }) {
         return
       }
     }
-  }, [applyOptimisticSubscriptionState])
+  }, [applyOptimisticSubscriptionState, refreshUserProfile])
 
   useEffect(() => {
     const checkoutStatus = String(searchParams.get('checkout') || '').trim().toLowerCase()
@@ -5130,8 +5197,12 @@ function App({ initialTab = 'leads' }) {
       toast.success(`Lead \u2192 ${nextStatus}`)
       if (wasPaid) shootConfetti()
       await Promise.allSettled([refreshLeads(), refreshStats(), refreshWorkers(), refreshDeliveryTasks()])
+      return true
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Lead status update failed')
+      const message = error instanceof Error ? error.message : 'Lead status update failed'
+      setLastError(message)
+      toast.error(message)
+      return false
     } finally {
       setPendingStatusLeadId(null)
     }
@@ -5149,9 +5220,36 @@ function App({ initialTab = 'leads' }) {
       toast.success(`Tier \u2192 ${newTier}`)
       await Promise.allSettled([refreshLeads(), refreshStats()])
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Tier update failed')
+      const message = error instanceof Error ? error.message : 'Tier update failed'
+      setLastError(message)
+      toast.error(message)
     } finally {
       setPendingTierLeadId(null)
+    }
+  }
+
+  async function removeLeadFromActiveView(lead) {
+    if (!lead?.id) return
+    const confirmed = window.confirm(`Remove ${lead.business_name || 'this lead'} from active view?`)
+    if (!confirmed) return
+
+    setPendingBlacklistLeadId(lead.id)
+    setLastError('')
+    try {
+      await fetchJson(`/api/leads/${lead.id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'Blacklisted' }),
+      })
+      setLeads((prev) => prev.filter((item) => Number(item.id) !== Number(lead.id)))
+      toast.success('Lead removed from active view')
+      await Promise.allSettled([refreshLeads(), refreshStats(), refreshBlacklistEntries()])
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not remove lead'
+      setLastError(message)
+      toast.error(message)
+    } finally {
+      setPendingBlacklistLeadId(null)
     }
   }
 
@@ -5397,17 +5495,27 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  function sendManualEmail(lead) {
+  async function moveLeadToMailer(lead) {
     if (!lead?.email) {
       toast.error('Lead has no email')
       return
     }
-    const subject = encodeURIComponent(`Quick idea for ${lead.business_name || 'your business'}`)
-    window.location.href = `mailto:${lead.email}?subject=${subject}`
-  }
 
-  function setMeetingStatus(leadId) {
-    void updateLeadStatus(leadId, 'Meeting Set')
+    const status = String(lead?.status || '').toLowerCase().trim()
+    const statusAlreadyMoved = new Set(['emailed', 'interested', 'replied', 'meeting set', 'zoom scheduled', 'closed', 'paid'])
+
+    if (!statusAlreadyMoved.has(status)) {
+      const ok = await updateLeadStatus(lead.id, 'Emailed')
+      if (!ok) return
+    }
+
+    setActiveTab('mail')
+    if (lead.generated_email_body) {
+      openEmailPreviewModal(lead)
+      toast.success('Lead moved to Mailer and draft opened')
+    } else {
+      toast.success('Lead moved to Mailer')
+    }
   }
 
   function openEmailPreviewModal(lead) {
@@ -5420,6 +5528,14 @@ function App({ initialTab = 'leads' }) {
 
   function closeEmailPreviewModal() {
     setEmailPreviewLead(null)
+  }
+
+  function openLeadDetailsModal(lead) {
+    setLeadDetailsPreviewLead(lead || null)
+  }
+
+  function closeLeadDetailsModal() {
+    setLeadDetailsPreviewLead(null)
   }
 
   function openAiSummaryModal(lead) {
@@ -7229,17 +7345,22 @@ function App({ initialTab = 'leads' }) {
                             ) : (
                               <div className="flex flex-col gap-0.5">
                                 <div className="flex items-center gap-0.5">
-                                  {Number(lead.ai_score || 0) >= 9 && (
+                                  {Number(bestLeadScore || 0) >= 9 && (
                                     <span className="text-amber-400 text-xs leading-none">★</span>
                                   )}
-                                  <span className={`score-orb ${scoreHeatTone(lead.ai_score)}`}>
-                                    {lead.ai_score != null ? Number(lead.ai_score).toFixed(1) : '--'}
+                                  <span className={`score-orb ${scoreHeatTone(bestLeadScore)}`}>
+                                    {bestLeadScore > 0 ? Number(bestLeadScore).toFixed(1) : '--'}
                                   </span>
                                 </div>
                                 {bestLeadScore > 0 && (
                                   <span className="text-[10px] font-semibold text-cyan-200">
                                     AI {formatLeadScoreValue(bestLeadScore)}/10{lead.lead_priority ? ` · ${lead.lead_priority}` : ''}
                                   </span>
+                                )}
+                                {isQualifiedLead(lead) ? (
+                                  <span className="text-[10px] font-semibold text-emerald-200">Qualified</span>
+                                ) : (
+                                  <span className="text-[10px] font-semibold text-amber-200">Needs work</span>
                                 )}
                                 {Number(lead.qualification_score || 0) > 0 && (
                                   <span className="text-[10px] font-semibold text-amber-200">
@@ -7320,7 +7441,10 @@ function App({ initialTab = 'leads' }) {
                           {/* Actions — icon-only buttons */}
                           <td className="td-cell">
                             <div className="flex items-center justify-center gap-1">
-                              <button type="button" className="icon-action-btn" onClick={() => sendManualEmail(lead)} title="Send Manual Email">
+                              <button type="button" className="icon-action-btn" onClick={() => openLeadDetailsModal(lead)} title="View lead details">
+                                <Eye className="h-3.5 w-3.5" />
+                              </button>
+                              <button type="button" className="icon-action-btn" onClick={() => void moveLeadToMailer(lead)} title="Move to Mailer">
                                 <Mail className="h-3.5 w-3.5" />
                               </button>
                               <button
@@ -7332,8 +7456,14 @@ function App({ initialTab = 'leads' }) {
                               >
                                 <Ban className="h-3.5 w-3.5" />
                               </button>
-                              <button type="button" className="icon-action-btn" onClick={() => setMeetingStatus(lead.id)} title="Set Meeting">
-                                <PhoneCall className="h-3.5 w-3.5" />
+                              <button
+                                type="button"
+                                className="icon-action-btn"
+                                disabled={pendingBlacklistLeadId === lead.id}
+                                onClick={() => void removeLeadFromActiveView(lead)}
+                                title={pendingBlacklistLeadId === lead.id ? 'Removing…' : 'Remove from active view'}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             </div>
                           </td>
@@ -7388,6 +7518,7 @@ function App({ initialTab = 'leads' }) {
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
                               <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Score {formatLeadScoreValue(bestLeadScore)}/10</span>
+                              <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${isQualifiedLead(lead) ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/30 bg-amber-500/10 text-amber-100'}`}>{isQualifiedLead(lead) ? 'Qualified' : 'Needs work'}</span>
                               {Number(lead.qualification_score || 0) > 0 && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-100">Q {Math.round(Number(lead.qualification_score || 0))}/100</span>}
                               {socialLinks.map((social) => (
                                 <a
@@ -7408,16 +7539,16 @@ function App({ initialTab = 'leads' }) {
                           </div>
 
                           <div className="mt-4 grid gap-2">
-                            <button type="button" className="btn-primary w-full justify-center py-3 text-sm" onClick={() => sendManualEmail(lead)}>
+                            <button type="button" className="btn-primary w-full justify-center py-3 text-sm" onClick={() => void moveLeadToMailer(lead)}>
                               <Send className="h-4 w-4" />
-                              Send Email
+                              Move to Mailer
                             </button>
                             <div className="grid grid-cols-3 gap-2">
-                              <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => openAiSummaryModal(lead)}>
+                              <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => openLeadDetailsModal(lead)}>
                                 <Eye className="h-4 w-4" />
                               </button>
-                              <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => setMeetingStatus(lead.id)}>
-                                <PhoneCall className="h-4 w-4" />
+                              <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => openAiSummaryModal(lead)}>
+                                <Sparkles className="h-4 w-4" />
                               </button>
                               <button
                                 type="button"
@@ -7428,6 +7559,14 @@ function App({ initialTab = 'leads' }) {
                                 <Ban className="h-4 w-4" />
                               </button>
                             </div>
+                            <button
+                              type="button"
+                              className="btn-ghost w-full justify-center px-2 py-2 text-xs"
+                              disabled={pendingBlacklistLeadId === lead.id}
+                              onClick={() => void removeLeadFromActiveView(lead)}
+                            >
+                              <Trash2 className="h-4 w-4" /> Remove
+                            </button>
                           </div>
                         </article>
                       )
@@ -9385,6 +9524,63 @@ function App({ initialTab = 'leads' }) {
               ) : (
                 <p className="mt-1 text-sm text-slate-400">No email generated for this lead yet.</p>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {leadDetailsPreviewLead && (
+        <div
+          className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/80 px-4"
+          onClick={(e) => { if (e.target === e.currentTarget) closeLeadDetailsModal() }}
+        >
+          <div className="w-full max-w-3xl rounded-3xl border border-white/10 bg-slate-900 p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-semibold text-white">Lead Details</h3>
+                <p className="text-sm text-slate-400">{leadDetailsPreviewLead.business_name || 'Unknown business'}</p>
+              </div>
+              <button type="button" className="copy-btn" onClick={closeLeadDetailsModal} title="Close">×</button>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Contact</p>
+                <p className="mt-1 text-slate-100">{leadDetailsPreviewLead.contact_name || '—'}</p>
+                <p className="mt-1 text-slate-300">{leadDetailsPreviewLead.email || '—'}</p>
+                <p className="mt-1 text-slate-300">{leadDetailsPreviewLead.phone_formatted || leadDetailsPreviewLead.phone_number || '—'}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Pipeline</p>
+                <p className="mt-1 text-slate-100">Status: {normalizeLeadStatus(leadDetailsPreviewLead.status)}</p>
+                <p className="mt-1 text-slate-300">Stage: {resolvePipelineStage(leadDetailsPreviewLead)}</p>
+                <p className="mt-1 text-slate-300">Score: {formatLeadScoreValue(resolveBestLeadScore(leadDetailsPreviewLead))}/10</p>
+              </div>
+            </div>
+
+            {leadDetailsPreviewLead.website_url ? (
+              <a
+                className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-cyan-300 hover:text-cyan-100"
+                href={leadDetailsPreviewLead.website_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <Globe className="h-4 w-4" /> Open Website
+              </a>
+            ) : null}
+
+            <div className="mt-4">
+              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">AI Summary</p>
+              <pre className="code-block mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words text-slate-100">
+                {String(leadDetailsPreviewLead.ai_description || 'No AI summary available.')}
+              </pre>
+            </div>
+
+            <div className="mt-4">
+              <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Raw Lead Data</p>
+              <pre className="code-block mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-slate-100">
+                {JSON.stringify(leadDetailsPreviewLead, null, 2)}
+              </pre>
             </div>
           </div>
         </div>
