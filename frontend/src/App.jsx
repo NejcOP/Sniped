@@ -5502,11 +5502,6 @@ function App({ initialTab = 'leads' }) {
   }
 
   async function moveLeadToMailer(lead) {
-    if (!lead?.email) {
-      toast.error('Lead has no email')
-      return
-    }
-
     const status = String(lead?.status || '').toLowerCase().trim()
     const statusAlreadyMoved = new Set(['emailed', 'interested', 'replied', 'meeting set', 'zoom scheduled', 'closed', 'paid'])
 
@@ -5519,6 +5514,8 @@ function App({ initialTab = 'leads' }) {
     if (lead.generated_email_body) {
       openEmailPreviewModal(lead)
       toast.success('Lead moved to Mailer and draft opened')
+    } else if (!lead?.email) {
+      toast('Lead has no email yet — enrich it first for AI mail generation', { icon: '⚠️' })
     } else {
       toast.success('Lead moved to Mailer')
     }
@@ -7468,11 +7465,7 @@ function App({ initialTab = 'leads' }) {
                                 type="button"
                                 className="icon-action-btn"
                                 disabled={pendingBlacklistLeadId === lead.id}
-                                onClick={() => {
-                                  if (window.confirm('Remove this lead from the active view?')) {
-                                    void removeLeadFromActiveView(lead)
-                                  }
-                                }}
+                                onClick={() => void removeLeadFromActiveView(lead)}
                                 title={pendingBlacklistLeadId === lead.id ? 'Removing…' : 'Remove from active view'}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
