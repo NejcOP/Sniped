@@ -332,11 +332,11 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
 
         niche_instruction_map = {
             "Web Design & Dev": {
-                "focus": "Speed, mobile responsiveness, outdated UX, trust leaks, and weak conversion flow.",
+                "focus": "HTTPS status, mobile responsiveness, page-speed bottlenecks, CMS quality (WordPress/Shopify/Wix/etc.), trust leaks, and weak conversion flow.",
                 "goal": "Find concrete website problems that a modern web/design service can fix fast.",
             },
             "Paid Ads Agency": {
-                "focus": "Tracking gaps, weak landing pages, low intent capture, and paid traffic waste.",
+                "focus": "Meta Pixel presence, Google Analytics/GTM coverage, landing-page quality, tracking gaps, low intent capture, and paid traffic waste.",
                 "goal": "Expose where paid acquisition efficiency is leaking and how to recover it.",
             },
             "SEO & Content": {
@@ -344,11 +344,11 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
                 "goal": "Show why competitors are winning search demand and what content/SEO fix is needed.",
             },
             "Lead Gen Agency": {
-                "focus": "Pipeline inconsistency, weak outbound systems, poor qualification, and stale positioning.",
+                "focus": "Contact-form capture, LinkedIn company presence, business email validity, clarity of offer, pipeline inconsistency, weak outbound systems, and poor qualification.",
                 "goal": "Find cracks in demand generation and outreach conversion.",
             },
             "B2B Service Provider": {
-                "focus": "Weak authority signals, generic positioning, poor social proof, and unclear differentiation.",
+                "focus": "Contact-form availability, LinkedIn company presence, business email validity, offer clarity, weak authority signals, generic positioning, and poor social proof.",
                 "goal": "Highlight why trust and conversion are being lost before the sales conversation even starts.",
             },
         }
@@ -357,6 +357,7 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
         system_prompt = (
             f"You are Sniped AI, a world-class Lead Generation strategist and sales psychology expert for {niche}.\n\n"
             "Your job is to read raw company data, extract the important business signals, score the lead, and prepare outreach-ready insight.\n\n"
+            f"Analyze this website specifically for a {niche} service provider.\n\n"
             f"NICHE FOCUS: {niche_cfg['focus']}\n"
             f"NICHE GOAL: {niche_cfg['goal']}\n\n"
             "INPUT MAY INCLUDE:\n"
@@ -393,6 +394,7 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
             "- Keep everything specific, evidence-based, and free of corporate fluff.\n"
             "- Do not invent precise achievements unless the input supports them.\n\n"
             "IMPORTANT PIPELINE RULE:\n"
+            "The returned score must represent NICHE SUITABILITY (not a generic website score).\n"
             "Also return 'score' as an integer from 1-10, derived from lead_score_100 for compatibility with the app.\n\n"
             "OUTPUT MUST BE VALID JSON ONLY (NO markdown):\n"
             "{\n"

@@ -228,6 +228,8 @@ class LeadEnricher:
                             "linkedin": str(lead.get("linkedin_url") or "").strip(),
                             "instagram": str(lead.get("instagram_url") or "").strip(),
                             "facebook": str(lead.get("facebook_url") or "").strip(),
+                            "twitter": str(lead.get("twitter_url") or "").strip(),
+                            "youtube": str(lead.get("youtube_url") or "").strip(),
                         }
                         social_metrics: dict[str, dict[str, Any]] = {}
 
@@ -344,6 +346,8 @@ class LeadEnricher:
                                 linkedin_url=social_profiles.get("linkedin"),
                                 instagram_url=social_profiles.get("instagram"),
                                 facebook_url=social_profiles.get("facebook"),
+                                twitter_url=social_profiles.get("twitter"),
+                                youtube_url=social_profiles.get("youtube"),
                                 qualification_score=deep_intelligence.get("qualification_score"),
                             )
                         except Exception as save_exc:
@@ -403,6 +407,120 @@ class LeadEnricher:
             "commercial urgency, and conversion blockers specific to that keyword category."
         )
 
+    @staticmethod
+    def _normalized_niche_label(user_niche: Optional[str]) -> str:
+        niche = str(user_niche or "").strip().lower()
+        if "web design" in niche or "dev" in niche:
+            return "web_design"
+        if "paid ads" in niche:
+            return "paid_ads"
+        if "lead gen" in niche:
+            return "lead_gen"
+        if "b2b service" in niche:
+            return "b2b_service"
+        if "seo" in niche:
+            return "seo_content"
+        return "b2b_service"
+
+    @staticmethod
+    def _domain_cache_key(domain: str, user_niche: Optional[str]) -> str:
+        niche_key = LeadEnricher._normalized_niche_label(user_niche)
+        return f"{domain}|{niche_key}"
+
+    @staticmethod
+    def _linkedin_company_present(social_profiles: Optional[dict[str, str]]) -> bool:
+        linkedin_url = str((social_profiles or {}).get("linkedin") or "").strip().lower()
+        return bool(linkedin_url and "/company/" in linkedin_url)
+
+    @staticmethod
+    def _has_clear_offer_signal(page_excerpt: str) -> bool:
+        blob = str(page_excerpt or "").lower()
+        offer_tokens = [
+            "services",
+            "what we do",
+            "our offer",
+            "book a call",
+            "get quote",
+            "request demo",
+            "start project",
+        ]
+        return any(token in blob for token in offer_tokens)
+
+    def _apply_niche_suitability_adjustment(
+        self,
+        *,
+        base_score: int,
+        shortcoming: str,
+        insecure_site: bool,
+        has_email: bool,
+        website_signals: Optional[dict[str, Any]],
+        social_profiles: Optional[dict[str, str]],
+        page_excerpt: str,
+    ) -> tuple[int, list[str], str]:
+        niche_key = self._normalized_niche_label(self.user_niche)
+        signals = dict(website_signals or {})
+        social = dict(social_profiles or {})
+        issues: list[str] = []
+        adjusted = float(base_score)
+
+        has_meta_pixel = bool(signals.get("has_meta_pixel"))
+        has_ga_or_gtm = bool(signals.get("has_google_analytics"))
+        has_contact_form = bool(signals.get("has_contact_form"))
+        modern_design = bool(signals.get("modern_design"))
+        tech_stack = [str(item or "").strip().lower() for item in (signals.get("tech_stack") or [])]
+        summary_blob = f"{str(shortcoming or '').lower()} {str(page_excerpt or '').lower()}"
+
+        if niche_key == "web_design":
+            if insecure_site:
+                adjusted -= 2.0
+                issues.append("Missing HTTPS")
+            if not modern_design:
+                adjusted -= 2.0
+                issues.append("Weak mobile responsiveness / outdated UX")
+            if "slow" in summary_blob or "page speed" in summary_blob:
+                adjusted -= 1.5
+                issues.append("Likely page-speed bottleneck")
+            if not tech_stack or "unknown" in tech_stack:
+                adjusted -= 0.8
+                issues.append("CMS/stack is unclear")
+
+        elif niche_key == "paid_ads":
+            if not has_meta_pixel:
+                adjusted -= 3.0
+                issues.append("Missing Meta Pixel")
+            if not has_ga_or_gtm:
+                adjusted -= 1.8
+                issues.append("Missing Google Analytics / GTM")
+            if not has_contact_form or not modern_design:
+                adjusted -= 1.2
+                issues.append("Landing page quality likely weak")
+
+        elif niche_key in {"lead_gen", "b2b_service"}:
+            if not has_contact_form:
+                adjusted -= 2.2
+                issues.append("No clear contact form")
+            if not self._linkedin_company_present(social):
+                adjusted -= 1.8
+                issues.append("No clear LinkedIn company presence")
+            if not has_email:
+                adjusted -= 1.6
+                issues.append("No valid business email")
+            if not self._has_clear_offer_signal(page_excerpt):
+                adjusted -= 1.2
+                issues.append("Offer clarity is weak")
+
+        if not issues:
+            tone = "Strong niche fit with no major blockers detected."
+        elif niche_key == "web_design":
+            tone = f"Site is outdated and conversion-limited for web design goals: {issues[0]}."
+        elif niche_key == "paid_ads":
+            tone = f"Missing core ad-tracking foundations ({issues[0]}), which creates immediate paid media leakage."
+        else:
+            tone = f"Lead capture trust stack is weak for B2B outreach: {issues[0]}."
+
+        final_score = max(1, min(10, int(round(adjusted))))
+        return final_score, issues, tone
+
     def export_ai_mailer_ready(self, output_csv: str = "ai_mailer_ready.csv") -> int:
         rows = self._fetch_ai_mailer_rows()
 
@@ -442,6 +560,8 @@ class LeadEnricher:
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS twitter_url text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS youtube_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS insecure_site bigint DEFAULT 0',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS main_shortcoming text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS enriched_at text',
@@ -475,6 +595,8 @@ class LeadEnricher:
                     linkedin_url,
                     instagram_url,
                     facebook_url,
+                    twitter_url,
+                    youtube_url,
                     address,
                     search_keyword,
                     phone_number
@@ -526,6 +648,8 @@ class LeadEnricher:
                     linkedin_url,
                     instagram_url,
                     facebook_url,
+                    twitter_url,
+                    youtube_url,
                     address,
                     search_keyword,
                     phone_number
@@ -614,6 +738,8 @@ class LeadEnricher:
         linkedin_url: Optional[str] = None,
         instagram_url: Optional[str] = None,
         facebook_url: Optional[str] = None,
+        twitter_url: Optional[str] = None,
+        youtube_url: Optional[str] = None,
         qualification_score: Optional[float] = None,
     ) -> int:
         new_status = "invalid_email" if invalid_email else "enriched"
@@ -642,6 +768,8 @@ class LeadEnricher:
             "linkedin_url": linkedin_url,
             "instagram_url": instagram_url,
             "facebook_url": facebook_url,
+            "twitter_url": twitter_url,
+            "youtube_url": youtube_url,
             "phone_formatted": phone_formatted,
             "phone_type": phone_type,
             "lead_id": int(lead_id),
@@ -667,6 +795,8 @@ class LeadEnricher:
                         linkedin_url = COALESCE(:linkedin_url, linkedin_url),
                         instagram_url = COALESCE(:instagram_url, instagram_url),
                         facebook_url = COALESCE(:facebook_url, facebook_url),
+                        twitter_url = COALESCE(:twitter_url, twitter_url),
+                        youtube_url = COALESCE(:youtube_url, youtube_url),
                         linkedin = COALESCE(:linkedin_url, linkedin),
                         instagram = COALESCE(:instagram_url, instagram),
                         facebook = COALESCE(:facebook_url, facebook),
@@ -830,6 +960,8 @@ class LeadEnricher:
             "linkedin": str((existing_profiles or {}).get("linkedin") or "").strip(),
             "instagram": str((existing_profiles or {}).get("instagram") or "").strip(),
             "facebook": str((existing_profiles or {}).get("facebook") or "").strip(),
+            "twitter": str((existing_profiles or {}).get("twitter") or "").strip(),
+            "youtube": str((existing_profiles or {}).get("youtube") or "").strip(),
         }
         site_links = dict((website_signals or {}).get("social_links") or {})
         for key in profiles:
@@ -848,6 +980,8 @@ class LeadEnricher:
             "linkedin": ["linkedin.com/company", "linkedin.com/in"],
             "instagram": ["instagram.com"],
             "facebook": ["facebook.com"],
+            "twitter": ["twitter.com", "x.com"],
+            "youtube": ["youtube.com/@", "youtube.com/channel", "youtube.com/c"],
         }
 
         for platform, domains in platform_queries.items():
@@ -859,18 +993,82 @@ class LeadEnricher:
             if domain_hint:
                 search_parts.append(f'"{domain_hint.split(".")[0]}"')
             query = " ".join(part for part in search_parts if part)
-            match = self._search_social_profile_url(query=query, allowed_domains=domains)
+            match = self._search_social_profile_url(
+                query=query,
+                allowed_domains=domains,
+                platform=platform,
+                business_name=business_name,
+                website_url=website_url,
+            )
             if match:
                 profiles[platform] = match
         return profiles
 
-    def _search_social_profile_url(self, *, query: str, allowed_domains: list[str]) -> Optional[str]:
+    def _search_social_profile_url(
+        self,
+        *,
+        query: str,
+        allowed_domains: list[str],
+        platform: str,
+        business_name: str,
+        website_url: Optional[str],
+    ) -> Optional[str]:
         results = self._search_engine_links(query=query)
+        candidates: list[str] = []
         for result in results:
             normalized = result.lower()
             if any(domain in normalized for domain in allowed_domains):
-                return result
-        return None
+                candidates.append(result)
+        return self._select_best_social_profile(
+            platform=platform,
+            candidates=candidates,
+            business_name=business_name,
+            website_url=website_url,
+        )
+
+    def _select_best_social_profile(
+        self,
+        *,
+        platform: str,
+        candidates: list[str],
+        business_name: str,
+        website_url: Optional[str],
+    ) -> Optional[str]:
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Fast heuristic guardrails first.
+        if platform == "linkedin":
+            company_candidates = [url for url in candidates if "/company/" in url.lower()]
+            if company_candidates:
+                candidates = company_candidates + [url for url in candidates if url not in company_candidates]
+
+        # AI tiebreaker for multiple valid candidates.
+        if self.openai_api_key:
+            try:
+                payload = {
+                    "platform": platform,
+                    "business_name": business_name,
+                    "website_url": website_url,
+                    "candidates": candidates[:5],
+                    "instruction": "Pick the single URL most likely to represent the official business profile for outreach. Return JSON {\"url\":\"...\"}.",
+                }
+                parsed = asyncio.run(
+                    self._score_lead_priority_async(
+                        system_prompt="You rank social profile candidates for B2B outreach. Return strict JSON only.",
+                        payload=payload,
+                        temperature=0.0,
+                    )
+                )
+                selected = str(parsed.get("url") or "").strip()
+                if selected and selected in candidates:
+                    return selected
+            except Exception:
+                pass
+
+        return candidates[0]
 
     def _search_engine_links(self, *, query: str) -> list[str]:
         serpapi_key = str(os.environ.get("SERPAPI_API_KEY", "") or "").strip()
@@ -1672,19 +1870,21 @@ class LeadEnricher:
         except Exception:
             parsed_domain = ""
 
-        # 1. In-memory cache (30 days TTL)
-        if parsed_domain:
-            mem = _DOMAIN_SCORE_CACHE.get(parsed_domain)
+        cache_key = self._domain_cache_key(parsed_domain, self.user_niche) if parsed_domain else ""
+
+        # 1. In-memory cache (30 days TTL, niche-scoped)
+        if cache_key:
+            mem = _DOMAIN_SCORE_CACHE.get(cache_key)
             if mem and (time.time() - mem[4]) < _DOMAIN_SCORE_CACHE_TTL:
-                logging.info("Memory cache HIT for %s — skipping AI call.", parsed_domain)
+                logging.info("Memory cache HIT for %s — skipping AI call.", cache_key)
                 return mem[0], mem[1], mem[2], dict(mem[3] or {})
 
         # 2. Supabase cache — check if ai_score already exists for this domain/business
-        supabase_hit = self._check_supabase_score_cache(business_name, website_url)
+        supabase_hit = self._check_supabase_score_cache(business_name, website_url, self.user_niche)
         if supabase_hit:
             score, summary, hook, deep_payload = supabase_hit
-            if parsed_domain:
-                _DOMAIN_SCORE_CACHE[parsed_domain] = (score, summary, hook, deep_payload, time.time())
+            if cache_key:
+                _DOMAIN_SCORE_CACHE[cache_key] = (score, summary, hook, deep_payload, time.time())
             logging.info("Supabase cache HIT for %s — skipping AI call.", business_name)
             return score, summary, hook, deep_payload
 
@@ -1692,6 +1892,10 @@ class LeadEnricher:
             heuristic_score = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
+                user_niche=self.user_niche,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -1709,6 +1913,8 @@ class LeadEnricher:
                 social_profiles=social_profiles,
                 social_metrics=social_metrics,
             )
+            deep_payload["user_niche"] = str(self.user_niche or "").strip()
+            deep_payload["niche_suitability_score"] = heuristic_score
             return (
                 heuristic_score,
                 str(shortcoming or "").strip() or "Heuristic scoring used (OpenAI unavailable).",
@@ -1811,13 +2017,25 @@ class LeadEnricher:
                     temperature=factory.get_temperature("enrichment"),
                 )
             )
-            score = max(1, min(10, int(float(parsed.get("score", 5)))))
+            base_score = max(1, min(10, int(float(parsed.get("score", 5)))))
             ai_summary = str(parsed.get("reason", "")).strip()
             if not ai_summary:
                 ai_summary = str(parsed.get("enrichment_summary", "")).strip()
             competitive_hook = str(parsed.get("competitive_hook", "")).strip()
             if not ai_summary:
                 ai_summary = str(shortcoming or "").strip() or "AI scoring completed."
+
+            score, niche_issues, niche_tone = self._apply_niche_suitability_adjustment(
+                base_score=base_score,
+                shortcoming=shortcoming,
+                insecure_site=insecure_site,
+                has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
+            )
+            if niche_issues:
+                ai_summary = f"{niche_tone} Recommended fix: prioritize {niche_issues[0].lower()}."
 
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -1836,6 +2054,10 @@ class LeadEnricher:
                 social_metrics=social_metrics,
                 parsed_ai=parsed,
             )
+            deep_payload["user_niche"] = str(self.user_niche or "").strip()
+            deep_payload["niche_suitability_score"] = score
+            deep_payload["niche_focus_issues"] = niche_issues
+            deep_payload["niche_base_score"] = base_score
             if competitive_hook and not str(deep_payload.get("competitive_hook") or "").strip():
                 deep_payload["competitive_hook"] = competitive_hook
 
@@ -1871,8 +2093,8 @@ class LeadEnricher:
                     logging.warning("Niche fit analysis failed for %s: %s", business_name, fexc)
 
             # Store in both caches
-            if parsed_domain:
-                _DOMAIN_SCORE_CACHE[parsed_domain] = (score, ai_summary, competitive_hook, deep_payload, time.time())
+            if cache_key:
+                _DOMAIN_SCORE_CACHE[cache_key] = (score, ai_summary, competitive_hook, deep_payload, time.time())
 
             return score, ai_summary, competitive_hook, deep_payload
 
@@ -1881,6 +2103,10 @@ class LeadEnricher:
             heuristic_score = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
+                user_niche=self.user_niche,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -1909,6 +2135,10 @@ class LeadEnricher:
             heuristic_score = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
+                user_niche=self.user_niche,
             )
             deep_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
@@ -1993,7 +2223,10 @@ class LeadEnricher:
         raise RuntimeError("OpenAI scoring failed after retry attempts.")
 
     def _check_supabase_score_cache(
-        self, business_name: str, website_url: Optional[str]
+        self,
+        business_name: str,
+        website_url: Optional[str],
+        user_niche: Optional[str] = None,
     ) -> Optional[tuple[int, str, str, dict]]:
         """Query Supabase leads table for an existing ai_score for this business/domain.
         Returns (score, ai_description, competitive_hook, deep_payload) if found, else None."""
@@ -2058,6 +2291,10 @@ class LeadEnricher:
                     if isinstance(parsed_payload, dict):
                         deep_payload = parsed_payload
                         hook = str(parsed_payload.get("competitive_hook", "")).strip()
+                        cached_niche = str(parsed_payload.get("user_niche") or "").strip().lower()
+                        expected_niche = str(user_niche or "").strip().lower()
+                        if expected_niche and cached_niche and cached_niche != expected_niche:
+                            return None
             except Exception:
                 pass
             if score < 1:
@@ -2075,6 +2312,10 @@ class LeadEnricher:
         shortcoming: str,
         insecure_site: bool,
         has_email: bool,
+        website_signals: Optional[dict[str, Any]] = None,
+        social_profiles: Optional[dict[str, str]] = None,
+        page_excerpt: str = "",
+        user_niche: Optional[str] = None,
     ) -> int:
         score = 4
         if not website_url or str(website_url).strip().lower() == "none":
@@ -2090,7 +2331,41 @@ class LeadEnricher:
         if not has_email:
             score -= 1
 
-        return max(1, min(10, score))
+        # Niche-aware deltas for offline/timeout fallback.
+        niche = LeadEnricher._normalized_niche_label(user_niche)
+        signals = dict(website_signals or {})
+        social = dict(social_profiles or {})
+        has_meta_pixel = bool(signals.get("has_meta_pixel"))
+        has_ga_or_gtm = bool(signals.get("has_google_analytics"))
+        has_contact_form = bool(signals.get("has_contact_form"))
+        modern_design = bool(signals.get("modern_design"))
+
+        if niche == "web_design":
+            if insecure_site:
+                score -= 2
+            if not modern_design:
+                score -= 1
+            if "slow" in str(page_excerpt or "").lower() or "slow" in str(shortcoming or "").lower():
+                score -= 1
+        elif niche == "paid_ads":
+            if not has_meta_pixel:
+                score -= 3
+            if not has_ga_or_gtm:
+                score -= 2
+            if not has_contact_form:
+                score -= 1
+        elif niche in {"lead_gen", "b2b_service"}:
+            linkedin_url = str(social.get("linkedin") or "").lower()
+            if not has_contact_form:
+                score -= 2
+            if "/company/" not in linkedin_url:
+                score -= 1
+            if not has_email:
+                score -= 1
+            if not LeadEnricher._has_clear_offer_signal(page_excerpt):
+                score -= 1
+
+        return max(1, min(10, int(round(score))))
 
     @staticmethod
     def _verify_email_mx(email: str) -> bool:

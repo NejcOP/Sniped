@@ -287,6 +287,7 @@ class EnrichRequest(BaseModel):
     skip_export: bool = False
     db_path: Optional[str] = None
     token: Optional[str] = None
+    user_niche: Optional[str] = Field(default=None, max_length=120)
 
 
 class MailerRequest(BaseModel):
@@ -13507,7 +13508,9 @@ def create_app() -> FastAPI:
         access = get_plan_feature_access(_normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY))
         user_id = require_current_user_id(request, fallback_token=payload_data.get("token"), db_path=db_path)
         session_token = require_authenticated_session(request, fallback_token=payload_data.pop("token", ""))
-        payload_data["user_niche"] = resolve_user_niche_from_user_id(user_id, db_path=db_path)
+        requested_niche = str(payload_data.get("user_niche") or "").strip()
+        profile_niche = str(resolve_user_niche_from_user_id(user_id, db_path=db_path) or "").strip()
+        payload_data["user_niche"] = requested_niche or profile_niche
         payload_data["_ai_model"] = str(access.get("ai_model") or DEFAULT_AI_MODEL)
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))
         payload_data["_plan_type"] = str(access.get("plan_type") or billing.get("plan_key") or DEFAULT_PLAN_KEY)

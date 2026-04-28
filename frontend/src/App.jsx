@@ -5459,12 +5459,15 @@ function App({ initialTab = 'leads' }) {
 
     setEnrichRunRequested(true)
 
+    const selectedNiche = String(user?.niche || getStoredValue('lf_niche') || '').trim()
+
     void startTask('enrich', '/api/enrich', {
       limit: normalizedBatchSize,
       lead_ids: selectedLeadIds,
       headless: Boolean(enrichForm.headless),
       skip_export: Boolean(enrichForm.skipExport),
       token: getStoredValue('lf_token') || undefined,
+      user_niche: selectedNiche || undefined,
     })
   }
   function onMailerSubmit(e) {
@@ -7206,7 +7209,7 @@ function App({ initialTab = 'leads' }) {
                               <div className="mt-1 flex flex-wrap gap-1">
                                 {bestLeadScore > 0 && (
                                   <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-200">
-                                    <Sparkles className="h-2.5 w-2.5" /> Score {formatLeadScoreValue(bestLeadScore)}/10
+                                    <Sparkles className="h-2.5 w-2.5" /> Niche {formatLeadScoreValue(bestLeadScore)}/10
                                   </span>
                                 )}
                                 {intentSignals.map((signal) => (
@@ -7361,7 +7364,7 @@ function App({ initialTab = 'leads' }) {
                                 </div>
                                 {bestLeadScore > 0 && (
                                   <span className="text-[10px] font-semibold text-cyan-200">
-                                    AI {formatLeadScoreValue(bestLeadScore)}/10
+                                    Niche {formatLeadScoreValue(bestLeadScore)}/10
                                   </span>
                                 )}
                                 <span className={`text-[10px] font-semibold ${isQualifiedLead(lead) ? 'text-emerald-300' : 'text-amber-300'}`}>
@@ -7528,7 +7531,7 @@ function App({ initialTab = 'leads' }) {
                             ) : null}
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
-                              <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Score {formatLeadScoreValue(bestLeadScore)}/10</span>
+                              <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Niche {formatLeadScoreValue(bestLeadScore)}/10</span>
                               <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${isQualifiedLead(lead) ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/30 bg-amber-500/10 text-amber-100'}`}>{isQualifiedLead(lead) ? 'Qualified' : 'Needs work'}</span>
                               {Number(lead.qualification_score || 0) > 0 && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-100">Q {Math.round(Number(lead.qualification_score || 0))}/100</span>}
                               {socialLinks.map((social) => (
@@ -9574,7 +9577,7 @@ function App({ initialTab = 'leads' }) {
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {ldScore > 0 && (
                     <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold ${ldQualified ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200'}`}>
-                      <Sparkles className="h-3 w-3" /> {formatLeadScoreValue(ldScore)}/10
+                      <Sparkles className="h-3 w-3" /> Niche {formatLeadScoreValue(ldScore)}/10
                     </span>
                   )}
                   <button
