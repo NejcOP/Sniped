@@ -1828,7 +1828,16 @@ function App({ initialTab = 'leads' }) {
   const [pendingTierLeadId, setPendingTierLeadId] = useState(null)
   const [retryingTaskId, setRetryingTaskId] = useState(null)
   const [, setLastResult] = useState('')
-  const [lastError, setLastError] = useState('')
+  // setLastError is an alias for the toast; background-only errors use console.error instead
+  const setLastError = useCallback((msg) => setToastError(msg), [])
+    const [toastError, setToastError] = useState('')
+
+    // Auto-dismiss toast after 5 seconds
+    useEffect(() => {
+      if (!toastError) return
+      const t = setTimeout(() => setToastError(''), 5000)
+      return () => clearTimeout(t)
+    }, [toastError])
   const [enrichRetrySeconds, setEnrichRetrySeconds] = useState(0)
   const [enrichRunRequested, setEnrichRunRequested] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -1925,7 +1934,7 @@ function App({ initialTab = 'leads' }) {
       setLeads(items)
       setLeadServerTotal(Number(data?.total || data?.count || data?.total_count || items.length || 0))
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Unknown error while loading leads')
+      console.error('[leads] fetch failed:', error)
     } finally {
       if (!silent) {
         setLoadingLeads(false)
@@ -3069,7 +3078,7 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setAiFilterLoading(false)
     }
-  }, [aiFilterPrompt, showBlacklisted])
+  }, [aiFilterPrompt, showBlacklisted, setLastError])
 
   const refreshLeadsRef = useRef(refreshLeads)
 
@@ -3352,7 +3361,7 @@ function App({ initialTab = 'leads' }) {
       }
     }
     previousTasksRef.current = tasks
-  }, [refreshLeads, tasks])
+  }, [refreshLeads, tasks, setLastError])
 
   async function refreshDashboard() {
     setRefreshingDashboard(true)
@@ -3914,7 +3923,7 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setTopUpLoadingPackageId('')
     }
-  }, [navigateToCheckoutWithFallback, requestTopUpCheckoutUrl])
+  }, [navigateToCheckoutWithFallback, requestTopUpCheckoutUrl, setLastError])
 
   const handleTopUpProceed = useCallback((packageId) => {
     void startTopUpCheckout(packageId)
@@ -4204,9 +4213,7 @@ function App({ initialTab = 'leads' }) {
       setWeeklyReport(data)
       return data
     } catch (error) {
-      if (Number(error?.status || 0) !== 403) {
-        setLastError(error instanceof Error ? error.message : 'Could not load weekly report')
-      }
+      console.error('[weekly-report] fetch failed:', error)
       return null
     } finally {
       if (!options.silent) {
@@ -4229,9 +4236,7 @@ function App({ initialTab = 'leads' }) {
       setMonthlyReport(data)
       return data
     } catch (error) {
-      if (Number(error?.status || 0) !== 403) {
-        setLastError(error instanceof Error ? error.message : 'Could not load monthly report')
-      }
+      console.error('[monthly-report] fetch failed:', error)
       return null
     } finally {
       if (!options.silent) {
@@ -4335,9 +4340,7 @@ function App({ initialTab = 'leads' }) {
       setClientFolders(items)
       return items
     } catch (error) {
-      if (Number(error?.status || 0) !== 403) {
-        setLastError(error instanceof Error ? error.message : 'Could not load client folders')
-      }
+      console.error('[client-folders] fetch failed:', error)
       return []
     } finally {
       if (!options.silent) {
@@ -4379,9 +4382,7 @@ function App({ initialTab = 'leads' }) {
       })
       return data
     } catch (error) {
-      if (Number(error?.status || 0) !== 403) {
-        setLastError(error instanceof Error ? error.message : 'Could not load client dashboard')
-      }
+      console.error('[client-dashboard] fetch failed:', error)
       return null
     } finally {
       if (!options.silent) {
@@ -4491,7 +4492,7 @@ function App({ initialTab = 'leads' }) {
         pipeline: data.pipeline || { scraped: 0, contacted: 0, replied: 0, won_paid: 0 },
       })
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Unknown error while loading stats')
+      console.error('[stats] fetch failed:', error)
     }
   }
 
@@ -4510,7 +4511,7 @@ function App({ initialTab = 'leads' }) {
       // Cap delay at 5 minutes; 3s * 2^n
       const delayMs = Math.min(3000 * Math.pow(2, fails - 1), 5 * 60 * 1000)
       taskFetchBackoffUntilRef.current = Date.now() + delayMs
-      setLastError(error instanceof Error ? error.message : 'Unknown error while loading tasks')
+      console.error('[tasks] fetch failed:', error)
     }
   }
 
@@ -4688,7 +4689,7 @@ function App({ initialTab = 'leads' }) {
       })
       setWorkerAudit(Array.isArray(data.audit) ? data.audit : [])
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Could not load workers')
+      console.error('[workers] fetch failed:', error)
     }
   }
 
@@ -4710,7 +4711,7 @@ function App({ initialTab = 'leads' }) {
         done: Number(data.summary?.done || 0),
       })
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Could not load delivery tasks')
+      console.error('[delivery-tasks] fetch failed:', error)
     }
   }
 
@@ -7015,12 +7016,6 @@ function App({ initialTab = 'leads' }) {
             </div>
           </div>
 
-          {lastError
-            && !lastError.toLowerCase().includes('backend_url')
-            && !lastError.toLowerCase().includes('backend is not configured')
-            && !lastError.toLowerCase().includes('please add your smtp account in settings.')
-            ? <pre className="mb-4 overflow-auto rounded-2xl bg-rose-950/60 px-4 py-4 text-sm text-rose-300 ring-1 ring-rose-500/20">{lastError}</pre>
-            : null}
           {scrapeSummary ? (
             <div className="mb-4">
               <div className="scrape-summary-card scrape-summary-card-wide">
@@ -10403,6 +10398,24 @@ function App({ initialTab = 'leads' }) {
               )}
             </div>
           </div>
+        </div>
+      )}
+      {toastError && (
+        <div
+          role="alert"
+          className="fixed bottom-5 right-5 z-[9999] flex max-w-sm items-start gap-3 rounded-2xl border border-rose-500/25 bg-slate-900/95 px-4 py-3 shadow-2xl ring-1 ring-black/40 backdrop-blur-sm"
+          style={{ animation: 'leads-fade-in 0.25s ease' }}
+        >
+          <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-rose-400" />
+          <p className="flex-1 text-xs leading-5 text-slate-300">{toastError}</p>
+          <button
+            type="button"
+            className="ml-1 shrink-0 text-slate-500 transition hover:text-slate-200"
+            onClick={() => setToastError('')}
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
         </div>
       )}
       <Footer />
