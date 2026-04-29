@@ -9219,9 +9219,27 @@ def _lead_has_opened_mail(lead: dict) -> bool:
     )
 
 
+_QUALIFIED_LEAD_STATUSES = {
+    "queued_mail", "emailed", "interested", "replied",
+    "meeting set", "zoom scheduled", "closed", "paid",
+    "qualified_not_interested", "qualified not interested",
+}
+
+_REPLIED_LEAD_STATUSES = {
+    "replied", "interested", "meeting set", "zoom scheduled",
+    "closed", "paid", "qualified_not_interested", "qualified not interested",
+}
+
+
 def _lead_has_reply(lead: dict) -> bool:
     status = str(lead.get("status") or "").strip().lower()
-    return bool(lead.get("reply_detected_at") or status in {"replied", "interested", "meeting set", "zoom scheduled"})
+    return bool(lead.get("reply_detected_at") or status in _REPLIED_LEAD_STATUSES)
+
+
+def _lead_is_qualified(lead: dict) -> bool:
+    status = str(lead.get("status") or "").strip().lower()
+    score = _qualifier_to_float(lead.get("ai_score"), default=0.0)
+    return status in _QUALIFIED_LEAD_STATUSES or score >= 7
 
 
 def _lead_matches_quick_filter(lead: dict, quick_filter: str) -> bool:
@@ -9229,9 +9247,9 @@ def _lead_matches_quick_filter(lead: dict, quick_filter: str) -> bool:
     if normalized in {"", "all"}:
         return True
     if normalized == "qualified":
-        return _qualifier_to_float(lead.get("ai_score"), default=0.0) >= 7 or _lead_has_reply(lead)
+        return _lead_is_qualified(lead)
     if normalized == "not_qualified":
-        return not (_qualifier_to_float(lead.get("ai_score"), default=0.0) >= 7 or _lead_has_reply(lead))
+        return not _lead_is_qualified(lead)
     if normalized == "mailed":
         return _lead_has_sent_mail(lead)
     if normalized == "opened":
