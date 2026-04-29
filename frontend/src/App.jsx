@@ -65,8 +65,9 @@ const MRR_GOAL_EUR = 16000
 const SETUP_MILESTONE_EUR = 6500
 const DEFAULT_AVERAGE_DEAL_VALUE = 1000
 const LEADS_PAGE_SIZE = 50
-const BYPASS_LEAD_FILTERS = true
+const BYPASS_LEAD_FILTERS = false
 const DEBUG_ALL_LEADS = true
+const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 
 const AI_QUICK_FILTERS = [
   { key: 'high_priority', label: '🚀 High Priority', prompt: 'Show high priority leads with score above 8' },
@@ -353,6 +354,12 @@ function normalizeTabParam(raw, fallback = 'leads') {
   if (tab === 'history') return 'tasks'
   if (TAB_QUERY_KEYS.has(tab)) return tab
   return fallback
+}
+
+function normalizeLeadQuickFilterParam(raw, fallback = 'all') {
+  const value = String(raw || '').trim().toLowerCase()
+  if (!value) return fallback
+  return LEAD_QUICK_FILTER_VALUES.has(value) ? value : fallback
 }
 
 function mapDeliveryStatusToTaskStatus(status) {
@@ -1856,7 +1863,7 @@ function App({ initialTab = 'leads' }) {
   const debouncedLeadSearch = useDebounce(leadSearch, 300)
   const [leadPage, setLeadPage] = useState(0)
   const [leadStatusFilter, setLeadStatusFilter] = useState('all')
-  const [leadQuickFilter, setLeadQuickFilter] = useState('all')
+  const [leadQuickFilter, setLeadQuickFilter] = useState(() => normalizeLeadQuickFilterParam(searchParams.get('filter'), 'all'))
   const [leadSortMode, setLeadSortMode] = useState('best')
   const [showBlacklisted, setShowBlacklisted] = useState(false)
   const [loadingLeads, setLoadingLeads] = useState(false)
@@ -2240,6 +2247,24 @@ function App({ initialTab = 'leads' }) {
     next.set('tab', activeTab)
     setSearchParams(next, { replace: true })
   }, [activeTab, searchParams, setSearchParams])
+
+  useEffect(() => {
+    const fromUrl = normalizeLeadQuickFilterParam(searchParams.get('filter'), 'all')
+    setLeadQuickFilter((prev) => (prev === fromUrl ? prev : fromUrl))
+  }, [searchParams])
+
+  useEffect(() => {
+    if (activeTab !== 'leads') return
+    const current = normalizeLeadQuickFilterParam(searchParams.get('filter'), 'all')
+    if (current === leadQuickFilter) return
+    const next = new URLSearchParams(searchParams)
+    if (leadQuickFilter === 'all') {
+      next.delete('filter')
+    } else {
+      next.set('filter', leadQuickFilter)
+    }
+    setSearchParams(next, { replace: true })
+  }, [activeTab, leadQuickFilter, searchParams, setSearchParams])
 
   const leadsById = useMemo(() => {
     const indexed = new Map()
@@ -2789,7 +2814,7 @@ function App({ initialTab = 'leads' }) {
   const remainingHotLeadCount = Math.max(0, hotOpportunityCount - contactedHotLeadCount)
 
   // Reset to page 0 whenever the filter set changes
-  useEffect(() => { setLeadPage(0) }, [debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted, advancedLeadFilters])
+  useEffect(() => { setLeadPage(0) }, [debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted, advancedLeadFilters, aiFilterLeadIds])
 
   const industryFilterOptions = useMemo(
     () => Array.from(new Set(leads.map((lead) => deriveLeadIndustry(lead)).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
@@ -2917,6 +2942,35 @@ function App({ initialTab = 'leads' }) {
     return filteredLeads.slice(start, start + LEADS_PAGE_SIZE)
   }, [filteredLeads, leadPage])
 
+  const hasSearchOrAiFilter = Boolean(debouncedLeadSearch.trim()) || isAiFilterActive
+  const emptyLeadsMessage = hasSearchOrAiFilter
+    ? 'No leads found matching your criteria. Try adjusting your search or AI filter.'
+    : 'No leads match the current filters yet.'
+
+  const hasAnyLeadFiltersActive = Boolean(
+    debouncedLeadSearch.trim()
+    || leadStatusFilter !== 'all'
+    || leadQuickFilter !== 'all'
+    || showBlacklisted
+    || advancedLeadFilters.industries.length
+    || advancedLeadFilters.revenueBands.length
+    || advancedLeadFilters.techStacks.length
+    || advancedLeadFilters.highScoreOnly
+    || isAiFilterActive,
+  )
+
+  const leadFilterSignature = [
+    leadStatusFilter,
+    leadQuickFilter,
+    debouncedLeadSearch.trim().toLowerCase(),
+    showBlacklisted ? '1' : '0',
+    advancedLeadFilters.industries.join('|'),
+    advancedLeadFilters.revenueBands.join('|'),
+    advancedLeadFilters.techStacks.join('|'),
+    advancedLeadFilters.highScoreOnly ? '1' : '0',
+    isAiFilterActive ? aiFilterLeadIds.join('|') : '',
+  ].join('::')
+
   useEffect(() => {
     if (leadPage <= 0) return
     const maxPageIndex = Math.max(0, Math.ceil(filteredLeads.length / LEADS_PAGE_SIZE) - 1)
@@ -2925,10 +2979,46 @@ function App({ initialTab = 'leads' }) {
     }
   }, [filteredLeads.length, leadPage])
 
+  const leadQuickCountSource = useMemo(() => {
+    let visible = [...leads]
+    if (!showBlacklisted) {
+      visible = visible.filter((l) => !isBlacklistedLeadStatus(l.status))
+    }
+    if (leadStatusFilter !== 'all') {
+      visible = visible.filter((l) => String(l.status || 'pending').toLowerCase() === leadStatusFilter.toLowerCase())
+    }
+    if (debouncedLeadSearch.trim()) {
+      const q = debouncedLeadSearch.trim().toLowerCase()
+      visible = visible.filter(
+        (l) => (l.business_name || '').toLowerCase().includes(q)
+          || (l.contact_name || '').toLowerCase().includes(q)
+          || (l.email || '').toLowerCase().includes(q),
+      )
+    }
+    if (advancedLeadFilters.industries.length > 0) {
+      visible = visible.filter((lead) => advancedLeadFilters.industries.includes(deriveLeadIndustry(lead)))
+    }
+    if (advancedLeadFilters.revenueBands.length > 0) {
+      visible = visible.filter((lead) => advancedLeadFilters.revenueBands.includes(deriveLeadRevenueBand(lead)))
+    }
+    if (advancedLeadFilters.techStacks.length > 0) {
+      visible = visible.filter((lead) => {
+        const stackSet = new Set(normalizeLeadInsightList(lead.tech_stack, 5))
+        return advancedLeadFilters.techStacks.some((stack) => stackSet.has(stack))
+      })
+    }
+    if (advancedLeadFilters.highScoreOnly) {
+      visible = visible.filter((lead) => resolveBestLeadScore(lead) >= 8)
+    }
+    if (isAiFilterActive) {
+      const idSet = new Set(aiFilterLeadIds.map((id) => Number(id)).filter((id) => Number.isFinite(id)))
+      visible = visible.filter((lead) => idSet.has(Number(lead?.id)))
+    }
+    return visible
+  }, [leads, showBlacklisted, leadStatusFilter, debouncedLeadSearch, advancedLeadFilters, isAiFilterActive, aiFilterLeadIds])
+
   const leadQuickCounts = useMemo(() => {
-    const visible = showBlacklisted
-      ? leads
-      : leads.filter((l) => !isBlacklistedLeadStatus(l.status))
+    const visible = leadQuickCountSource
     return {
       total: visible.length,
       qualified: visible.filter((l) => isQualifiedLead(l)).length,
@@ -2937,7 +3027,7 @@ function App({ initialTab = 'leads' }) {
       opened: visible.filter((l) => hasOpenedMail(l)).length,
       replied: visible.filter((l) => hasReply(l)).length,
     }
-  }, [leads, showBlacklisted])
+  }, [leadQuickCountSource])
 
   const clearAiFilter = useCallback(() => {
     setAiFilterLeadIds([])
@@ -2946,6 +3036,17 @@ function App({ initialTab = 'leads' }) {
     setAiFilterPreview(null)
     setAiFilterLoading(false)
   }, [])
+
+  const clearAllLeadFilters = useCallback(() => {
+    setLeadSearch('')
+    setLeadStatusFilter('all')
+    setLeadQuickFilter('all')
+    setShowBlacklisted(false)
+    setAdvancedLeadFilters({ industries: [], revenueBands: [], techStacks: [], highScoreOnly: false })
+    setLeadPage(0)
+    setAiFilterOpen(false)
+    clearAiFilter()
+  }, [clearAiFilter])
 
   const applyAiFilterPreview = useCallback(() => {
     const ids = Array.isArray(aiFilterPreview?.lead_ids)
@@ -2994,6 +3095,12 @@ function App({ initialTab = 'leads' }) {
     }
   }, [aiFilterPrompt, showBlacklisted])
 
+  const refreshLeadsRef = useRef(refreshLeads)
+
+  useEffect(() => {
+    refreshLeadsRef.current = refreshLeads
+  }, [refreshLeads])
+
   useEffect(() => {
     if (activeTab !== 'leads') return
     setLeadStatusFilter('all')
@@ -3001,8 +3108,8 @@ function App({ initialTab = 'leads' }) {
     setLeadSearch('')
     setLeadPage(0)
     clearAiFilter()
-    void refreshLeads({ silent: false })
-  }, [activeTab, clearAiFilter, refreshLeads])
+    void refreshLeadsRef.current({ silent: false })
+  }, [activeTab, clearAiFilter])
 
   useEffect(() => {
     if (!lastLeadsApiPayload) return
@@ -7200,38 +7307,47 @@ function App({ initialTab = 'leads' }) {
                 <button
                   type="button"
                   className={`btn-ghost px-3 py-1.5 text-xs ${leadQuickFilter === 'qualified' ? 'ring-1 ring-cyan-400/70 text-cyan-200' : ''}`}
-                  onClick={() => setLeadQuickFilter((prev) => (prev === 'qualified' ? 'all' : 'qualified'))}
+                  onClick={() => setLeadQuickFilter('qualified')}
                 >
                   Qualified ({leadQuickCounts.qualified})
                 </button>
                 <button
                   type="button"
                   className={`btn-ghost px-3 py-1.5 text-xs ${leadQuickFilter === 'not_qualified' ? 'ring-1 ring-amber-400/70 text-amber-200' : ''}`}
-                  onClick={() => setLeadQuickFilter((prev) => (prev === 'not_qualified' ? 'all' : 'not_qualified'))}
+                  onClick={() => setLeadQuickFilter('not_qualified')}
                 >
                   Not Qualified ({leadQuickCounts.notQualified})
                 </button>
                 <button
                   type="button"
                   className={`btn-ghost px-3 py-1.5 text-xs ${leadQuickFilter === 'mailed' ? 'ring-1 ring-emerald-400/70 text-emerald-200' : ''}`}
-                  onClick={() => setLeadQuickFilter((prev) => (prev === 'mailed' ? 'all' : 'mailed'))}
+                  onClick={() => setLeadQuickFilter('mailed')}
                 >
                   Mailed ({leadQuickCounts.mailed})
                 </button>
                 <button
                   type="button"
                   className={`btn-ghost px-3 py-1.5 text-xs ${leadQuickFilter === 'opened' ? 'ring-1 ring-cyan-400/70 text-cyan-200' : ''}`}
-                  onClick={() => setLeadQuickFilter((prev) => (prev === 'opened' ? 'all' : 'opened'))}
+                  onClick={() => setLeadQuickFilter('opened')}
                 >
                   Opened ({leadQuickCounts.opened})
                 </button>
                 <button
                   type="button"
                   className={`btn-ghost px-3 py-1.5 text-xs ${leadQuickFilter === 'replied' ? 'ring-1 ring-emerald-400/70 text-emerald-200' : ''}`}
-                  onClick={() => setLeadQuickFilter((prev) => (prev === 'replied' ? 'all' : 'replied'))}
+                  onClick={() => setLeadQuickFilter('replied')}
                 >
                   Replied ({leadQuickCounts.replied})
                 </button>
+                {hasAnyLeadFiltersActive ? (
+                  <button
+                    type="button"
+                    className="btn-ghost px-3 py-1.5 text-xs text-rose-200 ring-1 ring-rose-400/40"
+                    onClick={clearAllLeadFilters}
+                  >
+                    Clear all filters
+                  </button>
+                ) : null}
               </div>
 
               <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
@@ -7379,9 +7495,10 @@ function App({ initialTab = 'leads' }) {
                   {/* Leads table */}
                   <div
                     id="leads-table"
+                    key={`desktop-${leadFilterSignature}`}
                     className="hidden overflow-hidden rounded-[24px] border border-slate-700/50 bg-slate-900/70 shadow-[0_10px_40px_rgba(2,6,23,0.28)] lg:block"
                   >
-                <div className="max-h-[68vh] overflow-auto" style={{overflowX: 'auto'}}>
+                <div className="max-h-[68vh] overflow-auto leads-fade-in" style={{overflowX: 'auto'}}>
                   <table className="apollo-table w-full table-fixed text-xs tracking-tight">
                     <colgroup>
                       <col style={{width: '20%'}} />
@@ -7736,7 +7853,7 @@ function App({ initialTab = 'leads' }) {
                         )}) : (
                         <tr>
                           <td colSpan={11} className="px-4 py-10 text-center text-sm text-slate-400">
-                            No leads match the current filters yet.
+                              {emptyLeadsMessage}
                           </td>
                         </tr>
                       )}
@@ -7745,7 +7862,7 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
 
-                  <div className="space-y-3 lg:hidden">
+                  <div key={`mobile-${leadFilterSignature}`} className="space-y-3 lg:hidden leads-fade-in">
                     {loadingLeads ? (
                       /* Fixed-height mobile skeletons — CLS = 0 */
                       <LeadCardSkeletonList count={4} />
@@ -7848,7 +7965,7 @@ function App({ initialTab = 'leads' }) {
                       )
                     }) : (
                       <div className="rounded-[22px] border border-dashed border-slate-700 bg-slate-900/60 px-4 py-8 text-center text-sm text-slate-400">
-                        No leads match the current filters yet.
+                        {emptyLeadsMessage}
                       </div>
                     )}
                   </div>
