@@ -4527,6 +4527,39 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
+  const fetchMailerCampaignStats = useCallback(async ({ silent = false } = {}) => {
+    try {
+      setCampaignLoading(true)
+      const data = await fetchJson('/api/mailer/campaign-stats')
+      setCampaignStats({
+        sent: Number(data.sent || 0),
+        opened: Number(data.opened || 0),
+        replied: Number(data.replied || 0),
+        bounced: Number(data.bounced || 0),
+        opens_total: Number(data.opens_total || 0),
+        open_rate: Number(data.open_rate || 0),
+        reply_rate: Number(data.reply_rate || 0),
+        bounce_rate: Number(data.bounce_rate || 0),
+        ab_breakdown: {
+          A: Number(data.ab_breakdown?.A || 0),
+          B: Number(data.ab_breakdown?.B || 0),
+        },
+        sequences: Array.isArray(data.sequences) ? data.sequences : [],
+        saved_templates: Array.isArray(data.saved_templates) ? data.saved_templates : [],
+        recent_events: Array.isArray(data.recent_events) ? data.recent_events : [],
+      })
+      if (!silent) toast.success('Campaign stats refreshed')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not load campaign stats'
+      if (!message.toLowerCase().includes('backend is not configured')) {
+        setLastError(message)
+        if (!silent) toast.error(message)
+      }
+    } finally {
+      setCampaignLoading(false)
+    }
+  }, [setLastError])
+
   useEffect(() => {
     const initialRequests = [
       checkHealth(),
@@ -5098,39 +5131,6 @@ function App({ initialTab = 'leads' }) {
       }
     })()
   }
-
-  const fetchMailerCampaignStats = useCallback(async ({ silent = false } = {}) => {
-    try {
-      setCampaignLoading(true)
-      const data = await fetchJson('/api/mailer/campaign-stats')
-      setCampaignStats({
-        sent: Number(data.sent || 0),
-        opened: Number(data.opened || 0),
-        replied: Number(data.replied || 0),
-        bounced: Number(data.bounced || 0),
-        opens_total: Number(data.opens_total || 0),
-        open_rate: Number(data.open_rate || 0),
-        reply_rate: Number(data.reply_rate || 0),
-        bounce_rate: Number(data.bounce_rate || 0),
-        ab_breakdown: {
-          A: Number(data.ab_breakdown?.A || 0),
-          B: Number(data.ab_breakdown?.B || 0),
-        },
-        sequences: Array.isArray(data.sequences) ? data.sequences : [],
-        saved_templates: Array.isArray(data.saved_templates) ? data.saved_templates : [],
-        recent_events: Array.isArray(data.recent_events) ? data.recent_events : [],
-      })
-      if (!silent) toast.success('Campaign stats refreshed')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not load campaign stats'
-      if (!message.toLowerCase().includes('backend is not configured')) {
-        setLastError(message)
-        if (!silent) toast.error(message)
-      }
-    } finally {
-      setCampaignLoading(false)
-    }
-  }, [setLastError])
 
   async function saveCampaignSequence() {
     setSavingSequence(true)
