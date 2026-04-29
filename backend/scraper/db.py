@@ -35,6 +35,7 @@ class LeadRecord(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     business_name: Mapped[str] = mapped_column(Text, nullable=False)
     website_url: Mapped[Optional[str]] = mapped_column(Text)
+    maps_url: Mapped[Optional[str]] = mapped_column(Text)
     phone_number: Mapped[Optional[str]] = mapped_column(Text)
     rating: Mapped[Optional[float]] = mapped_column(Float)
     review_count: Mapped[Optional[int]] = mapped_column(Integer)
@@ -448,6 +449,7 @@ def _lead_record_to_dict(record: LeadRecord) -> dict[str, Any]:
         "user_id": record.user_id,
         "business_name": record.business_name,
         "website_url": record.website_url,
+        "maps_url": record.maps_url,
         "phone_number": record.phone_number,
         "email": record.email,
         "google_claimed": record.google_claimed,
@@ -648,6 +650,7 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "user_id": normalized_user_id,
         "business_name": lead.business_name,
         "website_url": lead.website_url,
+        "maps_url": getattr(lead, "maps_url", None),
         "phone_number": lead.phone_number,
         "google_claimed": _to_int_flag(lead.google_claimed),
         "linkedin_url": lead.linkedin_url,

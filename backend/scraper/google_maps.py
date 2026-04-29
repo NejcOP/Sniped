@@ -1405,6 +1405,7 @@ class GoogleMapsScraper:
         lead = Lead(
             business_name=safe_name,
             website_url=safe_website,
+            maps_url=str(self.page.url or "").strip() or None,
             phone_number=safe_phone,
             rating=None,
             review_count=None,
@@ -1611,6 +1612,7 @@ class GoogleMapsScraper:
         lead = Lead(
             business_name=name,
             website_url=website,
+            maps_url=str(self.page.url or "").strip() or None,
             phone_number=phone,
             rating=self._parse_float(rating_text),
             review_count=self._parse_int(review_text),

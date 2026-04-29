@@ -932,6 +932,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "contact_name": "ALTER TABLE leads ADD COLUMN contact_name TEXT",
         "email": "ALTER TABLE leads ADD COLUMN email TEXT",
         "google_claimed": "ALTER TABLE leads ADD COLUMN google_claimed INTEGER",
+        "maps_url": "ALTER TABLE leads ADD COLUMN maps_url TEXT",
         "linkedin_url": "ALTER TABLE leads ADD COLUMN linkedin_url TEXT",
         "instagram_url": "ALTER TABLE leads ADD COLUMN instagram_url TEXT",
         "facebook_url": "ALTER TABLE leads ADD COLUMN facebook_url TEXT",
@@ -10585,7 +10586,7 @@ def create_app() -> FastAPI:
                 print(f"Could not fetch total leads in Supabase without user_id filter: {supabase_total_exc}")
 
             supabase_columns = (
-                "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
+                "id,business_name,contact_name,email,website_url,maps_url,phone_number,rating,review_count,address,"
                 "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,twitter_url,youtube_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
                 "sent_at,last_contacted_at,follow_up_count,generated_email_body,crm_comment,status_updated_at,last_sender_email,"
                 "is_ads_client,is_website_client,worker_id,assigned_worker_at,paid_at,enrichment_data,pipeline_stage,client_folder_id,"
@@ -10671,6 +10672,7 @@ def create_app() -> FastAPI:
                     row.setdefault("tiktok_url", None)
                     row.setdefault("twitter_url", None)
                     row.setdefault("youtube_url", None)
+                    row.setdefault("maps_url", None)
                     row.setdefault("ig_link", row.get("instagram_url"))
                     row.setdefault("fb_link", row.get("facebook_url"))
                     row.setdefault("has_pixel", 0)

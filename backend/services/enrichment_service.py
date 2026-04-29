@@ -260,6 +260,7 @@ class LeadEnricher:
                             lead_id=int(lead["id"]),
                             business_name=lead_name,
                             raw_website_url=lead.get("website_url"),
+                            maps_url=lead.get("maps_url"),
                             address=str(lead.get("address") or ""),
                             search_keyword=str(lead.get("search_keyword") or ""),
                             email=lead.get("email"),
@@ -319,6 +320,7 @@ class LeadEnricher:
                         ai_score, ai_summary, competitive_hook, deep_intelligence = self._score_lead_priority(
                             business_name=lead["business_name"],
                             website_url=website_url,
+                            maps_url=lead.get("maps_url"),
                             rating=lead["rating"],
                             review_count=lead["review_count"],
                             shortcoming=shortcoming,
@@ -335,8 +337,8 @@ class LeadEnricher:
                         print(f"AI Response for {website_url}: {deep_intelligence}")
 
                         if not website_url:
-                            ai_score = 10
-                            ai_summary = "No website detected. Highest-priority website + ads opportunity."
+                            if not ai_summary:
+                                ai_summary = "Website URL unavailable or invalid. Enrichment used Maps + niche signals only."
                             if not competitive_hook:
                                 competitive_hook = (
                                     "Your top competitors already have a website capturing Google traffic, "
@@ -355,6 +357,7 @@ class LeadEnricher:
                         enrichment_payload = dict(deep_intelligence or {})
                         enrichment_payload["website_precheck_source"] = website_source
                         enrichment_payload["website_precheck_url"] = website_url
+                        enrichment_payload["maps_url"] = lead.get("maps_url")
                         if competitive_hook and not str(enrichment_payload.get("competitive_hook") or "").strip():
                             enrichment_payload["competitive_hook"] = competitive_hook
                         if ai_summary and not str(enrichment_payload.get("enrichment_summary") or "").strip():
@@ -701,6 +704,7 @@ class LeadEnricher:
         statements = [
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS email text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS google_claimed bigint',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS maps_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_url text',
@@ -736,6 +740,7 @@ class LeadEnricher:
                     id,
                     business_name,
                     website_url,
+                    maps_url,
                     email,
                     rating,
                     review_count,
@@ -790,6 +795,7 @@ class LeadEnricher:
                     id,
                     business_name,
                     website_url,
+                    maps_url,
                     email,
                     rating,
                     review_count,
@@ -1703,6 +1709,7 @@ class LeadEnricher:
         lead_id: int,
         business_name: str,
         raw_website_url: Optional[str],
+        maps_url: Optional[str],
         address: str,
         search_keyword: str,
         email: Optional[str],
@@ -1718,9 +1725,12 @@ class LeadEnricher:
         if domain_from_email:
             candidates.append(f"https://{domain_from_email}")
 
+        maps_hint = str(maps_url or "").strip()
         query_parts = [f'"{business_name}"', f'"{search_keyword}"', "official website"]
         if city:
             query_parts.append(f'"{city}"')
+        if maps_hint:
+            query_parts.append(f'"{maps_hint[:120]}"')
         query = " ".join(part for part in query_parts if part and part != '""')
         candidates.extend(self._search_engine_links(query=query))
 
@@ -2072,6 +2082,7 @@ class LeadEnricher:
         self,
         business_name: str,
         website_url: Optional[str],
+        maps_url: Optional[str],
         rating: Optional[float],
         review_count: Optional[int],
         shortcoming: str,
@@ -2162,6 +2173,7 @@ class LeadEnricher:
                 },
             )
             no_website_payload["maps_only_enrichment"] = True
+            no_website_payload["maps_url"] = maps_url
             no_website_payload["website_analysis_skipped"] = True
             no_website_payload["niche_base_score"] = base_maps_score_int
             no_website_payload["score_breakdown"] = [*maps_breakdown, *niche_breakdown]
@@ -2333,6 +2345,7 @@ class LeadEnricher:
                 "company_name": business_name,
                 "location": address,
                 "website_url": website_url,
+                "maps_url": maps_url,
                 "rating": rating,
                 "reviews": review_count,
                 "review_count": review_count,

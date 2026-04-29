@@ -1917,6 +1917,7 @@ function App({ initialTab = 'leads' }) {
         business_name: lead?.business_name || lead?.name || '',
         contact_name: lead?.contact_name || lead?.contact || '',
         website_url: lead?.website_url || lead?.website || '',
+        maps_url: lead?.maps_url || '',
         phone_number: lead?.phone_number || lead?.phone || '',
       }))
       console.log('[LeadManagement] /api/leads response', {
@@ -7264,16 +7265,31 @@ function App({ initialTab = 'leads' }) {
                               {auditHighlights.length > 0 && (
                                 <span className="text-[10px] text-slate-400 truncate block">Audit: {auditHighlights.join(' • ')}</span>
                               )}
-                              {lead.website_url ? (
-                                <a
-                                  href={lead.website_url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="mt-1 inline-flex w-fit items-center gap-1 text-[10px] font-medium text-cyan-300 hover:text-cyan-100"
-                                  title="Open website"
-                                >
-                                  <Globe className="h-2.5 w-2.5" /> Website
-                                </a>
+                              {(lead.website_url || lead.maps_url) ? (
+                                <div className="mt-1 inline-flex flex-wrap items-center gap-2">
+                                  {lead.website_url ? (
+                                    <a
+                                      href={lead.website_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex w-fit items-center gap-1 text-[10px] font-medium text-cyan-300 hover:text-cyan-100"
+                                      title="Open website"
+                                    >
+                                      <Globe className="h-2.5 w-2.5" /> Website
+                                    </a>
+                                  ) : null}
+                                  {lead.maps_url ? (
+                                    <a
+                                      href={lead.maps_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex w-fit items-center gap-1 text-[10px] font-medium text-rose-300 hover:text-rose-100"
+                                      title="Open Google Maps profile"
+                                    >
+                                      <MapPin className="h-2.5 w-2.5" /> Maps
+                                    </a>
+                                  ) : null}
+                                </div>
                               ) : null}
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                 <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold ${pipelineStageBadgeClass(pipelineStage)}`}>
@@ -7562,10 +7578,19 @@ function App({ initialTab = 'leads' }) {
 
                           <div className="mt-3 space-y-2 text-sm text-slate-300">
                             <p className={`truncate ${lead.email ? 'text-slate-300' : shouldShowSearchingEmail ? 'text-cyan-300' : 'text-slate-500'}`}>{emailDisplay}</p>
-                            {lead.website_url ? (
-                              <a href={lead.website_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-100">
-                                <Globe className="h-3.5 w-3.5" /> Website
-                              </a>
+                            {(lead.website_url || lead.maps_url) ? (
+                              <div className="flex flex-wrap items-center gap-2">
+                                {lead.website_url ? (
+                                  <a href={lead.website_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-100">
+                                    <Globe className="h-3.5 w-3.5" /> Website
+                                  </a>
+                                ) : null}
+                                {lead.maps_url ? (
+                                  <a href={lead.maps_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-rose-300 hover:text-rose-100">
+                                    <MapPin className="h-3.5 w-3.5" /> Maps
+                                  </a>
+                                ) : null}
+                              </div>
                             ) : null}
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
@@ -9751,19 +9776,41 @@ function App({ initialTab = 'leads' }) {
                   </div>
                 </div>
 
-                {/* Website CTA */}
-                {ld.website_url ? (
-                  <a
-                    href={ld.website_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/20 hover:text-cyan-100"
-                  >
-                    <ExternalLink className="h-4 w-4" /> Open Website
-                  </a>
+                {/* Website + Maps CTA */}
+                {(ld.website_url || ld.maps_url) ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {ld.website_url ? (
+                      <a
+                        href={ld.website_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/20 hover:text-cyan-100"
+                      >
+                        <ExternalLink className="h-4 w-4" /> Open Website
+                      </a>
+                    ) : (
+                      <div className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-800/30 py-2.5 text-sm text-slate-600">
+                        <Globe className="h-4 w-4" /> No website on record
+                      </div>
+                    )}
+                    {ld.maps_url ? (
+                      <a
+                        href={ld.maps_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex w-full items-center justify-center gap-2 rounded-2xl border border-rose-500/30 bg-rose-500/10 py-2.5 text-sm font-semibold text-rose-200 transition hover:bg-rose-500/20 hover:text-rose-100"
+                      >
+                        <MapPin className="h-4 w-4" /> Open Maps Profile
+                      </a>
+                    ) : (
+                      <div className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-800/30 py-2.5 text-sm text-slate-600">
+                        <MapPin className="h-4 w-4" /> No maps link on record
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <div className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-700/40 bg-slate-800/30 py-2.5 text-sm text-slate-600">
-                    <Globe className="h-4 w-4" /> No website on record
+                    <Globe className="h-4 w-4" /> No website or maps link on record
                   </div>
                 )}
 
