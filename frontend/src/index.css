@@ -268,6 +268,34 @@
     opacity: 0.45;
   }
 
+  .ai-filter-trigger {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .ai-filter-working {
+    border-color: rgba(34, 211, 238, 0.55);
+    color: #c6f7ff;
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.25), 0 0 22px rgba(34, 211, 238, 0.24);
+  }
+
+  .ai-filter-working::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    background: linear-gradient(120deg, transparent 15%, rgba(34, 211, 238, 0.35), transparent 85%);
+    transform: translateX(-120%);
+    animation: ai-filter-scan 1.35s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes ai-filter-scan {
+    0% { transform: translateX(-120%); opacity: 0.2; }
+    45% { opacity: 0.8; }
+    100% { transform: translateX(120%); opacity: 0.15; }
+  }
+
   .copy-btn {
     display: inline-flex;
     align-items: center;

@@ -535,6 +535,12 @@ class SMTPTestRequest(BaseModel):
     from_name: Optional[str] = None
 
 
+class AILeadFilterRequest(BaseModel):
+    prompt: str = Field(..., min_length=2, max_length=600)
+    limit: int = Field(default=5000, ge=1, le=10000)
+    include_blacklisted: bool = False
+
+
 NICHES = [
     "Paid Ads Agency",
     "Web Design & Dev",
@@ -9258,6 +9264,256 @@ def _lead_dashboard_sort_key(lead: dict, sort_mode: str) -> Any:
     )
 
 
+def _ai_prompt_extract_city(prompt_text: str) -> str:
+    match = re.search(r"\b(?:in|near|around)\s+([a-zA-Z][a-zA-Z\s\-]{1,40})", prompt_text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    raw = str(match.group(1) or "").strip()
+    city = re.split(r"\b(with|where|that|who|and|or)\b", raw, maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,.-")
+    return city
+
+
+def _ai_prompt_heuristic_filters(prompt: str) -> dict[str, Any]:
+    text = str(prompt or "").strip()
+    lower = text.lower()
+
+    min_score: Optional[float] = None
+    min_rating: Optional[float] = None
+    max_rating: Optional[float] = None
+
+    rating_above = re.search(r"\brating\s*(?:above|over|>=?)\s*(\d(?:\.\d+)?)", lower)
+    if rating_above:
+        min_rating = _qualifier_to_float(rating_above.group(1), default=0.0)
+
+    rating_below = re.search(r"\brating\s*(?:below|under|<=?)\s*(\d(?:\.\d+)?)", lower)
+    if rating_below:
+        max_rating = _qualifier_to_float(rating_below.group(1), default=5.0)
+
+    score_above = re.search(r"\b(?:score|priority)\s*(?:above|over|>=?)\s*(\d(?:\.\d+)?)", lower)
+    if score_above:
+        min_score = _qualifier_to_float(score_above.group(1), default=0.0)
+
+    if "high priority" in lower:
+        min_score = max(min_score or 0.0, 8.0)
+    if "high-ticket" in lower or "high ticket" in lower:
+        min_score = max(min_score or 0.0, 8.0)
+
+    website_fix = any(term in lower for term in ["website fix", "no https", "without https", "slow load", "slow site", "page speed"])
+    seo_gap = any(term in lower for term in ["weak seo", "poor seo", "low seo", "bad seo", "seo issue", "ranking issue", "low organic", "no seo"])
+    social_gaps = any(term in lower for term in ["social gap", "social gaps", "missing instagram", "missing linkedin", "no instagram", "no linkedin", "no socials", "missing socials"])
+    no_socials = any(term in lower for term in ["no socials", "without socials", "missing all socials", "no social profiles"])
+    missing_pixel = any(term in lower for term in ["no facebook pixel", "without facebook pixel", "missing pixel", "no pixel"])
+
+    city = _ai_prompt_extract_city(text)
+
+    stop_words = {
+        "find", "show", "me", "with", "without", "and", "or", "in", "near", "around", "above", "below",
+        "rating", "score", "priority", "leads", "lead", "high", "ticket", "high-ticket", "no", "missing", "facebook",
+        "pixel", "website", "fix", "social", "gaps", "instagram", "linkedin", "the", "a", "an", "for", "to",
+    }
+    search_terms: list[str] = []
+    for token in re.findall(r"[a-zA-Z][a-zA-Z0-9\-]{2,}", lower):
+        if token in stop_words:
+            continue
+        if token.isdigit():
+            continue
+        search_terms.append(token)
+    # Keep terms unique and compact to avoid over-filtering.
+    search_terms = list(dict.fromkeys(search_terms))[:5]
+
+    return {
+        "city": city,
+        "search_terms": search_terms,
+        "min_score": min_score,
+        "min_rating": min_rating,
+        "max_rating": max_rating,
+        "require_missing_pixel": missing_pixel,
+        "require_website_fix": website_fix or seo_gap,
+        "require_seo_gap": seo_gap,
+        "require_social_gap": social_gaps,
+        "require_no_socials": no_socials,
+    }
+
+
+def _ai_prompt_llm_filters(prompt: str) -> Optional[dict[str, Any]]:
+    client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        return None
+
+    system_prompt = (
+        "You convert a natural-language CRM lead filtering prompt into JSON filters. "
+        "Return ONLY strict JSON with keys: city, search_terms, min_score, min_rating, max_rating, "
+        "require_missing_pixel, require_website_fix, require_seo_gap, require_social_gap, require_no_socials. "
+        "Use null for unknown numeric values, [] for unknown arrays, and false for unknown booleans."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=str(model_name or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": str(prompt or "").strip()},
+            ],
+            max_tokens=220,
+            temperature=0.1,
+        )
+        raw = str(response.choices[0].message.content or "").strip()
+        json_text = raw
+        if "{" in raw and "}" in raw:
+            json_text = raw[raw.find("{") : raw.rfind("}") + 1]
+        parsed = json.loads(json_text)
+        if not isinstance(parsed, dict):
+            return None
+        return {
+            "city": str(parsed.get("city") or "").strip(),
+            "search_terms": [str(term).strip().lower() for term in (parsed.get("search_terms") or []) if str(term).strip()],
+            "min_score": parsed.get("min_score"),
+            "min_rating": parsed.get("min_rating"),
+            "max_rating": parsed.get("max_rating"),
+            "require_missing_pixel": bool(parsed.get("require_missing_pixel")),
+            "require_website_fix": bool(parsed.get("require_website_fix")),
+            "require_seo_gap": bool(parsed.get("require_seo_gap")),
+            "require_social_gap": bool(parsed.get("require_social_gap")),
+            "require_no_socials": bool(parsed.get("require_no_socials")),
+        }
+    except Exception:
+        return None
+
+
+def _merge_ai_filter_specs(base_spec: dict[str, Any], llm_spec: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not llm_spec:
+        return base_spec
+
+    merged = dict(base_spec)
+    for key in ("city", "search_terms", "min_score", "min_rating", "max_rating"):
+        value = llm_spec.get(key)
+        if value is None:
+            continue
+        if key == "search_terms":
+            terms = [str(term).strip().lower() for term in value if str(term).strip()]
+            if terms:
+                merged[key] = list(dict.fromkeys(terms))[:5]
+            continue
+        if key == "city":
+            candidate = str(value or "").strip()
+            if candidate:
+                merged[key] = candidate
+            continue
+        merged[key] = _qualifier_to_float(value, default=_qualifier_to_float(merged.get(key), default=0.0))
+
+    for key in ("require_missing_pixel", "require_website_fix", "require_seo_gap", "require_social_gap", "require_no_socials"):
+        merged[key] = bool(base_spec.get(key) or llm_spec.get(key))
+    return merged
+
+
+def _lead_matches_ai_filter_spec(lead: dict[str, Any], spec: dict[str, Any]) -> bool:
+    city = str(spec.get("city") or "").strip().lower()
+    if city:
+        address_blob = " ".join(
+            [
+                str(lead.get("address") or ""),
+                str(lead.get("city") or ""),
+                str(lead.get("search_keyword") or ""),
+            ]
+        ).lower()
+        if city not in address_blob:
+            return False
+
+    min_score_raw = spec.get("min_score")
+    if min_score_raw is not None and str(min_score_raw).strip() != "":
+        threshold = _qualifier_to_float(min_score_raw, default=0.0)
+        lead_score = _qualifier_to_float(
+            lead.get("best_lead_score", lead.get("ai_score")),
+            default=_qualifier_to_float(lead.get("ai_score"), default=0.0),
+        )
+        if lead_score < threshold:
+            return False
+
+    rating = _qualifier_to_float(lead.get("rating"), default=0.0)
+    min_rating_raw = spec.get("min_rating")
+    if min_rating_raw is not None and str(min_rating_raw).strip() != "":
+        if rating < _qualifier_to_float(min_rating_raw, default=0.0):
+            return False
+
+    max_rating_raw = spec.get("max_rating")
+    if max_rating_raw is not None and str(max_rating_raw).strip() != "":
+        if rating > _qualifier_to_float(max_rating_raw, default=5.0):
+            return False
+
+    if bool(spec.get("require_missing_pixel")):
+        has_pixel = _qualifier_to_bool(lead.get("has_pixel"))
+        if has_pixel:
+            return False
+
+    if bool(spec.get("require_website_fix")):
+        website = str(lead.get("website_url") or "").strip().lower()
+        insecure = _qualifier_to_bool(lead.get("insecure_site")) or (website.startswith("http://") and not website.startswith("https://"))
+        enrichment = _qualifier_parse_enrichment(lead.get("enrichment_data"))
+        pagespeed = _qualifier_to_float(
+            enrichment.get("pagespeed_score", enrichment.get("page_speed", 100.0)),
+            default=100.0,
+        )
+        if not (insecure or pagespeed < 55):
+            return False
+
+    if bool(spec.get("require_seo_gap")):
+        enrichment = _qualifier_parse_enrichment(lead.get("enrichment_data"))
+        organic_traffic = _qualifier_to_float(
+            enrichment.get("organic_traffic", enrichment.get("organic_visits", 0.0)),
+            default=0.0,
+        )
+        backlinks = _qualifier_to_int(
+            enrichment.get("backlink_count", enrichment.get("backlinks", enrichment.get("ref_domains", 0))),
+            default=0,
+        )
+        authority = _qualifier_to_float(
+            enrichment.get("authority", enrichment.get("domain_authority", enrichment.get("authority_score", 0.0))),
+            default=0.0,
+        )
+        seo_blob = " ".join(
+            [
+                str(lead.get("main_shortcoming") or ""),
+                str(lead.get("ai_description") or ""),
+                str(enrichment.get("weak_points") or ""),
+                str(enrichment.get("weaknesses") or ""),
+            ]
+        ).lower()
+        has_seo_problem_text = any(term in seo_blob for term in ["seo", "organic", "ranking", "search visibility"])
+        has_seo_problem_metrics = organic_traffic < 150 or backlinks < 25 or authority < 20
+        if not (has_seo_problem_text or has_seo_problem_metrics):
+            return False
+
+    if bool(spec.get("require_social_gap")):
+        has_instagram = bool(str(lead.get("instagram_url") or "").strip())
+        has_linkedin = bool(str(lead.get("linkedin_url") or "").strip())
+        # Social gap means at least one major social profile missing.
+        if has_instagram and has_linkedin:
+            return False
+
+    if bool(spec.get("require_no_socials")):
+        has_instagram = bool(str(lead.get("instagram_url") or "").strip())
+        has_linkedin = bool(str(lead.get("linkedin_url") or "").strip())
+        has_facebook = bool(str(lead.get("facebook_url") or "").strip())
+        if has_instagram or has_linkedin or has_facebook:
+            return False
+
+    terms = [str(term).strip().lower() for term in (spec.get("search_terms") or []) if str(term).strip()]
+    if terms:
+        haystack = " ".join(
+            [
+                str(lead.get("business_name") or ""),
+                str(lead.get("search_keyword") or ""),
+                str(lead.get("address") or ""),
+                str(lead.get("main_offer") or ""),
+                " ".join(_lead_normalize_string_list(lead.get("tech_stack"), limit=8)),
+            ]
+        ).lower()
+        if not all(term in haystack for term in terms):
+            return False
+
+    return True
+
+
 def _qualifier_extract_metrics(lead: dict) -> dict:
     enrichment = _qualifier_parse_enrichment(lead.get("enrichment_data"))
 
@@ -10929,6 +11185,53 @@ def create_app() -> FastAPI:
         }
         _set_cached_leads(cache_key, result)
         return result
+
+    @app.post("/api/leads/ai-filter")
+    def ai_filter_leads(payload: AILeadFilterRequest, request: Request) -> dict:
+        prompt = str(payload.prompt or "").strip()
+        if len(prompt) < 2:
+            raise HTTPException(status_code=400, detail="Prompt is too short")
+
+        base_result = get_leads(
+            request=request,
+            limit=min(max(int(payload.limit or 5000), 1), 10000),
+            page=1,
+            status=None,
+            search=None,
+            sort="best",
+            quick_filter="all",
+            include_blacklisted=bool(payload.include_blacklisted),
+            debug_all=False,
+        )
+        rows = list(base_result.get("items") or base_result.get("leads") or [])
+
+        heuristic_spec = _ai_prompt_heuristic_filters(prompt)
+        llm_spec = _ai_prompt_llm_filters(prompt)
+        merged_spec = _merge_ai_filter_specs(heuristic_spec, llm_spec)
+
+        matched_rows = [row for row in rows if _lead_matches_ai_filter_spec(dict(row), merged_spec)]
+        matched_rows.sort(
+            key=lambda row: (
+                _qualifier_to_float(row.get("best_lead_score", row.get("ai_score")), default=0.0),
+                _qualifier_to_int(row.get("id"), default=0),
+            ),
+            reverse=True,
+        )
+
+        lead_ids = [int(row.get("id")) for row in matched_rows if row.get("id") is not None]
+        preview_names = [str(row.get("business_name") or "Unnamed").strip() for row in matched_rows[:5]]
+        source = "llm+heuristic" if llm_spec else "heuristic"
+
+        return {
+            "prompt": prompt,
+            "source": source,
+            "interpreted_filters": merged_spec,
+            "total_candidates": len(rows),
+            "matched_count": len(lead_ids),
+            "lead_ids": lead_ids,
+            "preview_businesses": preview_names,
+            "assistant_message": f"I found {len(lead_ids)} lead(s) matching your AI filter.",
+        }
 
     @app.post("/api/leads/manual")
     def create_manual_lead(payload: ManualLeadRequest, request: Request) -> dict:

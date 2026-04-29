@@ -68,6 +68,12 @@ const LEADS_PAGE_SIZE = 50
 const BYPASS_LEAD_FILTERS = true
 const DEBUG_ALL_LEADS = true
 
+const AI_QUICK_FILTERS = [
+  { key: 'high_priority', label: '🚀 High Priority', prompt: 'Show high priority leads with score above 8' },
+  { key: 'website_fix', label: '🛠️ Website Fix', prompt: 'Show leads with weak SEO, no HTTPS, or slow loading website' },
+  { key: 'social_gaps', label: '📱 Social Gaps', prompt: 'Show leads with no socials or missing Instagram/LinkedIn' },
+]
+
 const QUALIFIER_LOSS_MULTIPLIER_RULES = [
   { terms: ['dentist', 'dental', 'orthodont'], multiplier: 1.55 },
   { terms: ['lawyer', 'legal', 'attorney'], multiplier: 1.65 },
@@ -1857,6 +1863,12 @@ function App({ initialTab = 'leads' }) {
   const [leadServerTotal, setLeadServerTotal] = useState(0)
   const [lastLeadsApiPayload, setLastLeadsApiPayload] = useState(null)
   const [leadFilterPanelOpen, setLeadFilterPanelOpen] = useState(false)
+  const [aiFilterOpen, setAiFilterOpen] = useState(false)
+  const [aiFilterPrompt, setAiFilterPrompt] = useState('')
+  const [aiFilterLoading, setAiFilterLoading] = useState(false)
+  const [aiFilterLeadIds, setAiFilterLeadIds] = useState([])
+  const [aiFilterSummary, setAiFilterSummary] = useState('')
+  const [aiFilterPreview, setAiFilterPreview] = useState(null)
   const [advancedLeadFilters, setAdvancedLeadFilters] = useState({
     industries: [],
     revenueBands: [],
@@ -2799,6 +2811,26 @@ function App({ initialTab = 'leads' }) {
     [leads],
   )
 
+  const isAiFilterActive = aiFilterLeadIds.length > 0
+
+  const aiInterpretedPreviewRows = useMemo(() => {
+    const spec = aiFilterPreview?.interpreted_filters
+    if (!spec || typeof spec !== 'object') return []
+
+    const rows = []
+    if (spec.city) rows.push(`City: ${spec.city}`)
+    if (Array.isArray(spec.search_terms) && spec.search_terms.length) rows.push(`Keywords: ${spec.search_terms.join(', ')}`)
+    if (spec.min_score != null && String(spec.min_score).trim() !== '') rows.push(`Min score: ${Number(spec.min_score).toFixed(1)} / 10`)
+    if (spec.min_rating != null && String(spec.min_rating).trim() !== '') rows.push(`Rating >= ${Number(spec.min_rating).toFixed(1)}`)
+    if (spec.max_rating != null && String(spec.max_rating).trim() !== '') rows.push(`Rating <= ${Number(spec.max_rating).toFixed(1)}`)
+    if (spec.require_missing_pixel) rows.push('Missing Facebook Pixel')
+    if (spec.require_website_fix) rows.push('Website fix needed')
+    if (spec.require_seo_gap) rows.push('Weak SEO signals')
+    if (spec.require_social_gap) rows.push('At least one social profile missing')
+    if (spec.require_no_socials) rows.push('No social profiles at all')
+    return rows
+  }, [aiFilterPreview])
+
   const filteredLeads = useMemo(() => {
     let result = [...leads]
     if (!BYPASS_LEAD_FILTERS) {
@@ -2848,6 +2880,11 @@ function App({ initialTab = 'leads' }) {
       }
     }
 
+    if (isAiFilterActive) {
+      const idSet = new Set(aiFilterLeadIds.map((id) => Number(id)).filter((id) => Number.isFinite(id)))
+      result = result.filter((lead) => idSet.has(Number(lead?.id)))
+    }
+
     const sorted = [...result]
     sorted.sort((a, b) => {
       if (leadSortMode === 'name') {
@@ -2872,7 +2909,7 @@ function App({ initialTab = 'leads' }) {
       return Number(b.ai_sentiment_score || b.ai_score || 0) - Number(a.ai_sentiment_score || a.ai_score || 0)
     })
     return sorted
-  }, [leads, debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted, advancedLeadFilters])
+  }, [leads, debouncedLeadSearch, leadStatusFilter, leadQuickFilter, leadSortMode, showBlacklisted, advancedLeadFilters, isAiFilterActive, aiFilterLeadIds])
 
   const leadsPageCount = Math.max(1, Math.ceil(Math.max(leadServerTotal, filteredLeads.length) / LEADS_PAGE_SIZE))
   const pagedLeads = useMemo(() => {
@@ -2902,14 +2939,70 @@ function App({ initialTab = 'leads' }) {
     }
   }, [leads, showBlacklisted])
 
+  const clearAiFilter = useCallback(() => {
+    setAiFilterLeadIds([])
+    setAiFilterSummary('')
+    setAiFilterPrompt('')
+    setAiFilterPreview(null)
+    setAiFilterLoading(false)
+  }, [])
+
+  const applyAiFilterPreview = useCallback(() => {
+    const ids = Array.isArray(aiFilterPreview?.lead_ids)
+      ? aiFilterPreview.lead_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      : []
+    setAiFilterLeadIds(ids)
+    setAiFilterSummary(String(aiFilterPreview?.assistant_message || `I found ${ids.length} lead(s) matching your request.`))
+    setLeadPage(0)
+    toast.success(`Applied AI filter (${ids.length} leads)`)
+  }, [aiFilterPreview])
+
+  const runAiFilter = useCallback(async (rawPrompt) => {
+    const prompt = String(rawPrompt || aiFilterPrompt || '').trim()
+    if (!prompt) {
+      toast.error('Type an AI filter prompt first')
+      return
+    }
+
+    setAiFilterLoading(true)
+    setAiFilterLeadIds([])
+    try {
+      const response = await fetchJson('/api/leads/ai-filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          limit: 5000,
+          include_blacklisted: showBlacklisted,
+        }),
+      })
+      const ids = Array.isArray(response?.lead_ids) ? response.lead_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id)) : []
+      setAiFilterPreview({
+        ...response,
+        lead_ids: ids,
+      })
+      setAiFilterSummary(String(response?.assistant_message || `I found ${ids.length} lead(s) matching your request.`))
+      setAiFilterOpen(true)
+      setAiFilterPrompt(prompt)
+      toast.success(`AI interpreted your filter (${ids.length} potential leads)`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'AI filter failed'
+      setLastError(message)
+      toast.error(message)
+    } finally {
+      setAiFilterLoading(false)
+    }
+  }, [aiFilterPrompt, showBlacklisted])
+
   useEffect(() => {
     if (activeTab !== 'leads') return
     setLeadStatusFilter('all')
     setLeadQuickFilter('all')
     setLeadSearch('')
     setLeadPage(0)
+    clearAiFilter()
     void refreshLeads({ silent: false })
-  }, [activeTab, refreshLeads])
+  }, [activeTab, clearAiFilter, refreshLeads])
 
   useEffect(() => {
     if (!lastLeadsApiPayload) return
@@ -6932,12 +7025,118 @@ function App({ initialTab = 'leads' }) {
                     onChange={(e) => setLeadSearch(e.target.value)}
                   />
                 </div>
+                <div className="relative">
+                  <button
+                    type="button"
+                    className={`btn-ghost ai-filter-trigger px-3 py-2 text-sm ${aiFilterLoading ? 'ai-filter-working' : ''} ${isAiFilterActive ? 'ring-1 ring-cyan-400/70 text-cyan-200' : ''}`}
+                    onClick={() => setAiFilterOpen((prev) => !prev)}
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    AI Filter
+                  </button>
+
+                  {aiFilterOpen ? (
+                    <div className="absolute left-0 top-[calc(100%+0.5rem)] z-40 w-[min(500px,92vw)] rounded-2xl border border-cyan-500/25 bg-slate-950/95 p-3 shadow-[0_20px_65px_rgba(2,12,27,0.75)] backdrop-blur">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/90">AI assistant search</p>
+                        <button
+                          type="button"
+                          className="text-xs font-semibold text-slate-400 transition hover:text-white"
+                          onClick={() => setAiFilterOpen(false)}
+                        >
+                          Close
+                        </button>
+                      </div>
+
+                      <div className="mb-3 rounded-xl border border-slate-700/80 bg-slate-900/80 p-2.5">
+                        <input
+                          className="glass-input h-10 w-full text-sm"
+                          type="text"
+                          value={aiFilterPrompt}
+                          placeholder="Find high-priority gyms in Miami with weak SEO and no socials"
+                          onChange={(e) => setAiFilterPrompt(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault()
+                              void runAiFilter(aiFilterPrompt)
+                            }
+                          }}
+                        />
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="btn-primary px-3 py-2 text-xs"
+                            disabled={aiFilterLoading}
+                            onClick={() => void runAiFilter(aiFilterPrompt)}
+                          >
+                            <Sparkles className={`h-3.5 w-3.5 ${aiFilterLoading ? 'animate-spin' : ''}`} />
+                            {aiFilterLoading ? 'Thinking…' : 'Analyze'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost px-2.5 py-2 text-xs"
+                            disabled={!aiFilterPreview || aiFilterLoading}
+                            onClick={applyAiFilterPreview}
+                          >
+                            Apply Filter
+                          </button>
+                          {isAiFilterActive ? (
+                            <button
+                              type="button"
+                              className="btn-ghost px-2.5 py-2 text-xs"
+                              onClick={clearAiFilter}
+                            >
+                              X Clear
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="mb-3 flex flex-wrap gap-2">
+                        {AI_QUICK_FILTERS.map((quick) => (
+                          <button
+                            key={quick.key}
+                            type="button"
+                            className="btn-ghost px-2.5 py-1.5 text-xs"
+                            disabled={aiFilterLoading}
+                            onClick={() => {
+                              setAiFilterPrompt(quick.prompt)
+                              void runAiFilter(quick.prompt)
+                            }}
+                          >
+                            {quick.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {aiFilterPreview ? (
+                        <div className="mb-2 rounded-xl border border-cyan-500/20 bg-slate-900/65 p-2.5">
+                          <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-slate-300">
+                            <span className="uppercase tracking-[0.14em] text-cyan-200/85">Interpreted filters</span>
+                            <span>{Number(aiFilterPreview?.matched_count || 0)} matches</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {aiInterpretedPreviewRows.length ? aiInterpretedPreviewRows.map((row) => (
+                              <span key={row} className="rounded-full border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] text-slate-200">{row}</span>
+                            )) : (
+                              <span className="text-xs text-slate-400">No interpreted filters yet.</span>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <p className="text-xs text-slate-400">
+                        {aiFilterSummary || 'Describe what you need. We will preview interpreted filters before applying.'}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+
                 <button
                   type="button"
                   className="btn-ghost px-3 py-2 text-sm"
                   onClick={() => setLeadFilterPanelOpen((prev) => !prev)}
                 >
-                  <Sparkles className="h-4 w-4" />
                   Filters
                 </button>
                 <div className="relative">
@@ -6981,6 +7180,14 @@ function App({ initialTab = 'leads' }) {
                 {/* Real-time scrape/enrich progress — GPU-composited, no layout shift */}
                 <ScrapeProgressBadge />
               </div>
+
+              {isAiFilterActive ? (
+                <div className="flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>{aiFilterSummary || `AI assistant narrowed this list to ${filteredLeads.length} lead(s).`}</span>
+                  <button type="button" className="ml-auto text-xs font-semibold text-cyan-200 hover:text-white" onClick={clearAiFilter}>X</button>
+                </div>
+              ) : null}
 
               <div className="flex flex-wrap gap-2">
                 <button
