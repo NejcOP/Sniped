@@ -66,6 +66,29 @@ _DOMAIN_SCORE_CACHE_TTL = 30 * 24 * 3600  # 30 days in seconds
 # In-memory domain-score cache  {domain: (score, summary, hook, deep_data, timestamp)}
 _DOMAIN_SCORE_CACHE: dict[str, Tuple[int, str, str, dict, float]] = {}
 
+INVALID_WEBSITE_DOMAIN_TOKENS = (
+    "schema.org",
+    "google.com",
+    "maps.google",
+    "g.page",
+    "goo.gl",
+)
+
+NON_BUSINESS_RESULT_DOMAINS = (
+    "schema.org",
+    "google.com",
+    "maps.google",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "yelp.",
+    "tripadvisor.",
+    "wikipedia.org",
+)
+
 
 KEYWORD_NICHE_HINTS: list[tuple[list[str], str]] = [
     (
@@ -233,8 +256,17 @@ class LeadEnricher:
                         }
                         social_metrics: dict[str, dict[str, Any]] = {}
 
-                        website_url = self._normalize_website(lead["website_url"])
+                        website_url, website_source = self._resolve_business_website_url(
+                            lead_id=int(lead["id"]),
+                            business_name=lead_name,
+                            raw_website_url=lead.get("website_url"),
+                            address=str(lead.get("address") or ""),
+                            search_keyword=str(lead.get("search_keyword") or ""),
+                            email=lead.get("email"),
+                        )
                         if website_url:
+                            if website_source == "recovered":
+                                logging.info("Recovered real website URL for %s: %s", lead_name, website_url)
                             email, insecure_site, website_excerpt, website_signals = self._audit_website(page=page, website_url=website_url)
                             _emit_progress(processed, with_email, lead_name, "discovering_email")
                             if not email:
@@ -259,16 +291,15 @@ class LeadEnricher:
                                 social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
                             logging.warning(
-                                "Lead %s (%s) has no website URL. Marking failed_no_url and skipping.",
+                                "Lead %s (%s) has invalid/missing business website URL. Using maps-only enrichment fallback.",
                                 lead_name,
                                 lead.get("id"),
                             )
-                            self._mark_lead_failed_no_url(int(lead["id"]))
-                            _emit_progress(processed, with_email, lead_name, "enriching")
-                            continue
+                            website_excerpt = ""
+                            website_signals = {}
 
                         shortcoming = self._infer_main_shortcoming(
-                            website_url=lead["website_url"],
+                            website_url=website_url,
                             rating=lead["rating"],
                             review_count=lead["review_count"],
                             insecure_site=insecure_site,
@@ -322,6 +353,8 @@ class LeadEnricher:
 
                         enrichment_data: Optional[str] = None
                         enrichment_payload = dict(deep_intelligence or {})
+                        enrichment_payload["website_precheck_source"] = website_source
+                        enrichment_payload["website_precheck_url"] = website_url
                         if competitive_hook and not str(enrichment_payload.get("competitive_hook") or "").strip():
                             enrichment_payload["competitive_hook"] = competitive_hook
                         if ai_summary and not str(enrichment_payload.get("enrichment_summary") or "").strip():
@@ -703,6 +736,7 @@ class LeadEnricher:
                     id,
                     business_name,
                     website_url,
+                    email,
                     rating,
                     review_count,
                     google_claimed,
@@ -756,6 +790,7 @@ class LeadEnricher:
                     id,
                     business_name,
                     website_url,
+                    email,
                     rating,
                     review_count,
                     google_claimed,
@@ -834,6 +869,24 @@ class LeadEnricher:
                 """
             ),
             {"lead_id": int(lead_id)},
+        )
+
+    def _update_lead_website_url(self, lead_id: int, website_url: str) -> None:
+        cleaned = str(website_url or "").strip()
+        if not cleaned:
+            return
+        self._execute(
+            text(
+                """
+                UPDATE leads
+                SET website_url = :website_url
+                WHERE id = :lead_id
+                """
+            ),
+            {
+                "lead_id": int(lead_id),
+                "website_url": cleaned,
+            },
         )
 
     def _update_lead_enrichment(
@@ -1593,11 +1646,98 @@ class LeadEnricher:
         return self._guess_common_email_from_domain(website_url=website_url, business_name=business_name)
 
     @staticmethod
+    def _is_non_business_website_url(website_url: Optional[str]) -> bool:
+        raw = str(website_url or "").strip().lower()
+        if not raw or raw == "none":
+            return True
+        try:
+            parsed = urlparse(raw if raw.startswith(("http://", "https://")) else f"https://{raw}")
+            domain = str(parsed.netloc or "").lower().replace("www.", "")
+            path = str(parsed.path or "").lower()
+        except Exception:
+            return True
+
+        if not domain:
+            return True
+        if any(token in domain for token in INVALID_WEBSITE_DOMAIN_TOKENS):
+            return True
+        if "/place" in path and "schema.org" in domain:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_domain_from_email(email: Optional[str]) -> str:
+        value = str(email or "").strip().lower()
+        if "@" not in value:
+            return ""
+        domain = value.split("@", 1)[1].strip().replace("www.", "")
+        if not domain or "." not in domain:
+            return ""
+        if any(token in domain for token in NON_BUSINESS_RESULT_DOMAINS):
+            return ""
+        return domain
+
+    @staticmethod
+    def _pick_best_business_website_candidate(candidates: list[str]) -> Optional[str]:
+        if not candidates:
+            return None
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in candidates:
+            url = str(item or "").strip()
+            if not url:
+                continue
+            parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
+            domain = str(parsed.netloc or "").lower().replace("www.", "")
+            if not domain or any(token in domain for token in NON_BUSINESS_RESULT_DOMAINS):
+                continue
+            if domain in seen:
+                continue
+            seen.add(domain)
+            cleaned.append(url)
+        return cleaned[0] if cleaned else None
+
+    def _resolve_business_website_url(
+        self,
+        *,
+        lead_id: int,
+        business_name: str,
+        raw_website_url: Optional[str],
+        address: str,
+        search_keyword: str,
+        email: Optional[str],
+    ) -> tuple[Optional[str], str]:
+        normalized = self._normalize_website(raw_website_url)
+        if normalized and not self._is_non_business_website_url(normalized):
+            return normalized, "db"
+
+        city = self._extract_city(address)
+        domain_from_email = self._extract_domain_from_email(email)
+        candidates: list[str] = []
+
+        if domain_from_email:
+            candidates.append(f"https://{domain_from_email}")
+
+        query_parts = [f'"{business_name}"', f'"{search_keyword}"', "official website"]
+        if city:
+            query_parts.append(f'"{city}"')
+        query = " ".join(part for part in query_parts if part and part != '""')
+        candidates.extend(self._search_engine_links(query=query))
+
+        selected = self._pick_best_business_website_candidate(candidates)
+        selected_normalized = self._normalize_website(selected)
+        if selected_normalized and not self._is_non_business_website_url(selected_normalized):
+            self._update_lead_website_url(lead_id=lead_id, website_url=selected_normalized)
+            return selected_normalized, "recovered"
+
+        return None, "maps_only"
+
+    @staticmethod
     def _normalize_website(website_url: Optional[str]) -> Optional[str]:
         if not website_url:
             return None
 
-        cleaned = website_url.strip()
+        cleaned = str(website_url).strip().strip('"\' ')
         if not cleaned or cleaned.lower() == "none":
             return None
 
@@ -1947,6 +2087,56 @@ class LeadEnricher:
     ) -> tuple[int, str, str, dict]:
         """Return (score 1-10, ai_summary reason, competitive_hook string, deep_intelligence payload)."""
         if not website_url or str(website_url).strip().lower() == "none":
+            maps_breakdown: list[dict[str, Any]] = []
+
+            def _maps_factor(impact: float, label: str, detail: str) -> None:
+                maps_breakdown.append(
+                    {
+                        "impact": round(float(impact), 1),
+                        "type": "positive" if impact > 0 else "negative",
+                        "label": label,
+                        "detail": detail,
+                    }
+                )
+
+            base_maps_score = 5.0
+            if isinstance(rating, (int, float)):
+                if float(rating) < 4.0:
+                    base_maps_score += 1.1
+                    _maps_factor(+1.1, "Below-competitive Google rating", "Lower trust sentiment suggests immediate optimization opportunity.")
+                elif float(rating) >= 4.6:
+                    base_maps_score -= 0.4
+                    _maps_factor(-0.4, "Strong Google rating", "Map reputation is already above-average.")
+            else:
+                base_maps_score += 0.8
+                _maps_factor(+0.8, "No visible Google rating", "Missing map trust signal creates a clear conversion gap.")
+
+            if review_count is None or int(review_count) < 20:
+                base_maps_score += 1.0
+                _maps_factor(+1.0, "Low review depth", "Thin review volume weakens map-to-contact conversion.")
+            elif int(review_count) >= 150:
+                base_maps_score -= 0.5
+                _maps_factor(-0.5, "Strong review moat", "High review count reduces urgency versus weaker profiles.")
+
+            if google_claimed in (False, 0, "0", None):
+                base_maps_score += 0.9
+                _maps_factor(+0.9, "Google profile not clearly claimed", "Unclaimed/uncertain listing signals easy optimization wins.")
+
+            if not has_email:
+                base_maps_score += 0.4
+                _maps_factor(+0.4, "No verified business email", "Outreach readiness is weak despite map visibility.")
+
+            base_maps_score_int = max(1, min(10, int(round(base_maps_score))))
+            maps_score, niche_breakdown, niche_tone = self._apply_niche_suitability_adjustment(
+                base_score=base_maps_score_int,
+                shortcoming=shortcoming or "Website URL unavailable or invalid",
+                insecure_site=False,
+                has_email=has_email,
+                website_signals=website_signals,
+                social_profiles=social_profiles,
+                page_excerpt=page_excerpt,
+            )
+
             no_website_payload = self._build_deep_intelligence_payload(
                 business_name=business_name,
                 website_url=website_url,
@@ -1957,24 +2147,33 @@ class LeadEnricher:
                 has_email=has_email,
                 address=address,
                 search_keyword=search_keyword,
-                ai_score=10,
+                ai_score=maps_score,
                 google_claimed=google_claimed,
                 website_signals=website_signals,
                 social_profiles=social_profiles,
                 social_metrics=social_metrics,
                 parsed_ai={
-                    "competitive_hook": "Your top competitors already have a website capturing Google traffic, while you currently have no site to convert visitors or support ads.",
-                    "strengths": ["Recognizable business name", "Clear local market fit", "Fast upside once online"],
-                    "weak_points": ["Missing website", "No owned landing page", "Weak trust signals online"],
+                    "competitive_hook": "Competitors with clean websites and stronger map trust signals will convert demand before this listing can.",
+                    "strengths": ["Recognizable business name", "Existing Google Maps footprint", "Clear local market fit"],
+                    "weak_points": ["Website URL unavailable or invalid", "Weak owned-web conversion path", "Trust stack depends too much on maps"],
                     "lead_priority": "Hot Lead",
-                    "enrichment_summary": "No website detected. Highest-priority website + ads opportunity.",
-                    "reason": "No website detected. Highest-priority website + ads opportunity.",
+                    "enrichment_summary": "Website URL is unavailable or invalid, so enrichment used Google Maps and niche signals only.",
+                    "reason": "Website URL is unavailable or invalid, so enrichment used Google Maps and niche signals only.",
                 },
             )
+            no_website_payload["maps_only_enrichment"] = True
+            no_website_payload["website_analysis_skipped"] = True
+            no_website_payload["niche_base_score"] = base_maps_score_int
+            no_website_payload["score_breakdown"] = [*maps_breakdown, *niche_breakdown]
+            no_website_payload["niche_focus_issues"] = [
+                item.get("label") for item in niche_breakdown if float(item.get("impact") or 0) < 0
+            ]
+            no_website_payload["user_niche"] = str(self.user_niche or "").strip()
+            no_website_payload["niche_suitability_score"] = maps_score
             return (
-                10,
-                "No website detected. Highest-priority website + ads opportunity.",
-                "Your top competitors already have a website capturing Google traffic, while you currently have no site to convert visitors or support ads.",
+                maps_score,
+                niche_tone or "Website URL unavailable/invalid. Enrichment used Maps + niche signals only.",
+                "Competitors with stronger websites and map trust will likely capture this demand first.",
                 no_website_payload,
             )
 
