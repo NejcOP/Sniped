@@ -6029,16 +6029,8 @@ function App({ initialTab = 'leads' }) {
           </div>
           <div className="hero-metrics">
             <div className="hero-metric">
-              <span>Next drip</span>
-              <strong>{countdown ?? '\u2014'}</strong>
-            </div>
-            <div className="hero-metric">
               <span>Queued mail</span>
               <strong>{stats.queued_mail_count}</strong>
-            </div>
-            <div className="hero-metric">
-              <span>Digest ETA</span>
-              <strong>{digestCountdown}</strong>
             </div>
           </div>
         </section>
