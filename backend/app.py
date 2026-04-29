@@ -5145,12 +5145,25 @@ def get_queued_mail_count_supabase(config_path: Path, user_id: Optional[str] = N
     client = get_supabase_client(config_path)
     if client is None:
         return 0
-    rows = supabase_select_rows(
-        client,
-        "leads",
-        columns="status,email,next_mail_at",
-        filters={"user_id": user_id} if user_id else None,
-    )
+    try:
+        rows = supabase_select_rows(
+            client,
+            "leads",
+            columns="status,email,next_mail_at",
+            filters={"user_id": user_id} if user_id else None,
+        )
+    except Exception as exc:
+        logging.warning("Supabase queued mail fallback without next_mail_at: %s", exc)
+        try:
+            rows = supabase_select_rows(
+                client,
+                "leads",
+                columns="status,email",
+                filters={"user_id": user_id} if user_id else None,
+            )
+        except Exception as nested_exc:
+            logging.warning("Supabase queued mail count unavailable: %s", nested_exc)
+            return 0
     now_utc = datetime.now(timezone.utc)
     count = 0
     for row in rows:
@@ -5191,12 +5204,16 @@ def get_dashboard_stats_supabase(config_path: Path, user_id: Optional[str] = Non
             row.setdefault("scraped_at", None)
             row.setdefault("status_updated_at", None)
             row.setdefault("client_folder_id", None)
-    revenue_log = supabase_select_rows(
-        client,
-        "revenue_log",
-        columns="amount,is_recurring",
-        filters=uid_filter,
-    )
+    try:
+        revenue_log = supabase_select_rows(
+            client,
+            "revenue_log",
+            columns="amount,is_recurring",
+            filters=uid_filter,
+        )
+    except Exception as exc:
+        logging.warning("Supabase stats revenue_log fallback to empty set: %s", exc)
+        revenue_log = []
 
     total_leads = len(leads)
     emails_sent = sum(1 for row in leads if row.get("sent_at") is not None)

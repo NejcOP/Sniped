@@ -19,6 +19,7 @@ import { useSearchParams } from 'react-router-dom'
 import { clearUserSession, getRememberPreference, getStoredValue, setAuthSession } from './authStorage'
 import { ALLOWED_NICHES, ACCOUNT_TYPE_OPTIONS } from './constants'
 import Footer from './Footer'
+import { appToasterProps } from './toastTheme'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
 const NICHE_OPTIONS = ALLOWED_NICHES
@@ -996,13 +997,7 @@ export default function SettingsPage() {
 
   return (
     <div className="app-root min-h-screen text-slate-100">
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3500,
-          style: { background: '#111827', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px' },
-        }}
-      />
+      <Toaster {...appToasterProps} />
 
       <div className="flex w-full flex-col gap-3 px-4 pb-8 pt-1 sm:px-6 xl:px-8">
         <div className="mx-auto w-full max-w-6xl space-y-5">

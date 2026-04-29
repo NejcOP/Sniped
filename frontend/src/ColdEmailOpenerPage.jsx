@@ -4,6 +4,7 @@ import toast, { Toaster } from 'react-hot-toast'
 import { Zap, Copy, RefreshCw, LogOut, Sparkles, Info, Check } from 'lucide-react'
 import { clearUserSession, getStoredValue, setAuthSession } from './authStorage'
 import { NICHE_HINTS } from './constants'
+import { appToasterProps } from './toastTheme'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
@@ -235,7 +236,7 @@ export default function ColdEmailOpenerPage() {
 
   return (
     <div className="min-h-screen px-4 py-10" style={{ background: '#060d1c' }}>
-      <Toaster position="top-right" />
+      <Toaster {...appToasterProps} />
 
       {/* Nav */}
       <header className="max-w-2xl mx-auto flex items-center justify-between mb-10">

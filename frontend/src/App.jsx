@@ -55,6 +55,7 @@ import { useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import Footer from './Footer'
 import { getStoredValue } from './authStorage'
+import { appToasterProps } from './toastTheme'
 // ── Performance modules ────────────────────────────────────────────────────
 import { useDebounce } from './hooks/useDebounce'
 import { invalidateLeadsCache } from './hooks/useLeadsCache'
@@ -1828,16 +1829,11 @@ function App({ initialTab = 'leads' }) {
   const [pendingTierLeadId, setPendingTierLeadId] = useState(null)
   const [retryingTaskId, setRetryingTaskId] = useState(null)
   const [, setLastResult] = useState('')
-  // setLastError is an alias for the toast; background-only errors use console.error instead
-  const setLastError = useCallback((msg) => setToastError(msg), [])
-    const [toastError, setToastError] = useState('')
-
-    // Auto-dismiss toast after 5 seconds
-    useEffect(() => {
-      if (!toastError) return
-      const t = setTimeout(() => setToastError(''), 5000)
-      return () => clearTimeout(t)
-    }, [toastError])
+  const setLastError = useCallback((msg) => {
+    const text = String(msg || '').trim()
+    if (!text) return
+    console.error('[dashboard-error]', text)
+  }, [])
   const [enrichRetrySeconds, setEnrichRetrySeconds] = useState(0)
   const [enrichRunRequested, setEnrichRunRequested] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -4590,7 +4586,7 @@ function App({ initialTab = 'leads' }) {
       window.clearInterval(fastId)
       window.clearInterval(slowId)
     }
-  }, [activeTab, refreshClientDashboard, refreshClientFolders, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
+  }, [activeTab, fetchMailerCampaignStats, refreshClientDashboard, refreshClientFolders, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
 
   function applySavedSegment(segment) {
     const filters = normalizeSavedSegmentFilters(segment?.filters || {})
@@ -5103,7 +5099,7 @@ function App({ initialTab = 'leads' }) {
     })()
   }
 
-  async function fetchMailerCampaignStats({ silent = false } = {}) {
+  const fetchMailerCampaignStats = useCallback(async ({ silent = false } = {}) => {
     try {
       setCampaignLoading(true)
       const data = await fetchJson('/api/mailer/campaign-stats')
@@ -5134,7 +5130,7 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setCampaignLoading(false)
     }
-  }
+  }, [setLastError])
 
   async function saveCampaignSequence() {
     setSavingSequence(true)
@@ -5366,7 +5362,9 @@ function App({ initialTab = 'leads' }) {
       toast('Retry started', { icon: '\uD83D\uDD01' })
       await Promise.allSettled([fetchTaskState(), refreshStats()])
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Retry failed')
+      const message = error instanceof Error ? error.message : 'Retry failed'
+      setLastError(message)
+      toast.error(message)
     } finally {
       setRetryingTaskId(null)
     }
@@ -5387,7 +5385,9 @@ function App({ initialTab = 'leads' }) {
       setManualLeadForm(defaultManualLead)
       await Promise.allSettled([refreshLeads(), refreshStats()])
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Manual lead creation failed')
+      const message = error instanceof Error ? error.message : 'Manual lead creation failed'
+      setLastError(message)
+      toast.error(message)
     } finally {
       setPendingRequest('')
     }
@@ -5614,7 +5614,9 @@ function App({ initialTab = 'leads' }) {
       toast('Scrape started', { icon: '⏳' })
       void Promise.allSettled([fetchTaskState(true), refreshStats()])
     } catch (error) {
-      setLastError(error instanceof Error ? error.message : 'Unknown API error')
+      const message = error instanceof Error ? error.message : 'Unknown API error'
+      setLastError(message)
+      toast.error(message)
     } finally {
       setPendingRequest('')
     }
@@ -6002,13 +6004,7 @@ function App({ initialTab = 'leads' }) {
   if (!hasSessionToken) {
     return (
       <div className="app-root min-h-screen flex items-center justify-center bg-[#07111f] px-6 text-slate-100">
-        <Toaster
-          position="top-right"
-          toastOptions={{
-            duration: 3500,
-            style: { background: '#1e2a3a', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px' },
-          }}
-        />
+        <Toaster {...appToasterProps} />
         <div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-5 text-center shadow-2xl backdrop-blur-sm">
           <p className="text-sm font-medium text-white">Session required</p>
           <p className="mt-1 text-sm text-slate-400">Redirecting to login…</p>
@@ -6018,13 +6014,7 @@ function App({ initialTab = 'leads' }) {
   }
   return (
     <div className="app-root">
-      <Toaster
-        position="top-right"
-        toastOptions={{
-          duration: 3500,
-          style: { background: '#1e2a3a', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px' },
-        }}
-      />
+      <Toaster {...appToasterProps} />
 
       <aside className="dashboard-sidebar hidden xl:flex">
         <div className="dashboard-sidebar-shell">
@@ -10398,24 +10388,6 @@ function App({ initialTab = 'leads' }) {
               )}
             </div>
           </div>
-        </div>
-      )}
-      {toastError && (
-        <div
-          role="alert"
-          className="fixed bottom-5 right-5 z-[9999] flex max-w-sm items-start gap-3 rounded-2xl border border-rose-500/25 bg-slate-900/95 px-4 py-3 shadow-2xl ring-1 ring-black/40 backdrop-blur-sm"
-          style={{ animation: 'leads-fade-in 0.25s ease' }}
-        >
-          <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-rose-400" />
-          <p className="flex-1 text-xs leading-5 text-slate-300">{toastError}</p>
-          <button
-            type="button"
-            className="ml-1 shrink-0 text-slate-500 transition hover:text-slate-200"
-            onClick={() => setToastError('')}
-            aria-label="Dismiss"
-          >
-            ✕
-          </button>
         </div>
       )}
       <Footer />

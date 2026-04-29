@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, KeyRound, Lock, Zap, Eye, EyeOff } from 'lucid
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import { getStoredValue } from './authStorage'
+import { appToasterProps } from './toastTheme'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 
@@ -72,7 +73,7 @@ export default function ResetPasswordPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-12" style={{ background: '#060d1c' }}>
-      <Toaster position="top-right" />
+      <Toaster {...appToasterProps} />
       <div className="w-full max-w-md">
         <Link to="/?stay=1" className="flex items-center justify-center gap-2 mb-8 transition-opacity hover:opacity-90" aria-label="Go to Sniped landing page">
           <Zap size={28} className="text-yellow-400" />
