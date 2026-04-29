@@ -1037,28 +1037,6 @@ function getFriendlyAiError(path, status, detail) {
   return detail || 'Unknown API error'
 }
 
-function fmtCountdown(isoString) {
-  if (!isoString) return null
-  const ms = new Date(isoString).getTime() - Date.now()
-  if (ms <= 0) return 'now'
-  const totalSec = Math.floor(ms / 1000)
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  return `${min}m ${String(sec).padStart(2, '0')}s`
-}
-
-function fmtDigestCountdown() {
-  const now = new Date()
-  const next = new Date()
-  next.setUTCHours(8, 0, 0, 0)
-  if (next <= now) next.setUTCDate(next.getUTCDate() + 1)
-  const ms = next.getTime() - now.getTime()
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
-  const s = Math.floor((ms % 60000) / 1000)
-  return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
-}
-
 function formatCurrencyEur(value) {
   return `${Number(value || 0).toLocaleString('de-DE')} €`
 }
@@ -1855,8 +1833,6 @@ function App({ initialTab = 'leads' }) {
   const [enrichRunRequested, setEnrichRunRequested] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [activeTab, setActiveTab] = useState(initialTabResolved)
-  const [countdown, setCountdown] = useState(null)
-  const [digestCountdown, setDigestCountdown] = useState(() => fmtDigestCountdown())
   // (job queue removed — direct execution)
   const [leadSearch, setLeadSearch] = useState('')
   // useDebounce replaces the manual setTimeout useEffect — avoids CPU spikes on every keystroke
@@ -3270,19 +3246,6 @@ function App({ initialTab = 'leads' }) {
       .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
       .slice(0, 14)
   }, [taskHistory, leads])
-
-  // Live countdown ticker
-  useEffect(() => {
-    const id = setInterval(() => setCountdown(fmtCountdown(stats.next_drip_at)), 1000)
-    setCountdown(fmtCountdown(stats.next_drip_at))
-    return () => clearInterval(id)
-  }, [stats.next_drip_at])
-
-  // Daily digest countdown ticker
-  useEffect(() => {
-    const id = setInterval(() => setDigestCountdown(fmtDigestCountdown()), 1000)
-    return () => clearInterval(id)
-  }, [])
 
   useEffect(() => {
     if (enrichRetrySeconds <= 0) return undefined
