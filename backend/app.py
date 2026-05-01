@@ -10347,6 +10347,119 @@ def _ai_prompt_llm_filters(prompt: str) -> Optional[dict[str, Any]]:
         return None
 
 
+AI_FILTER_EMPTY_MESSAGE = "I couldn't find leads matching that specific criteria. Try a broader search!"
+
+# These are semantic aliases that the LLM can use; they are expanded to concrete SQL expressions.
+AI_FILTER_SQL_ALIAS_EXPRESSIONS: dict[str, str] = {
+    "city": "LOWER(COALESCE(address, ''))",
+    "niche": "LOWER(COALESCE(search_keyword, business_name, ''))",
+    "has_instagram": "(NULLIF(TRIM(COALESCE(instagram_url, '')), '') IS NOT NULL)",
+    "has_linkedin": "(NULLIF(TRIM(COALESCE(linkedin_url, '')), '') IS NOT NULL)",
+    "has_facebook": "(NULLIF(TRIM(COALESCE(facebook_url, '')), '') IS NOT NULL)",
+    "has_socials": "(NULLIF(TRIM(COALESCE(instagram_url, '')), '') IS NOT NULL OR NULLIF(TRIM(COALESCE(linkedin_url, '')), '') IS NOT NULL OR NULLIF(TRIM(COALESCE(facebook_url, '')), '') IS NOT NULL)",
+    "missing_socials": "(NULLIF(TRIM(COALESCE(instagram_url, '')), '') IS NULL AND NULLIF(TRIM(COALESCE(linkedin_url, '')), '') IS NULL AND NULLIF(TRIM(COALESCE(facebook_url, '')), '') IS NULL)",
+    "tech_stack_text": "LOWER(COALESCE(CAST(tech_stack AS TEXT), ''))",
+}
+
+AI_FILTER_SQL_ALLOWED_IDENTIFIERS: set[str] = {
+    "and", "or", "not", "is", "null", "true", "false", "in", "like", "ilike", "between",
+    "lower", "coalesce", "cast", "as", "text", "trim", "nullif",
+    "business_name", "contact_name", "email", "website_url", "address", "search_keyword", "status",
+    "pipeline_stage", "ai_score", "qualification_score", "seo_score", "performance_score", "rating",
+    "review_count", "has_pixel", "insecure_site", "instagram_url", "linkedin_url", "facebook_url", "tech_stack",
+    "city", "niche", "has_instagram", "has_linkedin", "has_facebook", "has_socials", "missing_socials", "tech_stack_text",
+}
+
+AI_FILTER_SQL_BANNED_PATTERN = re.compile(
+    r"(;|--|/\*|\*/|\\x00|\\u0000|\b(select|insert|update|delete|drop|alter|create|grant|revoke|truncate|union|intersect|except|copy|execute|do|declare|into|from|join|pg_sleep|pg_|information_schema)\b)",
+    re.IGNORECASE,
+)
+
+
+def _extract_sql_condition_text(raw_content: str) -> str:
+    text_value = str(raw_content or "").strip()
+    if not text_value:
+        return ""
+
+    if text_value.startswith("```"):
+        text_value = re.sub(r"^```(?:sql)?", "", text_value, flags=re.IGNORECASE).strip()
+        if text_value.endswith("```"):
+            text_value = text_value[:-3].strip()
+
+    lowered = text_value.lower()
+    if lowered.startswith("where "):
+        text_value = text_value[6:].strip()
+    if lowered.startswith("sql:"):
+        text_value = text_value[4:].strip()
+    return text_value
+
+
+def _ai_prompt_sql_where_clause(prompt: str) -> Optional[str]:
+    client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        return None
+
+    schema_prompt = (
+        "Table leads columns: business_name, contact_name, email, website_url, address, search_keyword, status, "
+        "pipeline_stage, ai_score, qualification_score, seo_score, performance_score, rating, review_count, has_pixel, insecure_site, "
+        "instagram_url, linkedin_url, facebook_url, tech_stack. "
+        "Derived aliases available: city, niche, has_instagram, has_linkedin, has_facebook, has_socials, missing_socials, tech_stack_text."
+    )
+    system_prompt = (
+        "Convert a user CRM filtering request into ONE SQL WHERE condition fragment only. "
+        "Return ONLY the condition (no SELECT, no FROM, no comments, no markdown). "
+        "Use only allowed columns/aliases from schema. Keep it concise and safe. "
+        "Example output: (niche ILIKE '%dentist%' AND city ILIKE '%berlin%' AND has_instagram = false)."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=str(model_name or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": schema_prompt},
+                {"role": "user", "content": str(prompt or "").strip()},
+            ],
+            max_tokens=220,
+            temperature=0.1,
+        )
+        return _extract_sql_condition_text(str(response.choices[0].message.content or ""))
+    except Exception:
+        return None
+
+
+def _sanitize_ai_where_clause(raw_clause: str) -> Optional[str]:
+    clause = _extract_sql_condition_text(raw_clause)
+    if not clause:
+        return None
+    if len(clause) > 700:
+        return None
+    if AI_FILTER_SQL_BANNED_PATTERN.search(clause):
+        return None
+
+    expanded = clause
+    for alias_name, expression in sorted(AI_FILTER_SQL_ALIAS_EXPRESSIONS.items(), key=lambda item: -len(item[0])):
+        expanded = re.sub(rf"\b{re.escape(alias_name)}\b", expression, expanded, flags=re.IGNORECASE)
+
+    # Strip quoted literals before keyword/token validation.
+    expanded_without_literals = re.sub(r"'(?:''|[^'])*'", "''", expanded)
+    expanded_without_literals = re.sub(r'"(?:""|[^"])*"', '""', expanded_without_literals)
+
+    if AI_FILTER_SQL_BANNED_PATTERN.search(expanded_without_literals):
+        return None
+
+    # Restrict characters to a conservative subset.
+    if re.search(r"[^a-zA-Z0-9_\s'\"%().,=<>!+-]", expanded):
+        return None
+
+    identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expanded_without_literals)
+    for token in identifiers:
+        if token.lower() not in AI_FILTER_SQL_ALLOWED_IDENTIFIERS:
+            return None
+
+    return expanded.strip()
+
+
 def _merge_ai_filter_specs(base_spec: dict[str, Any], llm_spec: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not llm_spec:
         return base_spec
@@ -12440,49 +12553,70 @@ def create_app() -> FastAPI:
 
     @app.post("/api/leads/ai-filter")
     def ai_filter_leads(payload: AILeadFilterRequest, request: Request) -> dict:
+        user_id = require_current_user_id(request)
         prompt = str(payload.prompt or "").strip()
         if len(prompt) < 2:
             raise HTTPException(status_code=400, detail="Prompt is too short")
 
-        base_result = get_leads(
-            request=request,
-            limit=min(max(int(payload.limit or 5000), 1), 10000),
-            page=1,
-            status=None,
-            search=None,
-            sort="best",
-            quick_filter="all",
-            include_blacklisted=bool(payload.include_blacklisted),
-            debug_all=False,
+        llm_clause = _ai_prompt_sql_where_clause(prompt)
+        sanitized_clause = _sanitize_ai_where_clause(llm_clause or "") if llm_clause else None
+        if not sanitized_clause:
+            return {
+                "prompt": prompt,
+                "source": "llm-unavailable",
+                "sql_condition": "",
+                "total_candidates": 0,
+                "matched_count": 0,
+                "lead_ids": [],
+                "preview_businesses": [],
+                "assistant_message": AI_FILTER_EMPTY_MESSAGE,
+            }
+
+        page_size = min(max(int(payload.limit or 5000), 1), 10000)
+        where_clauses = ["CAST(user_id AS TEXT) = :uid", f"({sanitized_clause})"]
+        sql_params: dict[str, Any] = {"uid": str(user_id), "limit": page_size, "offset": 0}
+
+        if not bool(payload.include_blacklisted):
+            where_clauses.append("LOWER(COALESCE(status, 'pending')) NOT IN ('blacklisted', 'skipped (unsubscribed)')")
+
+        where_fragment = " AND ".join(where_clauses)
+        count_sql = text(f"SELECT COUNT(*) AS c FROM leads WHERE {where_fragment}")
+        rows_sql = text(
+            f"""
+            SELECT id, business_name
+            FROM leads
+            WHERE {where_fragment}
+            ORDER BY COALESCE(ai_score, 0) DESC, COALESCE(created_at, scraped_at) DESC, id DESC
+            LIMIT :limit OFFSET :offset
+            """
         )
-        rows = list(base_result.get("items") or base_result.get("leads") or [])
 
-        heuristic_spec = _ai_prompt_heuristic_filters(prompt)
-        llm_spec = _ai_prompt_llm_filters(prompt)
-        merged_spec = _merge_ai_filter_specs(heuristic_spec, llm_spec)
+        try:
+            engine = pg_get_engine(str(DEFAULT_DB_PATH))
+            with engine.connect() as conn:
+                matched_count = int(conn.execute(count_sql, sql_params).scalar() or 0)
+                matched_rows = conn.execute(rows_sql, sql_params).fetchall()
+        except Exception as exc:
+            logging.exception("[/api/leads/ai-filter] SQL execution failed")
+            raise HTTPException(status_code=500, detail=f"AI filter query failed: {exc}")
 
-        matched_rows = [row for row in rows if _lead_matches_ai_filter_spec(dict(row), merged_spec)]
-        matched_rows.sort(
-            key=lambda row: (
-                _qualifier_to_float(row.get("best_lead_score", row.get("ai_score")), default=0.0),
-                _qualifier_to_int(row.get("id"), default=0),
-            ),
-            reverse=True,
+        lead_ids = [int(row._mapping.get("id")) for row in matched_rows if row._mapping.get("id") is not None]
+        preview_names = [str(row._mapping.get("business_name") or "Unnamed").strip() for row in matched_rows[:5]]
+        assistant_message = (
+            AI_FILTER_EMPTY_MESSAGE
+            if matched_count <= 0
+            else f"I found {matched_count} lead(s) matching your request."
         )
-
-        lead_ids = [int(row.get("id")) for row in matched_rows if row.get("id") is not None]
-        preview_names = [str(row.get("business_name") or "Unnamed").strip() for row in matched_rows[:5]]
-        source = "llm+heuristic" if llm_spec else "heuristic"
 
         return {
             "prompt": prompt,
-            "source": source,
-            "interpreted_filters": merged_spec,
-            "total_candidates": len(rows),
-            "matched_count": len(lead_ids),
+            "source": "llm-sql",
+            "sql_condition": sanitized_clause,
+            "total_candidates": matched_count,
+            "matched_count": matched_count,
             "lead_ids": lead_ids,
             "preview_businesses": preview_names,
-            "assistant_message": f"I found {len(lead_ids)} lead(s) matching your AI filter.",
+            "assistant_message": assistant_message,
         }
 
     @app.post("/api/leads/manual")

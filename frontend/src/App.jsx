@@ -2059,6 +2059,7 @@ function App({ initialTab = 'leads' }) {
   const [aiFilterPrompt, setAiFilterPrompt] = useState('')
   const [aiFilterLoading, setAiFilterLoading] = useState(false)
   const [aiFilterLeadIds, setAiFilterLeadIds] = useState([])
+  const [aiFilterApplied, setAiFilterApplied] = useState(false)
   const [selectedLeadIds, setSelectedLeadIds] = useState([])
   const [shareReportStateByLeadId, setShareReportStateByLeadId] = useState({})
   const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false)
@@ -3071,7 +3072,7 @@ function App({ initialTab = 'leads' }) {
     [leads],
   )
 
-  const isAiFilterActive = aiFilterLeadIds.length > 0
+  const isAiFilterActive = aiFilterApplied
 
   const filteredLeads = useMemo(() => {
     let result = [...leads]
@@ -3334,6 +3335,7 @@ function App({ initialTab = 'leads' }) {
 
   const clearAiFilter = useCallback(() => {
     setAiFilterLeadIds([])
+    setAiFilterApplied(false)
     setAiFilterSummary('')
     setAiFilterPrompt('')
     setAiFilterLoading(false)
@@ -3451,11 +3453,17 @@ function App({ initialTab = 'leads' }) {
       const selectedSet = new Set(selectedLeadRows.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0))
       const intersected = Array.from(returnedIds).filter((id) => selectedSet.has(id))
       setAiFilterLeadIds(intersected)
+      setAiFilterApplied(true)
       setAiFilterPrompt(String(prompt).trim())
-      setAiFilterSummary(`AI filter matched ${intersected.length} of ${selectedLeadRows.length} selected leads.`)
+      setAiFilterSummary(String(response?.assistant_message || `AI filter matched ${intersected.length} of ${selectedLeadRows.length} selected leads.`))
       setLeadPage(0)
-      toast.success(`AI filter matched ${intersected.length}/${selectedLeadRows.length} selected leads`)
+      if (intersected.length > 0) {
+        toast.success(`AI filter matched ${intersected.length}/${selectedLeadRows.length} selected leads`)
+      } else {
+        toast('I couldn\'t find leads matching that specific criteria. Try a broader search!', { icon: 'ℹ️' })
+      }
     } catch (error) {
+      setAiFilterApplied(false)
       toast.error(error instanceof Error ? error.message : 'Bulk AI filter failed')
     } finally {
       setAiFilterLoading(false)
@@ -3495,6 +3503,7 @@ function App({ initialTab = 'leads' }) {
 
     setAiFilterLoading(true)
     setAiFilterLeadIds([])
+    setAiFilterApplied(false)
     try {
       const response = await fetchJson('/api/leads/ai-filter', {
         method: 'POST',
@@ -3506,10 +3515,18 @@ function App({ initialTab = 'leads' }) {
         }),
       })
       const ids = Array.isArray(response?.lead_ids) ? response.lead_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id)) : []
+      setAiFilterLeadIds(ids)
+      setAiFilterApplied(true)
       setAiFilterSummary(String(response?.assistant_message || `I found ${ids.length} lead(s) matching your request.`))
       setAiFilterPrompt(prompt)
-      toast.success(`AI interpreted your filter (${ids.length} potential leads)`)
+      setLeadPage(0)
+      if (ids.length > 0) {
+        toast.success(`AI interpreted your filter (${ids.length} potential leads)`)
+      } else {
+        toast('I couldn\'t find leads matching that specific criteria. Try a broader search!', { icon: 'ℹ️' })
+      }
     } catch (error) {
+      setAiFilterApplied(false)
       const message = error instanceof Error ? error.message : 'AI filter failed'
       setLastError(message)
       toast.error(message)
