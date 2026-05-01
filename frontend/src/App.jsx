@@ -3381,6 +3381,16 @@ function App({ initialTab = 'leads' }) {
     setSelectedLeadIds([])
   }, [])
 
+  const planKey = String(user?.plan_key || '').toLowerCase().trim()
+  const featureAccess = useMemo(
+    () => resolveFeatureAccess(user?.plan_type || planKey || 'free', user?.feature_access),
+    [planKey, user?.plan_type, user?.feature_access],
+  )
+  const canBulkExport = Boolean(featureAccess.bulk_export)
+  const canLeadScoring = Boolean(featureAccess.ai_lead_scoring)
+  const canAdvancedReporting = Boolean(featureAccess.advanced_reporting)
+  const canClientSuccessDashboard = Boolean(featureAccess.client_success_dashboard)
+
   const bulkExportSelectedCsv = useCallback(() => {
     if (!selectedLeadRows.length) {
       toast('Select at least one lead first.', { icon: 'ℹ️' })
@@ -4660,12 +4670,6 @@ function App({ initialTab = 'leads' }) {
       setWebhookExporting('')
     }
   }
-
-  const planKey = String(user?.plan_key || '').toLowerCase().trim()
-  const featureAccess = useMemo(
-    () => resolveFeatureAccess(user?.plan_type || planKey || 'free', user?.feature_access),
-    [planKey, user?.plan_type, user?.feature_access],
-  )
 
   const refreshWeeklyReport = useCallback(async (options = {}) => {
     if (!featureAccess.advanced_reporting) {
@@ -6519,10 +6523,7 @@ function App({ initialTab = 'leads' }) {
   const userInitial = String(displayName || currentUserEmail || 'U').trim().charAt(0).toUpperCase() || 'U'
   const normalizedSubscriptionStatus = String(user?.subscriptionStatus || '').toLowerCase().trim()
   const lifecycleSubscriptionStatus = String(user?.subscription_status || '').toLowerCase().trim()
-  const canBulkExport = Boolean(featureAccess.bulk_export)
-  const canLeadScoring = Boolean(featureAccess.ai_lead_scoring)
-  const canAdvancedReporting = Boolean(featureAccess.advanced_reporting)
-  const canClientSuccessDashboard = Boolean(featureAccess.client_success_dashboard)
+
   const cancelAtRaw = String(user?.subscription_cancel_at || '').trim()
   const cancelAtDate = cancelAtRaw ? new Date(cancelAtRaw) : null
   const cancelAtValid = Boolean(cancelAtDate && !Number.isNaN(cancelAtDate.getTime()))
