@@ -32,6 +32,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 try:
     _supabase_module = importlib.import_module("supabase")
@@ -49,8 +51,11 @@ except Exception:
     create_supabase_client = None  # type: ignore
     _HAS_SUPABASE = False
 
+# Load root .env early so imported modules read the same runtime settings.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+
 from backend.check_access import get_plan_feature_access, normalize_plan_key, require_feature_access
-from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, upsert_lead
+from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, record_pool_saturation_event, upsert_lead
 from backend.scraper.exporter import export_target_leads
 from backend.scraper.full_enrichment import enrich_leads_full_data
 from backend.scraper.google_maps import GoogleMapsScraper
@@ -84,6 +89,8 @@ STALE_RUNNING_TASK_SECONDS = 7200
 ORPHAN_TASK_GRACE_SECONDS = 15
 SMTP_TEST_RECIPIENT = "opnjc06@gmail.com"
 TRACKING_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+SYSTEM_SMTP_DEFAULT_SEND_LIMIT = max(1, int(os.environ.get("SNIPED_SYSTEM_SMTP_SEND_LIMIT", "50") or 50))
+LEAD_TREND_POINTS_LIMIT = 8
 
 
 def get_allowed_cors_origins() -> list[str]:
@@ -195,6 +202,8 @@ _AI_USAGE_LOCK = Lock()
 ENRICH_CONCURRENCY_LIMIT = _read_env_int("ENRICH_CONCURRENCY_LIMIT", 2)
 ENRICH_SEMAPHORE_TIMEOUT_SECONDS = 30
 ENRICH_CAPACITY_ERROR_MESSAGE = "Server is currently at capacity. Please try again in a few minutes."
+SCRAPE_CREDIT_COST_PER_LEAD = 1
+ENRICH_CREDIT_COST_PER_LEAD = 2
 
 SETUP_FEE_BY_TIER = {
     "standard": SETUP_FEE_WEBSITE,
@@ -215,6 +224,9 @@ import time as _time
 
 _LEADS_CACHE: dict = {}
 _LEADS_CACHE_TTL = 20  # seconds
+_API_CACHE: dict[str, dict[str, Any]] = {}
+_CONFIG_CACHE_TTL = 45
+_WORKERS_CACHE_TTL = 12
 
 
 def _invalidate_leads_cache() -> None:
@@ -230,6 +242,48 @@ def _get_cached_leads(key: str):
 
 def _set_cached_leads(key: str, data: dict) -> None:
     _LEADS_CACHE[key] = {"data": data, "ts": _time.monotonic()}
+
+
+def _is_db_capacity_error(exc: Exception) -> bool:
+    if isinstance(exc, SQLAlchemyOperationalError):
+        return True
+    message = str(exc or "").lower()
+    markers = (
+        "emaxconn",
+        "max client connections reached",
+        "too many clients",
+        "remaining connection slots are reserved",
+        "queuepool limit",
+        "timed out waiting for connection",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _get_cached_api(scope: str, key: str, ttl_seconds: int):
+    scope_cache = _API_CACHE.get(scope) or {}
+    entry = scope_cache.get(key)
+    if entry and (_time.monotonic() - float(entry.get("ts") or 0.0)) < max(1, int(ttl_seconds)):
+        return entry.get("data")
+    return None
+
+
+def _set_cached_api(scope: str, key: str, data: Any) -> None:
+    scope_cache = _API_CACHE.setdefault(scope, {})
+    scope_cache[key] = {"data": data, "ts": _time.monotonic()}
+
+
+def _invalidate_api_cache(scope: str, key_prefix: Optional[str] = None) -> None:
+    if key_prefix is None:
+        _API_CACHE.pop(scope, None)
+        return
+    scope_cache = _API_CACHE.get(scope)
+    if not scope_cache:
+        return
+    for key in list(scope_cache.keys()):
+        if str(key).startswith(str(key_prefix)):
+            scope_cache.pop(key, None)
+    if not scope_cache:
+        _API_CACHE.pop(scope, None)
 
 
 def _normalize_proxy_url(raw_proxy: Optional[str]) -> str:
@@ -476,6 +530,8 @@ class ConfigUpdateRequest(BaseModel):
     open_tracking_base_url: Optional[str] = None
     hubspot_webhook_url: Optional[str] = None
     google_sheets_webhook_url: Optional[str] = None
+    developer_webhook_url: Optional[str] = None
+    developer_score_drop_threshold: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     auto_weekly_report_email: Optional[bool] = None
     auto_monthly_report_email: Optional[bool] = None
     proxy_url: Optional[str] = None
@@ -492,6 +548,13 @@ class RevenueEntryRequest(BaseModel):
     lead_name: Optional[str] = Field(default=None, max_length=200)
     lead_id: Optional[int] = None
     is_recurring: bool = False
+
+
+class WonDealRevenueRequest(BaseModel):
+    lead_id: int = Field(..., ge=1)
+    amount: float = Field(..., gt=0)
+    currency: str = Field(default="EUR", min_length=3, max_length=8)
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 class WorkerCreateRequest(BaseModel):
@@ -533,6 +596,17 @@ class SMTPTestRequest(BaseModel):
     use_tls: Optional[bool] = None
     use_ssl: Optional[bool] = None
     from_name: Optional[str] = None
+
+
+class IncomingEmailWebhookRequest(BaseModel):
+    event_type: str = Field(default="reply", min_length=3, max_length=30)
+    lead_id: Optional[int] = None
+    thread_token: Optional[str] = Field(default=None, max_length=300)
+    email: Optional[str] = Field(default=None, max_length=320)
+    from_email: Optional[str] = Field(default=None, max_length=320)
+    subject_line: Optional[str] = Field(default=None, max_length=300)
+    reason: Optional[str] = Field(default=None, max_length=300)
+    metadata: Optional[dict[str, Any]] = None
 
 
 class AILeadFilterRequest(BaseModel):
@@ -700,6 +774,10 @@ class StripeTopUpSessionRequest(BaseModel):
 
 class StripeSubscriptionSessionRequest(BaseModel):
     plan_id: str = Field(..., min_length=1, max_length=64)
+
+
+class BulkDeleteLeadsRequest(BaseModel):
+    lead_ids: List[int] = Field(default_factory=list)
 
 
 def generate_cold_email_opener_for_niche(
@@ -988,6 +1066,8 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "phone_formatted": "ALTER TABLE leads ADD COLUMN phone_formatted TEXT",
         "phone_type": "ALTER TABLE leads ADD COLUMN phone_type TEXT",
         "qualification_score": "ALTER TABLE leads ADD COLUMN qualification_score REAL",
+        "seo_score": "ALTER TABLE leads ADD COLUMN seo_score REAL",
+        "performance_score": "ALTER TABLE leads ADD COLUMN performance_score REAL",
         "pipeline_stage": "ALTER TABLE leads ADD COLUMN pipeline_stage TEXT DEFAULT 'Scraped'",
         "client_folder_id": "ALTER TABLE leads ADD COLUMN client_folder_id INTEGER",
         "user_id": "ALTER TABLE leads ADD COLUMN user_id TEXT",
@@ -1042,6 +1122,7 @@ def ensure_blacklist_table(db_path: Path) -> None:
                 """
                 CREATE TABLE IF NOT EXISTS lead_blacklist (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL DEFAULT 'legacy',
                     kind TEXT NOT NULL,
                     value TEXT NOT NULL,
                     reason TEXT,
@@ -1049,9 +1130,13 @@ def ensure_blacklist_table(db_path: Path) -> None:
                 )
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(lead_blacklist)").fetchall()}
+            if "user_id" not in columns:
+                conn.execute("ALTER TABLE lead_blacklist ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy'")
             conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_user_kind_value ON lead_blacklist(user_id, kind, value)"
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_blacklist_user_id ON lead_blacklist(user_id)")
             conn.commit()
         except Exception:
             try:
@@ -1062,10 +1147,13 @@ def ensure_blacklist_table(db_path: Path) -> None:
             raise
 
 
-def fetch_blacklist_sets(db_path: Path) -> tuple[set[str], set[str]]:
+def fetch_blacklist_sets(db_path: Path, user_id: Optional[str] = None) -> tuple[set[str], set[str]]:
     ensure_blacklist_table(db_path)
     with pgdb.connect(db_path) as conn:
-        rows = conn.execute("SELECT kind, value FROM lead_blacklist").fetchall()
+        rows = conn.execute(
+            "SELECT kind, value FROM lead_blacklist WHERE (? IS NULL OR user_id = ?)",
+            (user_id, user_id),
+        ).fetchall()
 
     emails: set[str] = set()
     domains: set[str] = set()
@@ -1081,11 +1169,11 @@ def fetch_blacklist_sets(db_path: Path) -> tuple[set[str], set[str]]:
     return emails, domains
 
 
-def sync_blacklisted_leads(db_path: Path) -> int:
+def sync_blacklisted_leads(db_path: Path, user_id: Optional[str] = None) -> int:
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-        return sync_blacklisted_leads_supabase(DEFAULT_CONFIG_PATH)
+        return sync_blacklisted_leads_supabase(DEFAULT_CONFIG_PATH, user_id=user_id)
 
-    emails, domains = fetch_blacklist_sets(db_path)
+    emails, domains = fetch_blacklist_sets(db_path, user_id=user_id)
     if not emails and not domains:
         return 0
 
@@ -1096,7 +1184,10 @@ def sync_blacklisted_leads(db_path: Path) -> int:
             SELECT id, email, website_url, status
             FROM leads
             WHERE LOWER(COALESCE(status, '')) != 'paid'
+                            AND (? IS NULL OR user_id = ?)
             """
+            ,
+            (user_id, user_id),
         ).fetchall()
 
         lead_ids: list[int] = []
@@ -1137,7 +1228,7 @@ def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manua
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         row = conn.execute(
-            "SELECT id, business_name, email, website_url FROM leads WHERE id = ?",
+            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ?",
             (lead_id,),
         ).fetchone()
 
@@ -1154,22 +1245,22 @@ def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manua
         if email_value:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO lead_blacklist (kind, value, reason, created_at)
-                VALUES ('email', ?, ?, ?)
+                INSERT OR IGNORE INTO lead_blacklist (user_id, kind, value, reason, created_at)
+                VALUES (?, 'email', ?, ?, ?)
                 """,
-                (email_value, reason, utc_now_iso()),
+                (str(row["user_id"] or "legacy"), email_value, reason, utc_now_iso()),
             )
         for domain_value in sorted(domain_values):
             conn.execute(
                 """
-                INSERT OR IGNORE INTO lead_blacklist (kind, value, reason, created_at)
-                VALUES ('domain', ?, ?, ?)
+                INSERT OR IGNORE INTO lead_blacklist (user_id, kind, value, reason, created_at)
+                VALUES (?, 'domain', ?, ?, ?)
                 """,
-                (domain_value, reason, utc_now_iso()),
+                (str(row["user_id"] or "legacy"), domain_value, reason, utc_now_iso()),
             )
         conn.commit()
 
-    affected = sync_blacklisted_leads(db_path)
+    affected = sync_blacklisted_leads(db_path, user_id=str(row["user_id"] or "legacy"))
     maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
     _invalidate_leads_cache()
     return {
@@ -1182,26 +1273,27 @@ def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manua
     }
 
 
-def add_blacklist_entry(db_path: Path, *, kind: str, value: str, reason: str = "Manual blacklist") -> dict:
+def add_blacklist_entry(db_path: Path, *, user_id: str, kind: str, value: str, reason: str = "Manual blacklist") -> dict:
     normalized_kind, normalized_value = normalize_blacklist_entry(kind, value)
     clean_reason = str(reason or "Manual blacklist").strip() or "Manual blacklist"
+    normalized_user_id = str(user_id or "legacy").strip() or "legacy"
     ensure_blacklist_table(db_path)
 
     with pgdb.connect(db_path) as conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO lead_blacklist (kind, value, reason, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO lead_blacklist (user_id, kind, value, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (normalized_kind, normalized_value, clean_reason, utc_now_iso()),
+            (normalized_user_id, normalized_kind, normalized_value, clean_reason, utc_now_iso()),
         )
         row = conn.execute(
-            "SELECT kind, value, reason, created_at FROM lead_blacklist WHERE kind = ? AND value = ? LIMIT 1",
-            (normalized_kind, normalized_value),
+            "SELECT kind, value, reason, created_at FROM lead_blacklist WHERE user_id = ? AND kind = ? AND value = ? LIMIT 1",
+            (normalized_user_id, normalized_kind, normalized_value),
         ).fetchone()
         conn.commit()
 
-    affected = sync_blacklisted_leads(db_path)
+    affected = sync_blacklisted_leads(db_path, user_id=normalized_user_id)
     maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
     _invalidate_leads_cache()
     return {
@@ -1237,12 +1329,12 @@ def _lead_matches_blacklist_sets(email: Optional[str], website_url: Optional[str
     return email_value in emails or any(domain in domains for domain in domain_candidates)
 
 
-def restore_released_blacklisted_leads(db_path: Path, removed_entries: list[tuple[str, str]]) -> int:
+def restore_released_blacklisted_leads(db_path: Path, removed_entries: list[tuple[str, str]], user_id: Optional[str] = None) -> int:
     normalized_entries = [normalize_blacklist_entry(kind, value) for kind, value in removed_entries if str(value or "").strip()]
     if not normalized_entries:
         return 0
 
-    emails, domains = fetch_blacklist_sets(db_path)
+    emails, domains = fetch_blacklist_sets(db_path, user_id=user_id)
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         rows = conn.execute(
@@ -1250,7 +1342,10 @@ def restore_released_blacklisted_leads(db_path: Path, removed_entries: list[tupl
             SELECT id, email, website_url, status
             FROM leads
             WHERE LOWER(COALESCE(status, '')) IN ('blacklisted', 'skipped (unsubscribed)')
+              AND (? IS NULL OR user_id = ?)
             """
+            ,
+            (user_id, user_id),
         ).fetchall()
 
         lead_ids: list[int] = []
@@ -1280,19 +1375,20 @@ def restore_released_blacklisted_leads(db_path: Path, removed_entries: list[tupl
         return int(cursor.rowcount or 0)
 
 
-def remove_blacklist_entry(db_path: Path, *, kind: str, value: str) -> dict:
+def remove_blacklist_entry(db_path: Path, *, user_id: str, kind: str, value: str) -> dict:
     normalized_kind, normalized_value = normalize_blacklist_entry(kind, value)
+    normalized_user_id = str(user_id or "legacy").strip() or "legacy"
     ensure_blacklist_table(db_path)
 
     with pgdb.connect(db_path) as conn:
         cursor = conn.execute(
-            "DELETE FROM lead_blacklist WHERE kind = ? AND value = ?",
-            (normalized_kind, normalized_value),
+            "DELETE FROM lead_blacklist WHERE user_id = ? AND kind = ? AND value = ?",
+            (normalized_user_id, normalized_kind, normalized_value),
         )
         conn.commit()
         deleted_count = int(cursor.rowcount or 0)
 
-    restored = restore_released_blacklisted_leads(db_path, [(normalized_kind, normalized_value)])
+    restored = restore_released_blacklisted_leads(db_path, [(normalized_kind, normalized_value)], user_id=normalized_user_id)
     maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
     _invalidate_leads_cache()
     return {
@@ -1309,7 +1405,7 @@ def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int) -> dict:
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         row = conn.execute(
-            "SELECT id, business_name, email, website_url FROM leads WHERE id = ?",
+            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ?",
             (lead_id,),
         ).fetchone()
         if row is None:
@@ -1326,15 +1422,16 @@ def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int) -> dict:
             removed_entries.append(("domain", str(domain_value)))
 
         deleted_count = 0
+        normalized_user_id = str(row["user_id"] or "legacy")
         for entry_kind, entry_value in removed_entries:
             cursor = conn.execute(
-                "DELETE FROM lead_blacklist WHERE kind = ? AND value = ?",
-                (entry_kind, entry_value),
+                "DELETE FROM lead_blacklist WHERE user_id = ? AND kind = ? AND value = ?",
+                (normalized_user_id, entry_kind, entry_value),
             )
             deleted_count += int(cursor.rowcount or 0)
         conn.commit()
 
-    restored = restore_released_blacklisted_leads(db_path, removed_entries)
+    restored = restore_released_blacklisted_leads(db_path, removed_entries, user_id=str(row["user_id"] or "legacy"))
     maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
     _invalidate_leads_cache()
     return {
@@ -1375,6 +1472,27 @@ def ensure_revenue_log_table(db_path: Path) -> None:
                 "UPDATE revenue_log SET user_id = ? WHERE user_id = 'legacy'",
                 (str(first_user_row[0]),),
             )
+        conn.commit()
+
+
+def ensure_revenue_logs_table(db_path: Path) -> None:
+    with pgdb.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS revenue_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'legacy',
+                lead_id INTEGER,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'EUR',
+                event_type TEXT NOT NULL DEFAULT 'won_stage_manual',
+                note TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_revenue_logs_user_created ON revenue_logs(user_id, created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_revenue_logs_lead_created ON revenue_logs(lead_id, created_at DESC)")
         conn.commit()
 
 
@@ -1956,6 +2074,25 @@ def ensure_runtime_table(db_path: Path) -> None:
         conn.commit()
 
 
+def ensure_credit_logs_table(db_path: Path) -> None:
+    with pgdb.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS credit_logs (
+                id BIGSERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_credit_logs_user_created ON credit_logs(user_id, created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_credit_logs_action_created ON credit_logs(action_type, created_at DESC)")
+        conn.commit()
+
+
 def ensure_users_table(db_path: Path) -> None:
     try:
         ensure_dashboard_columns(db_path)
@@ -1977,6 +2114,7 @@ def ensure_users_table(db_path: Path) -> None:
                     display_name  TEXT    NOT NULL DEFAULT '',
                     contact_name  TEXT    NOT NULL DEFAULT '',
                     token         TEXT    UNIQUE,
+                    credits INTEGER NOT NULL DEFAULT 0,
                     credits_balance INTEGER NOT NULL DEFAULT 0,
                     monthly_quota INTEGER NOT NULL DEFAULT 50,
                     credits_limit INTEGER NOT NULL DEFAULT 50,
@@ -2003,6 +2141,7 @@ def ensure_users_table(db_path: Path) -> None:
                 ("account_type", "TEXT NOT NULL DEFAULT 'entrepreneur'"),
                 ("display_name", "TEXT NOT NULL DEFAULT ''"),
                 ("contact_name", "TEXT NOT NULL DEFAULT ''"),
+                ("credits", "INTEGER NOT NULL DEFAULT 0"),
                 ("credits_balance", "INTEGER NOT NULL DEFAULT 0"),
                 ("monthly_quota", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
                 ("credits_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
@@ -2041,6 +2180,14 @@ def ensure_users_table(db_path: Path) -> None:
                 return
 
             try:
+                conn.execute("UPDATE users SET credits = COALESCE(credits, COALESCE(credits_balance, 0))")
+            except Exception as exc:
+                logging.warning("ensure_users_table: non-fatal credits sync failed: %s", exc)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            try:
                 conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
             except Exception as exc:
                 logging.warning("ensure_users_table: non-fatal credits_balance update failed: %s", exc)
@@ -2053,6 +2200,7 @@ def ensure_users_table(db_path: Path) -> None:
             conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
             conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
             conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
+            conn.execute("UPDATE users SET credits = COALESCE(credits_balance, credits, 0)")
             conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
             conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, FALSE)")
             conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, FALSE)")
@@ -2106,6 +2254,359 @@ def ensure_users_table(db_path: Path) -> None:
             raise
 
 
+def ensure_lead_history_table(db_path: Path) -> None:
+    with pgdb.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lead_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy',
+                seo_score REAL,
+                performance_score REAL,
+                captured_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_history_user_lead_at ON lead_history(user_id, lead_id, captured_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_history_lead_at ON lead_history(lead_id, captured_at DESC)")
+        conn.commit()
+
+
+def ensure_lead_report_table(db_path: Path) -> None:
+    with pgdb.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lead_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy',
+                token TEXT NOT NULL,
+                report_html TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_reports_token ON lead_reports(token)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_reports_user_lead ON lead_reports(user_id, lead_id, created_at DESC)")
+        conn.commit()
+
+
+def _to_float_or_none(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+        return numeric if numeric == numeric else None
+    except Exception:
+        return None
+
+
+def _extract_scores_from_lead_payload(lead_row: dict[str, Any]) -> tuple[Optional[float], Optional[float]]:
+    seo_direct = _to_float_or_none(lead_row.get("seo_score"))
+    perf_direct = _to_float_or_none(lead_row.get("performance_score"))
+
+    payload: dict[str, Any] = {}
+    raw_enrichment = lead_row.get("enrichment_data")
+    if isinstance(raw_enrichment, dict):
+        payload = dict(raw_enrichment)
+    elif isinstance(raw_enrichment, str) and str(raw_enrichment).strip():
+        try:
+            parsed = json.loads(raw_enrichment)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+
+    website_signals = payload.get("website_signals") if isinstance(payload.get("website_signals"), dict) else {}
+    shortcoming_blob = " ".join(
+        [
+            str(lead_row.get("main_shortcoming") or ""),
+            str(payload.get("reason") or ""),
+            str(payload.get("enrichment_summary") or ""),
+        ]
+    ).lower()
+    insecure_site = bool(lead_row.get("insecure_site"))
+    has_https = not insecure_site and bool(website_signals.get("https"))
+    tech_stack = payload.get("tech_stack") if isinstance(payload.get("tech_stack"), list) else []
+    recent_update = bool(payload.get("recent_site_update"))
+    lead_score_100 = _to_float_or_none(payload.get("lead_score_100"))
+    ai_sentiment_score = _to_float_or_none(payload.get("ai_sentiment_score"))
+    best_lead_score = _to_float_or_none(payload.get("best_lead_score"))
+
+    computed_seo = 52.0
+    computed_seo += 10.0 if has_https else -18.0
+    computed_seo += 8.0 if recent_update else -6.0
+    computed_seo += min(8.0, len(tech_stack) * 2.0)
+    if "slow" in shortcoming_blob or "speed" in shortcoming_blob:
+        computed_seo -= 10.0
+    if "seo" in shortcoming_blob and "missing" in shortcoming_blob:
+        computed_seo -= 8.0
+    if lead_score_100 is not None:
+        computed_seo += (lead_score_100 - 50.0) * 0.12
+    computed_seo = max(0.0, min(100.0, round(computed_seo, 1)))
+
+    computed_performance = 58.0
+    social_activity = _to_float_or_none(payload.get("social_activity_score"))
+    employee_count = _to_float_or_none(payload.get("employee_count"))
+    if social_activity is not None:
+        computed_performance += social_activity * 1.2
+    if employee_count is not None:
+        computed_performance += min(8.0, employee_count / 20.0)
+    if "slow" in shortcoming_blob or "speed" in shortcoming_blob:
+        computed_performance -= 16.0
+    if insecure_site:
+        computed_performance -= 10.0
+    if ai_sentiment_score is not None:
+        computed_performance += (ai_sentiment_score - 50.0) * 0.08
+    if best_lead_score is not None:
+        computed_performance += (best_lead_score - 50.0) * 0.05
+    computed_performance = max(0.0, min(100.0, round(computed_performance, 1)))
+
+    return (
+        round(float(seo_direct), 1) if seo_direct is not None else computed_seo,
+        round(float(perf_direct), 1) if perf_direct is not None else computed_performance,
+    )
+
+
+def _capture_lead_history_snapshots(
+    db_path: Path,
+    *,
+    user_id: str,
+    lead_ids: list[int],
+    snapshot_map: dict[int, dict[str, Optional[float]]],
+) -> int:
+    if not lead_ids:
+        return 0
+    now_iso = utc_now_iso()
+    inserted = 0
+    with pgdb.connect(db_path) as conn:
+        for lead_id in lead_ids:
+            previous = snapshot_map.get(int(lead_id)) or {}
+            prev_seo = _to_float_or_none(previous.get("seo_score"))
+            prev_perf = _to_float_or_none(previous.get("performance_score"))
+            if prev_seo is None and prev_perf is None:
+                continue
+            conn.execute(
+                """
+                INSERT INTO lead_history (lead_id, user_id, seo_score, performance_score, captured_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (int(lead_id), str(user_id or "legacy"), prev_seo, prev_perf, now_iso),
+            )
+            inserted += 1
+        conn.commit()
+    return inserted
+
+
+def _refresh_enriched_lead_scores(
+    db_path: Path,
+    *,
+    user_id: str,
+    lead_ids: list[int],
+) -> dict[int, tuple[Optional[float], Optional[float]]]:
+    if not lead_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(lead_ids))
+    updated_map: dict[int, tuple[Optional[float], Optional[float]]] = {}
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
+        rows = conn.execute(
+            f"""
+            SELECT id, user_id, insecure_site, main_shortcoming, enrichment_data, seo_score, performance_score
+            FROM leads
+            WHERE user_id = ? AND id IN ({placeholders})
+            """,
+            [str(user_id or "legacy"), *[int(x) for x in lead_ids]],
+        ).fetchall()
+        for row in rows:
+            lead_row = dict(row)
+            seo_score, performance_score = _extract_scores_from_lead_payload(lead_row)
+            conn.execute(
+                "UPDATE leads SET seo_score = ?, performance_score = ? WHERE id = ?",
+                (seo_score, performance_score, int(lead_row.get("id") or 0)),
+            )
+            updated_map[int(lead_row.get("id") or 0)] = (seo_score, performance_score)
+        conn.commit()
+    return updated_map
+
+
+def _average_score_pair(seo_score: Optional[float], performance_score: Optional[float]) -> Optional[float]:
+    values = [float(v) for v in [seo_score, performance_score] if v is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
+
+
+def _notify_score_drop_events(
+    *,
+    db_path: Path,
+    user_id: str,
+    previous_scores: dict[int, dict[str, Optional[float]]],
+    refreshed_scores: dict[int, tuple[Optional[float], Optional[float]]],
+) -> int:
+    if not refreshed_scores or not previous_scores:
+        return 0
+    _, threshold = _get_developer_webhook_settings(DEFAULT_CONFIG_PATH)
+    candidate_ids: list[int] = []
+    for lead_id, pair in refreshed_scores.items():
+        prev = previous_scores.get(int(lead_id)) or {}
+        prev_avg = _average_score_pair(prev.get("seo_score"), prev.get("performance_score"))
+        new_avg = _average_score_pair(pair[0], pair[1])
+        if prev_avg is None or new_avg is None:
+            continue
+        if prev_avg >= threshold and new_avg < threshold:
+            candidate_ids.append(int(lead_id))
+
+    if not candidate_ids:
+        return 0
+
+    placeholders = ",".join(["?"] * len(candidate_ids))
+    rows_map: dict[int, dict[str, Any]] = {}
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
+        rows = conn.execute(
+            f"SELECT id, business_name, status, pipeline_stage FROM leads WHERE user_id = ? AND id IN ({placeholders})",
+            [str(user_id or "legacy"), *candidate_ids],
+        ).fetchall()
+    for row in rows:
+        rows_map[int(row["id"])] = dict(row)
+
+    delivered = 0
+    for lead_id in candidate_ids:
+        prev = previous_scores.get(int(lead_id)) or {}
+        new_pair = refreshed_scores.get(int(lead_id))
+        lead_meta = rows_map.get(int(lead_id)) or {}
+        if not new_pair:
+            continue
+        _dispatch_developer_webhook_event(
+            event_type="lead.score_dropped_below_threshold",
+            user_id=str(user_id or "legacy"),
+            lead_id=int(lead_id),
+            payload={
+                "lead_id": int(lead_id),
+                "business_name": str(lead_meta.get("business_name") or "").strip() or None,
+                "status": str(lead_meta.get("status") or "").strip() or None,
+                "pipeline_stage": str(lead_meta.get("pipeline_stage") or "").strip() or None,
+                "threshold": threshold,
+                "previous_score": _average_score_pair(prev.get("seo_score"), prev.get("performance_score")),
+                "new_score": _average_score_pair(new_pair[0], new_pair[1]),
+                "previous_seo_score": prev.get("seo_score"),
+                "previous_performance_score": prev.get("performance_score"),
+                "seo_score": new_pair[0],
+                "performance_score": new_pair[1],
+            },
+        )
+        delivered += 1
+    return delivered
+
+
+def _build_score_trend_points(values: list[float], limit: int = LEAD_TREND_POINTS_LIMIT) -> list[float]:
+    normalized = [round(float(v), 1) for v in values if _to_float_or_none(v) is not None]
+    if not normalized:
+        return []
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[-limit:]
+
+
+def _resolve_trend_direction(points: list[float]) -> tuple[str, float]:
+    if len(points) < 2:
+        return "flat", 0.0
+    delta = round(float(points[-1]) - float(points[0]), 1)
+    if delta > 0.35:
+        return "up", delta
+    if delta < -0.35:
+        return "down", delta
+    return "flat", delta
+
+
+def _build_gap_report_html(
+    *,
+    lead: dict[str, Any],
+    seo_score: Optional[float],
+    performance_score: Optional[float],
+    report_title: str,
+) -> str:
+    business_name = html_escape(str(lead.get("business_name") or "Prospect").strip() or "Prospect")
+    contact_name = html_escape(str(lead.get("contact_name") or "").strip())
+    website_url = str(lead.get("website_url") or "").strip()
+    safe_website = html_escape(website_url)
+    insecure_site = bool(lead.get("insecure_site"))
+    shortcoming = html_escape(str(lead.get("main_shortcoming") or "No major shortcoming detected yet.").strip())
+
+    payload: dict[str, Any] = {}
+    raw_enrichment = lead.get("enrichment_data")
+    if isinstance(raw_enrichment, dict):
+        payload = dict(raw_enrichment)
+    elif isinstance(raw_enrichment, str) and raw_enrichment.strip():
+        try:
+            parsed = json.loads(raw_enrichment)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+
+    summary_blob = " ".join(
+        [
+            str(lead.get("main_shortcoming") or ""),
+            str(payload.get("reason") or ""),
+            str(payload.get("enrichment_summary") or ""),
+        ]
+    ).lower()
+    has_speed_gap = "slow" in summary_blob or "speed" in summary_blob
+    has_seo_gap = "seo" in summary_blob or (seo_score is not None and float(seo_score) < 62.0)
+
+    seo_display = f"{float(seo_score):.1f}" if seo_score is not None else "n/a"
+    perf_display = f"{float(performance_score):.1f}" if performance_score is not None else "n/a"
+    now_label = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    page_title = html_escape(str(report_title or "Sniped Gap Report"))
+
+    cards = [
+        ("Missing SEO Signals", has_seo_gap, "Core on-page and discoverability signals are under-optimized for high-intent local traffic."),
+        ("Slow Site Performance", has_speed_gap, "Page speed likely leaks buyers before contact form submission."),
+        ("SSL / HTTPS Trust Gap", insecure_site, "Site is not fully HTTPS, reducing trust and conversion confidence."),
+    ]
+
+    cards_html = ""
+    for title, active, description in cards:
+        state_label = "Detected" if active else "Stable"
+        state_class = "#f97316" if active else "#10b981"
+        cards_html += (
+            "<article style='border:1px solid rgba(148,163,184,.22);border-radius:16px;padding:14px;background:rgba(15,23,42,.55)'>"
+            f"<div style='display:flex;justify-content:space-between;gap:8px;align-items:center'><h3 style='margin:0;color:#f8fafc;font-size:15px'>{html_escape(title)}</h3>"
+            f"<span style='font-size:11px;font-weight:700;color:{state_class};text-transform:uppercase;letter-spacing:.08em'>{state_label}</span></div>"
+            f"<p style='margin:8px 0 0;color:#cbd5e1;font-size:13px;line-height:1.5'>{html_escape(description)}</p>"
+            "</article>"
+        )
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<meta name='robots' content='noindex,nofollow,noarchive'>"
+        f"<title>{page_title}</title>"
+        "<style>"
+        "body{margin:0;background:radial-gradient(circle at 20% 0%,#1e293b 0%,#020617 55%);font-family:Inter,Segoe UI,Arial,sans-serif;color:#e2e8f0;padding:24px;}"
+        ".wrap{max-width:900px;margin:0 auto;background:rgba(2,6,23,.72);border:1px solid rgba(148,163,184,.18);border-radius:22px;padding:26px;box-shadow:0 24px 60px rgba(2,6,23,.45);}"
+        ".badge{display:inline-block;padding:6px 12px;border-radius:999px;background:rgba(14,165,233,.15);border:1px solid rgba(14,165,233,.35);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#67e8f9;font-weight:700;}"
+        ".metric{background:rgba(15,23,42,.65);border:1px solid rgba(148,163,184,.2);padding:14px;border-radius:14px;}"
+        "</style></head><body><div class='wrap'>"
+        "<div style='display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center'>"
+        "<span class='badge'>Sniped Opportunity Snapshot</span>"
+        f"<span style='font-size:12px;color:#94a3b8'>Generated {html_escape(now_label)}</span></div>"
+        f"<h1 style='margin:14px 0 6px;font-size:30px;color:#f8fafc'>{business_name}</h1>"
+        f"<p style='margin:0 0 18px;color:#cbd5e1'>{contact_name if contact_name else 'Prospect'} {('- ' + safe_website) if safe_website else ''}</p>"
+        "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:18px'>"
+        f"<div class='metric'><div style='font-size:12px;color:#94a3b8'>SEO Score</div><div style='font-size:26px;font-weight:800;color:#22d3ee'>{html_escape(seo_display)}</div></div>"
+        f"<div class='metric'><div style='font-size:12px;color:#94a3b8'>Performance Score</div><div style='font-size:26px;font-weight:800;color:#38bdf8'>{html_escape(perf_display)}</div></div>"
+        f"<div class='metric'><div style='font-size:12px;color:#94a3b8'>Primary Gap</div><div style='font-size:14px;font-weight:700;color:#f8fafc;line-height:1.35'>{shortcoming}</div></div>"
+        "</div>"
+        f"<section style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px'>{cards_html}</section>"
+        "<p style='margin:20px 0 0;color:#94a3b8;font-size:12px'>This page is generated for outreach context and is intentionally not indexed by search engines.</p>"
+        "</div></body></html>"
+    )
+
+
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt.encode("utf-8"), 260_000
@@ -2118,12 +2619,16 @@ def ensure_system_tables(db_path: Path) -> None:
     ensure_runtime_table(db_path)
     ensure_blacklist_table(db_path)
     ensure_revenue_log_table(db_path)
+    ensure_revenue_logs_table(db_path)
     ensure_workers_table(db_path)
     ensure_worker_audit_table(db_path)
     ensure_delivery_tasks_table(db_path)
     ensure_users_table(db_path)
+    ensure_credit_logs_table(db_path)
     ensure_mailer_campaign_tables(db_path)
     ensure_client_success_tables(db_path)
+    ensure_lead_history_table(db_path)
+    ensure_lead_report_table(db_path)
 
 
 def ensure_scrape_tables(db_path: Path) -> None:
@@ -2898,7 +3403,10 @@ def run_monthly_credit_reset_cycle(app_instance: FastAPI | None = None) -> None:
             result.get("downgraded", 0),
         )
     except Exception as exc:
-        logging.exception("Monthly credit reset cycle failed: %s", exc)
+        if _is_db_capacity_error(exc):
+            logging.warning("Monthly credit reset cycle skipped because the database is saturated.")
+        else:
+            logging.exception("Monthly credit reset cycle failed: %s", exc)
     finally:
         if target_app is not None:
             setattr(target_app.state, "last_monthly_credit_reset_check", utc_now_iso())
@@ -4173,6 +4681,110 @@ def load_user_smtp_accounts(*, session_token: Optional[str] = None, user_id: Opt
     return _parse_smtp_accounts_json(row["smtp_accounts_json"])
 
 
+def _is_smtp_account_ready(account: Optional[dict[str, Any]]) -> bool:
+    if not isinstance(account, dict):
+        return False
+    return bool(
+        str(account.get("host", "") or "").strip()
+        and str(account.get("email", "") or "").strip()
+        and str(account.get("password", "") or "").strip()
+    )
+
+
+def get_system_smtp_account(config_path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+    cfg: dict[str, Any] = {}
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+            cfg = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        cfg = {}
+
+    system_cfg = cfg.get("system_smtp", {}) if isinstance(cfg.get("system_smtp"), dict) else {}
+    account = {
+        "host": str(os.environ.get("SNIPED_SYSTEM_SMTP_HOST") or system_cfg.get("host", "") or "").strip(),
+        "port": int(os.environ.get("SNIPED_SYSTEM_SMTP_PORT") or system_cfg.get("port", 587) or 587),
+        "email": str(os.environ.get("SNIPED_SYSTEM_SMTP_EMAIL") or system_cfg.get("email", "") or "").strip(),
+        "password": str(os.environ.get("SNIPED_SYSTEM_SMTP_PASSWORD") or system_cfg.get("password", "") or "").strip(),
+        "use_tls": str(os.environ.get("SNIPED_SYSTEM_SMTP_USE_TLS") or system_cfg.get("use_tls", "true") or "true").strip().lower() in {"1", "true", "yes", "on"},
+        "use_ssl": str(os.environ.get("SNIPED_SYSTEM_SMTP_USE_SSL") or system_cfg.get("use_ssl", "false") or "false").strip().lower() in {"1", "true", "yes", "on"},
+        "from_name": str(os.environ.get("SNIPED_SYSTEM_SMTP_FROM_NAME") or system_cfg.get("from_name", "Sniped.io") or "Sniped.io").strip(),
+        "signature": str(os.environ.get("SNIPED_SYSTEM_SMTP_SIGNATURE") or system_cfg.get("signature", "") or "").strip(),
+    }
+    return account if _is_smtp_account_ready(account) else {}
+
+
+def count_system_smtp_emails_sent(*, user_id: str, sender_email: str, db_path: Path = DEFAULT_DB_PATH) -> int:
+    normalized_user = str(user_id or "").strip() or "legacy"
+    normalized_sender = str(sender_email or "").strip().lower()
+    if not normalized_sender:
+        return 0
+
+    with pgdb.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM leads
+            WHERE COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+              AND sent_at IS NOT NULL
+              AND LOWER(COALESCE(last_sender_email, '')) = ?
+            """,
+            (normalized_user, normalized_sender),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def resolve_mailer_smtp_accounts_for_send(
+    *,
+    session_token: str,
+    user_id: str,
+    billing: dict[str, Any],
+    requested_limit: int,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    normalized_plan = _normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY)
+    custom_smtp_allowed = normalized_plan != "free"
+
+    user_accounts = load_user_smtp_accounts(session_token=session_token, user_id=user_id, db_path=db_path)
+    primary_user_account = dict(user_accounts[0] or {}) if user_accounts else {}
+    if custom_smtp_allowed and _is_smtp_account_ready(primary_user_account):
+        return {
+            "source": "custom",
+            "accounts": user_accounts,
+            "effective_limit": int(requested_limit),
+            "system_quota_limit": SYSTEM_SMTP_DEFAULT_SEND_LIMIT,
+            "system_quota_remaining": SYSTEM_SMTP_DEFAULT_SEND_LIMIT,
+            "custom_smtp_allowed": custom_smtp_allowed,
+        }
+
+    system_account = get_system_smtp_account(DEFAULT_CONFIG_PATH)
+    if not system_account:
+        if custom_smtp_allowed:
+            raise HTTPException(status_code=400, detail="Add your SMTP account in Settings, or ask admin to configure SNIPED_SYSTEM_SMTP_* fallback credentials.")
+        raise HTTPException(status_code=503, detail="System SMTP fallback is not configured yet. Add SNIPED_SYSTEM_SMTP_* env values first.")
+
+    system_sender = str(system_account.get("email", "") or "").strip()
+    already_sent = count_system_smtp_emails_sent(user_id=user_id, sender_email=system_sender, db_path=db_path)
+    remaining = max(0, int(SYSTEM_SMTP_DEFAULT_SEND_LIMIT) - int(already_sent))
+    if remaining <= 0:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"System SMTP quota reached ({SYSTEM_SMTP_DEFAULT_SEND_LIMIT} emails). "
+                "Connect your own SMTP / Google OAuth to continue."
+            ),
+        )
+
+    return {
+        "source": "system",
+        "accounts": [system_account],
+        "effective_limit": min(int(requested_limit), int(remaining)),
+        "system_quota_limit": SYSTEM_SMTP_DEFAULT_SEND_LIMIT,
+        "system_quota_remaining": int(remaining),
+        "custom_smtp_allowed": custom_smtp_allowed,
+    }
+
+
 def save_user_smtp_accounts(session_token: str, accounts: list[dict[str, Any]], db_path: Path = DEFAULT_DB_PATH) -> None:
     token = str(session_token or "").strip()
     if not token:
@@ -4378,6 +4990,89 @@ def get_supabase_client(config_path: Path) -> Optional[Any]:
         return None
 
 
+def _looks_like_jwt(token: str) -> bool:
+    value = str(token or "").strip()
+    return value.count(".") == 2
+
+
+def _apply_supabase_jwt(client: Any, jwt_token: str) -> None:
+    token = str(jwt_token or "").strip()
+    if not token or client is None:
+        return
+    try:
+        postgrest = getattr(client, "postgrest", None)
+        if postgrest is not None and hasattr(postgrest, "auth"):
+            postgrest.auth(token)
+            return
+        if postgrest is not None and hasattr(postgrest, "headers") and isinstance(postgrest.headers, dict):
+            postgrest.headers.update({"Authorization": f"Bearer {token}"})
+    except Exception as exc:
+        logging.warning("Failed to bind JWT token to Supabase client: %s", exc)
+
+
+def get_supabase_client_for_token(config_path: Path, session_token: str) -> Optional[Any]:
+    if not _HAS_SUPABASE or create_supabase_client is None:
+        return None
+    settings = load_supabase_settings(config_path)
+    if not settings.get("enabled"):
+        return None
+
+    token = str(session_token or "").strip()
+    if _looks_like_jwt(token):
+        key = str(settings.get("publishable_key") or settings.get("key") or "").strip()
+        if not key:
+            return None
+        try:
+            client = create_supabase_client(str(settings.get("url") or ""), key)
+            _apply_supabase_jwt(client, token)
+            return client
+        except Exception as exc:
+            logging.warning("Supabase JWT client init failed: %s", exc)
+            return None
+
+    return get_supabase_client(config_path)
+
+
+def resolve_supabase_auth_user_id(session_token: str, config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[str]:
+    token = str(session_token or "").strip()
+    if not _looks_like_jwt(token):
+        return None
+
+    client = get_supabase_client_for_token(config_path, token)
+    if client is None:
+        return None
+
+    try:
+        auth_api = getattr(client, "auth", None)
+        if auth_api is None or not hasattr(auth_api, "get_user"):
+            return None
+        response = auth_api.get_user(token)
+        user_obj = getattr(response, "user", None)
+        if user_obj is None and isinstance(response, dict):
+            user_obj = response.get("user")
+        if user_obj is None:
+            return None
+        candidate = getattr(user_obj, "id", None)
+        if candidate is None and isinstance(user_obj, dict):
+            candidate = user_obj.get("id")
+        value = str(candidate or "").strip()
+        return value or None
+    except Exception:
+        return None
+
+
+def get_supabase_request_client(request: Optional[Request], config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[Any]:
+    auth_header = ""
+    if request is not None:
+        auth_header = str(request.headers.get("Authorization", "") or "").strip()
+    token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    if token:
+        client = get_supabase_client_for_token(config_path, token)
+        if client is not None:
+            return client
+    return get_supabase_client(config_path)
+
+
 def get_supabase_admin_client(config_path: Path) -> Optional[Any]:
     if not _HAS_SUPABASE or create_supabase_client is None:
         return None
@@ -4468,6 +5163,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         display_name TEXT NOT NULL DEFAULT '',
         contact_name TEXT NOT NULL DEFAULT '',
         token TEXT UNIQUE,
+        credits BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         credits_balance BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         monthly_quota BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
         credits_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT},
@@ -4494,6 +5190,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS contact_name TEXT NOT NULL DEFAULT '';
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS niche TEXT NOT NULL DEFAULT 'B2B Service Provider';
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS token TEXT;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_balance BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS monthly_quota BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS credits_limit BIGINT NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
@@ -4514,6 +5211,7 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT NOW()::text;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TEXT;
     ALTER TABLE public.users ALTER COLUMN credits_balance SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
+    ALTER TABLE public.users ALTER COLUMN credits SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ALTER COLUMN monthly_quota SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ALTER COLUMN credits_limit SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
     ALTER TABLE public.users ALTER COLUMN monthly_limit SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
@@ -4531,6 +5229,10 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     SET monthly_limit = monthly_quota,
         credits_limit = monthly_quota
     WHERE monthly_quota > 0;
+
+    UPDATE public.users
+    SET credits = COALESCE(credits_balance, credits, {DEFAULT_MONTHLY_CREDIT_LIMIT})
+    WHERE credits IS NULL OR credits != COALESCE(credits_balance, credits, {DEFAULT_MONTHLY_CREDIT_LIMIT});
 
         UPDATE public.users
         SET credits_balance = COALESCE(NULLIF(credits_balance, 0), NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})
@@ -4579,6 +5281,17 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         ON public.users(token);
     CREATE INDEX IF NOT EXISTS idx_users_reset_token
         ON public.users(reset_token);
+
+    CREATE TABLE IF NOT EXISTS public.credit_logs (
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        action_type TEXT NOT NULL,
+        metadata JSONB,
+        created_at TEXT NOT NULL DEFAULT NOW()::text
+    );
+    CREATE INDEX IF NOT EXISTS idx_credit_logs_user_created ON public.credit_logs(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_credit_logs_action_created ON public.credit_logs(action_type, created_at DESC);
     """
 
     try:
@@ -4620,7 +5333,7 @@ def add_worker_audit_supabase(
         logging.warning("Supabase worker audit insert failed: %s", exc)
 
 
-def fetch_blacklist_sets_supabase(config_path: Path) -> tuple[set[str], set[str]]:
+def fetch_blacklist_sets_supabase(config_path: Path, user_id: Optional[str] = None) -> tuple[set[str], set[str]]:
     client = get_supabase_client(config_path)
     if client is None:
         return set(), set()
@@ -4628,7 +5341,12 @@ def fetch_blacklist_sets_supabase(config_path: Path) -> tuple[set[str], set[str]
     emails: set[str] = set()
     domains: set[str] = set()
     try:
-        rows = supabase_select_rows(client, "lead_blacklist", columns="kind,value")
+        rows = supabase_select_rows(
+            client,
+            "lead_blacklist",
+            columns="kind,value",
+            filters={"user_id": str(user_id)} if user_id else None,
+        )
     except Exception:
         return set(), set()
 
@@ -4644,16 +5362,21 @@ def fetch_blacklist_sets_supabase(config_path: Path) -> tuple[set[str], set[str]
     return emails, domains
 
 
-def sync_blacklisted_leads_supabase(config_path: Path) -> int:
+def sync_blacklisted_leads_supabase(config_path: Path, user_id: Optional[str] = None) -> int:
     client = get_supabase_client(config_path)
     if client is None:
         return 0
 
-    emails, domains = fetch_blacklist_sets_supabase(config_path)
+    emails, domains = fetch_blacklist_sets_supabase(config_path, user_id=user_id)
     if not emails and not domains:
         return 0
 
-    rows = supabase_select_rows(client, "leads", columns="id,email,website_url,status")
+    rows = supabase_select_rows(
+        client,
+        "leads",
+        columns="id,email,website_url,status,user_id",
+        filters={"user_id": str(user_id)} if user_id else None,
+    )
     lead_ids: list[int] = []
     for row in rows:
         status_value = str(row.get("status") or "").strip().lower()
@@ -4691,7 +5414,7 @@ def blacklist_lead_and_matches_supabase(lead_id: int, reason: str, config_path: 
     if client is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
 
-    lead_rows = client.table("leads").select("id,business_name,email,website_url").eq("id", lead_id).limit(1).execute().data or []
+    lead_rows = client.table("leads").select("id,business_name,email,website_url,user_id").eq("id", lead_id).limit(1).execute().data or []
     if not lead_rows:
         raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -4703,21 +5426,22 @@ def blacklist_lead_and_matches_supabase(lead_id: int, reason: str, config_path: 
     }
     domain_values = {value for value in domain_values if value}
 
-    existing_rows = client.table("lead_blacklist").select("kind,value").execute().data or []
+    lead_user_id = str(row.get("user_id") or "legacy").strip() or "legacy"
+    existing_rows = client.table("lead_blacklist").select("kind,value").eq("user_id", lead_user_id).execute().data or []
     existing = {(str(item.get("kind") or "").lower(), str(item.get("value") or "").lower()) for item in existing_rows}
 
     to_insert: list[dict] = []
     if email_value and ("email", email_value) not in existing:
-        to_insert.append({"kind": "email", "value": email_value, "reason": reason, "created_at": utc_now_iso()})
+        to_insert.append({"user_id": lead_user_id, "kind": "email", "value": email_value, "reason": reason, "created_at": utc_now_iso()})
     for domain_value in sorted(domain_values):
         if ("domain", domain_value) in existing:
             continue
-        to_insert.append({"kind": "domain", "value": domain_value, "reason": reason, "created_at": utc_now_iso()})
+        to_insert.append({"user_id": lead_user_id, "kind": "domain", "value": domain_value, "reason": reason, "created_at": utc_now_iso()})
 
     if to_insert:
         client.table("lead_blacklist").insert(to_insert).execute()
 
-    affected = sync_blacklisted_leads_supabase(config_path)
+    affected = sync_blacklisted_leads_supabase(config_path, user_id=lead_user_id)
     _invalidate_leads_cache()
     return {
         "status": "blacklisted",
@@ -4729,9 +5453,10 @@ def blacklist_lead_and_matches_supabase(lead_id: int, reason: str, config_path: 
     }
 
 
-def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, reason: str = "Manual blacklist") -> dict:
+def add_blacklist_entry_supabase(config_path: Path, *, user_id: str, kind: str, value: str, reason: str = "Manual blacklist") -> dict:
     normalized_kind, normalized_value = normalize_blacklist_entry(kind, value)
     clean_reason = str(reason or "Manual blacklist").strip() or "Manual blacklist"
+    normalized_user_id = str(user_id or "legacy").strip() or "legacy"
     client = get_supabase_client(config_path)
     if client is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
@@ -4739,6 +5464,7 @@ def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, re
     existing_rows = (
         client.table("lead_blacklist")
         .select("kind,value,reason,created_at")
+        .eq("user_id", normalized_user_id)
         .eq("kind", normalized_kind)
         .eq("value", normalized_value)
         .limit(1)
@@ -4749,6 +5475,7 @@ def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, re
     if not existing_rows:
         client.table("lead_blacklist").insert(
             {
+                "user_id": normalized_user_id,
                 "kind": normalized_kind,
                 "value": normalized_value,
                 "reason": clean_reason,
@@ -4758,6 +5485,7 @@ def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, re
         existing_rows = (
             client.table("lead_blacklist")
             .select("kind,value,reason,created_at")
+            .eq("user_id", normalized_user_id)
             .eq("kind", normalized_kind)
             .eq("value", normalized_value)
             .limit(1)
@@ -4772,7 +5500,7 @@ def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, re
         "reason": clean_reason,
         "created_at": utc_now_iso(),
     }
-    affected = sync_blacklisted_leads_supabase(config_path)
+    affected = sync_blacklisted_leads_supabase(config_path, user_id=normalized_user_id)
     _invalidate_leads_cache()
     return {
         "status": "blacklisted",
@@ -4784,7 +5512,7 @@ def add_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str, re
     }
 
 
-def restore_released_blacklisted_leads_supabase(config_path: Path, removed_entries: list[tuple[str, str]]) -> int:
+def restore_released_blacklisted_leads_supabase(config_path: Path, removed_entries: list[tuple[str, str]], user_id: Optional[str] = None) -> int:
     normalized_entries = [normalize_blacklist_entry(kind, value) for kind, value in removed_entries if str(value or "").strip()]
     if not normalized_entries:
         return 0
@@ -4793,8 +5521,13 @@ def restore_released_blacklisted_leads_supabase(config_path: Path, removed_entri
     if client is None:
         return 0
 
-    emails, domains = fetch_blacklist_sets_supabase(config_path)
-    rows = supabase_select_rows(client, "leads", columns="id,email,website_url,status")
+    emails, domains = fetch_blacklist_sets_supabase(config_path, user_id=user_id)
+    rows = supabase_select_rows(
+        client,
+        "leads",
+        columns="id,email,website_url,status,user_id",
+        filters={"user_id": str(user_id)} if user_id else None,
+    )
     lead_ids: list[int] = []
     for row in rows:
         status_value = str(row.get("status") or "").strip().lower()
@@ -4827,8 +5560,9 @@ def restore_released_blacklisted_leads_supabase(config_path: Path, removed_entri
     return len(lead_ids)
 
 
-def remove_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str) -> dict:
+def remove_blacklist_entry_supabase(config_path: Path, *, user_id: str, kind: str, value: str) -> dict:
     normalized_kind, normalized_value = normalize_blacklist_entry(kind, value)
+    normalized_user_id = str(user_id or "legacy").strip() or "legacy"
     client = get_supabase_client(config_path)
     if client is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
@@ -4836,6 +5570,7 @@ def remove_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str)
     existing_rows = (
         client.table("lead_blacklist")
         .select("id")
+        .eq("user_id", normalized_user_id)
         .eq("kind", normalized_kind)
         .eq("value", normalized_value)
         .execute()
@@ -4843,10 +5578,10 @@ def remove_blacklist_entry_supabase(config_path: Path, *, kind: str, value: str)
         or []
     )
     if existing_rows:
-        client.table("lead_blacklist").delete().eq("kind", normalized_kind).eq("value", normalized_value).execute()
+        client.table("lead_blacklist").delete().eq("user_id", normalized_user_id).eq("kind", normalized_kind).eq("value", normalized_value).execute()
     deleted_count = len(existing_rows)
 
-    restored = restore_released_blacklisted_leads_supabase(config_path, [(normalized_kind, normalized_value)])
+    restored = restore_released_blacklisted_leads_supabase(config_path, [(normalized_kind, normalized_value)], user_id=normalized_user_id)
     _invalidate_leads_cache()
     return {
         "status": "removed" if deleted_count else "not_found",
@@ -4862,11 +5597,12 @@ def remove_lead_blacklist_and_matches_supabase(lead_id: int, config_path: Path) 
     if client is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
 
-    lead_rows = client.table("leads").select("id,business_name,email,website_url").eq("id", lead_id).limit(1).execute().data or []
+    lead_rows = client.table("leads").select("id,business_name,email,website_url,user_id").eq("id", lead_id).limit(1).execute().data or []
     if not lead_rows:
         raise HTTPException(status_code=404, detail="Lead not found")
 
     row = lead_rows[0]
+    lead_user_id = str(row.get("user_id") or "legacy").strip() or "legacy"
     removed_entries: list[tuple[str, str]] = []
     email_value = str(row.get("email") or "").strip().lower()
     if email_value:
@@ -4882,6 +5618,7 @@ def remove_lead_blacklist_and_matches_supabase(lead_id: int, config_path: Path) 
         existing_rows = (
             client.table("lead_blacklist")
             .select("id")
+            .eq("user_id", lead_user_id)
             .eq("kind", entry_kind)
             .eq("value", entry_value)
             .execute()
@@ -4889,10 +5626,10 @@ def remove_lead_blacklist_and_matches_supabase(lead_id: int, config_path: Path) 
             or []
         )
         if existing_rows:
-            client.table("lead_blacklist").delete().eq("kind", entry_kind).eq("value", entry_value).execute()
+            client.table("lead_blacklist").delete().eq("user_id", lead_user_id).eq("kind", entry_kind).eq("value", entry_value).execute()
             deleted_count += len(existing_rows)
 
-    restored = restore_released_blacklisted_leads_supabase(config_path, removed_entries)
+    restored = restore_released_blacklisted_leads_supabase(config_path, removed_entries, user_id=lead_user_id)
     _invalidate_leads_cache()
     return {
         "status": "removed" if deleted_count else "not_found",
@@ -6603,6 +7340,42 @@ def deliver_export_webhook(url: str, payload: dict) -> dict[str, Any]:
         }
 
 
+def _get_developer_webhook_settings(config_path: Path) -> tuple[str, float]:
+    cfg = _read_json_config(config_path)
+    url = str(cfg.get("developer_webhook_url", "") or "").strip()
+    raw_threshold = cfg.get("developer_score_drop_threshold", 6.0)
+    try:
+        threshold = float(raw_threshold)
+    except (TypeError, ValueError):
+        threshold = 6.0
+    threshold = max(0.0, min(10.0, threshold))
+    return url, threshold
+
+
+def _dispatch_developer_webhook_event(
+    *,
+    event_type: str,
+    user_id: str,
+    lead_id: Optional[int],
+    payload: dict[str, Any],
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> None:
+    url, _ = _get_developer_webhook_settings(config_path)
+    if not url:
+        return
+    body = {
+        "event": str(event_type or "unknown").strip() or "unknown",
+        "timestamp": utc_now_iso(),
+        "user_id": str(user_id or "legacy"),
+        "lead_id": int(lead_id) if lead_id is not None else None,
+        "payload": payload,
+    }
+    try:
+        deliver_export_webhook(url, body)
+    except Exception as exc:
+        logging.warning("Developer webhook delivery failed for event=%s lead_id=%s: %s", event_type, lead_id, exc)
+
+
 def _escape_pdf_text(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
@@ -6889,24 +7662,31 @@ def get_task_executor(task_type: str) -> Callable[[FastAPI, dict], Any]:
 
 def launch_detached_task(executor: Callable[[FastAPI, dict], Any], app: FastAPI, payload_data: dict) -> None:
     task_id = payload_data.get("task_id")
+    task_name = getattr(executor, "__name__", executor.__class__.__name__)
 
     def _run() -> None:
         registry: dict[int, Thread] = getattr(app.state, "active_task_threads", {})
         try:
             if isinstance(task_id, int):
                 registry[task_id] = thread
-            outcome = executor(app, payload_data)
-            if inspect.isawaitable(outcome):
-                loop = asyncio.new_event_loop()
-                try:
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(outcome)
-                finally:
+            try:
+                outcome = executor(app, payload_data)
+                if inspect.isawaitable(outcome):
+                    loop = asyncio.new_event_loop()
                     try:
-                        loop.close()
-                    except Exception:
-                        pass
-                    asyncio.set_event_loop(None)
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(outcome)
+                    finally:
+                        try:
+                            loop.close()
+                        except Exception:
+                            pass
+                        asyncio.set_event_loop(None)
+            except Exception as exc:
+                if _is_db_capacity_error(exc):
+                    logging.warning("Detached task %s skipped because the database is saturated.", task_name)
+                else:
+                    logging.exception("Detached task %s failed", task_name)
         finally:
             if isinstance(task_id, int):
                 registry.pop(task_id, None)
@@ -7353,7 +8133,60 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
     }
 
 
-def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path: Optional[Path] = None) -> dict:
+def _append_credit_log(
+    user_id: str,
+    amount: int,
+    action_type: str,
+    metadata: Optional[dict[str, Any]] = None,
+    db_path: Optional[Path] = None,
+) -> None:
+    target_user_id = str(user_id or "").strip()
+    if not target_user_id:
+        return
+    log_amount = int(amount or 0)
+    action = str(action_type or "usage").strip().lower() or "usage"
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+    now_iso = utc_now_iso()
+
+    if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+        sb_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+        if sb_client is None:
+            return
+        try:
+            sb_client.table("credit_logs").insert(
+                {
+                    "user_id": target_user_id,
+                    "amount": log_amount,
+                    "action_type": action,
+                    "metadata": metadata or {},
+                    "created_at": now_iso,
+                }
+            ).execute()
+        except Exception as exc:
+            logging.warning("Failed writing Supabase credit log: %s", exc)
+        return
+
+    target_db_path = db_path or DEFAULT_DB_PATH
+    ensure_credit_logs_table(target_db_path)
+    with pgdb.connect(target_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_logs (user_id, amount, action_type, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_user_id, log_amount, action, metadata_json, now_iso),
+        )
+        conn.commit()
+
+
+def deduct_credits_on_success(
+    user_id: str,
+    credits_to_deduct: int = 1,
+    db_path: Optional[Path] = None,
+    *,
+    action_type: str = "usage",
+    metadata: Optional[dict[str, Any]] = None,
+) -> dict:
     target_user_id = str(user_id or "").strip()
     if not target_user_id:
         raise HTTPException(status_code=401, detail="Missing authenticated user.")
@@ -7392,6 +8225,7 @@ def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path:
             (
                 sb_client.table("users")
                 .update({
+                    "credits": next_balance,
                     "credits_balance": next_balance,
                     "topup_credits_balance": next_topup_balance,
                     "updated_at": now_iso,
@@ -7410,12 +8244,24 @@ def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path:
         if verified_balance != next_balance:
             raise HTTPException(status_code=409, detail="Credit balance changed concurrently. Please retry.")
 
-        return {
+        raw_dev_threshold = cfg.get("developer_score_drop_threshold", 6.0)
+        try:
+            dev_threshold = float(raw_dev_threshold)
+        except (TypeError, ValueError):
+            dev_threshold = 6.0
+        dev_threshold = max(0.0, min(10.0, dev_threshold))
+
+        result = {
             "user_id": target_user_id,
             "credits_charged": amount,
             "credits_balance": verified_balance,
             "credits_limit": verified_limit,
         }
+        _append_credit_log(target_user_id, -amount, action_type, {
+            "credits_after": verified_balance,
+            **(metadata or {}),
+        }, db_path=db_path)
+        return result
 
     auth_db_path = db_path or DEFAULT_DB_PATH
     ensure_users_table(auth_db_path)
@@ -7456,12 +8302,13 @@ def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path:
         updated = conn.execute(
             """
             UPDATE users
-            SET credits_balance = ?,
+            SET credits = ?,
+                credits_balance = ?,
                 topup_credits_balance = ?,
                 updated_at = ?
             WHERE id = ? AND COALESCE(credits_balance, 0) >= ? AND COALESCE(topup_credits_balance, 0) = ?
             """,
-            (next_balance, next_topup_balance, now_iso, target_user_id, amount, topup_balance),
+            (next_balance, next_balance, next_topup_balance, now_iso, target_user_id, amount, topup_balance),
         )
         if int(updated.rowcount or 0) != 1:
             conn.rollback()
@@ -7474,18 +8321,23 @@ def deduct_credits_on_success(user_id: str, credits_to_deduct: int = 1, db_path:
         conn.commit()
 
     next_balance = int(next_row["credits_balance"] or 0) if next_row else max(0, current_balance - amount)
-    return {
+    result = {
         "user_id": target_user_id,
         "credits_charged": amount,
         "credits_balance": next_balance,
         "credits_limit": credits_limit,
     }
+    _append_credit_log(target_user_id, -amount, action_type, {
+        "credits_after": next_balance,
+        **(metadata or {}),
+    }, db_path=db_path)
+    return result
 
 
 AI_CREDIT_COSTS: dict[str, int] = {
     "recommend_niche": 0,
     "lead_search": 1,
-    "enrich": 1,
+    "enrich": ENRICH_CREDIT_COST_PER_LEAD,
     "mail_preview": 1,
     "cold_outreach": 1,
     "cold_email_opener": 1,
@@ -8153,6 +9005,11 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 str(payload_data.get("user_id") or ""),
                 credits_to_deduct=max(0, int(inserted or 0)),
                 db_path=db_path,
+                action_type="scrape",
+                metadata={
+                    "task_id": int(task_id),
+                    "inserted": int(inserted or 0),
+                },
             )
             credits_charged = int(billing.get("credits_charged") or 0)
             credits_balance = int(billing.get("credits_balance") or 0)
@@ -8286,6 +9143,33 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
             speed_mode=bool(payload_data.get("speed_mode", False)),
         )
+        target_lead_ids: list[int] = []
+        pre_enrich_scores: dict[int, dict[str, Optional[float]]] = {}
+        try:
+            prospective_rows = enricher._fetch_leads_for_enrichment(  # type: ignore[attr-defined]
+                limit=payload_data.get("limit"),
+                lead_ids=payload_data.get("lead_ids") or None,
+            )
+            target_lead_ids = [int(row.get("id")) for row in prospective_rows if str(row.get("id") or "").isdigit()]
+        except Exception:
+            target_lead_ids = [int(x) for x in (payload_data.get("lead_ids") or []) if str(x).isdigit()]
+
+        if target_lead_ids:
+            placeholders = ",".join(["?"] * len(target_lead_ids))
+            with pgdb.connect(db_path) as conn:
+                conn.row_factory = pgdb.Row
+                rows = conn.execute(
+                    f"SELECT id, seo_score, performance_score, enrichment_data, insecure_site, main_shortcoming FROM leads WHERE user_id = ? AND id IN ({placeholders})",
+                    [str(payload_data.get("user_id") or "legacy"), *target_lead_ids],
+                ).fetchall()
+            for row in rows:
+                row_map = dict(row)
+                seo_score, performance_score = _extract_scores_from_lead_payload(row_map)
+                pre_enrich_scores[int(row_map.get("id") or 0)] = {
+                    "seo_score": seo_score,
+                    "performance_score": performance_score,
+                }
+
         ai_key_configured = bool(getattr(enricher, "openai_api_key", None))
         progress_state["ai_key_configured"] = ai_key_configured
         if not ai_key_configured:
@@ -8354,6 +9238,24 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and processed:
             maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
 
+        refreshed_score_map = _refresh_enriched_lead_scores(
+            db_path,
+            user_id=str(payload_data.get("user_id") or "legacy"),
+            lead_ids=target_lead_ids,
+        )
+        score_drop_events_sent = _notify_score_drop_events(
+            db_path=db_path,
+            user_id=str(payload_data.get("user_id") or "legacy"),
+            previous_scores=pre_enrich_scores,
+            refreshed_scores=refreshed_score_map,
+        )
+        history_snapshots = _capture_lead_history_snapshots(
+            db_path,
+            user_id=str(payload_data.get("user_id") or "legacy"),
+            lead_ids=target_lead_ids,
+            snapshot_map=pre_enrich_scores,
+        )
+
         queued_for_mail = queue_high_score_enriched_leads(
             db_path,
             user_id=str(payload_data.get("user_id") or "legacy"),
@@ -8374,10 +9276,17 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
         billing_warning: Optional[str] = None
         if processed > 0 and int(payload_data.get("_credits_per_success") or 0) > 0:
             try:
+                per_lead_cost = max(1, int(payload_data.get("_credits_per_success") or ENRICH_CREDIT_COST_PER_LEAD))
                 billing = deduct_credits_on_success(
                     str(payload_data.get("user_id") or ""),
-                    credits_to_deduct=int(payload_data.get("_credits_per_success") or 1),
+                    credits_to_deduct=max(0, int(processed)) * per_lead_cost,
                     db_path=db_path,
+                    action_type="enrich",
+                    metadata={
+                        "task_id": int(task_id),
+                        "processed": int(processed),
+                        "credits_per_lead": per_lead_cost,
+                    },
                 )
                 credits_charged = int(billing.get("credits_charged") or 0)
                 credits_balance = int(billing.get("credits_balance") or 0)
@@ -8402,6 +9311,9 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
                 "enriched_count": processed,
                 "with_email": with_email,
                 "queued_for_mail": queued_for_mail,
+                "history_snapshots": int(history_snapshots),
+                "trend_scores_updated": int(len(refreshed_score_map)),
+                "developer_score_drop_events": int(score_drop_events_sent),
                 "exported": exported,
                 "output_csv": output_csv,
                 "credits_charged": credits_charged,
@@ -8480,7 +9392,10 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
             config_path=str(config_path),
             model_name_override=str(payload_data.get("_ai_model") or DEFAULT_AI_MODEL),
             user_id=str(payload_data.get("user_id") or "legacy"),
-            smtp_accounts_override=load_user_smtp_accounts(user_id=str(payload_data.get("user_id") or "legacy"), db_path=db_path),
+            smtp_accounts_override=(
+                list(payload_data.get("_smtp_accounts_override") or [])
+                or load_user_smtp_accounts(user_id=str(payload_data.get("user_id") or "legacy"), db_path=db_path)
+            ),
         )
         # Use auto-detected base URL for tracking pixel if not manually configured in config
         if not mailer.open_tracking_base_url:
@@ -8516,6 +9431,11 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
                     str(payload_data.get("user_id") or ""),
                     credits_to_deduct=int(sent),
                     db_path=db_path,
+                    action_type="mailer",
+                    metadata={
+                        "task_id": int(task_id),
+                        "sent": int(sent),
+                    },
                 )
                 credits_charged = int(billing.get("credits_charged") or 0)
                 credits_balance = int(billing.get("credits_balance") or 0)
@@ -8542,6 +9462,10 @@ def execute_mailer_task(_app: FastAPI, payload_data: dict) -> None:
             "credits_balance": credits_balance,
             "credits_limit": credits_limit,
             "billing_warning": billing_warning,
+            "smtp_source": str(payload_data.get("_smtp_source") or "custom"),
+            "smtp_quota_limit": int(payload_data.get("_smtp_quota_limit") or SYSTEM_SMTP_DEFAULT_SEND_LIMIT),
+            "smtp_quota_remaining_before": int(payload_data.get("_smtp_quota_remaining_before") or 0),
+            "smtp_quota_capped": bool(payload_data.get("_smtp_quota_capped")),
         }
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
         if payload_data.get("drip_feed"):
@@ -8647,12 +9571,11 @@ def run_daily_digest(_app: FastAPI) -> None:
     db_path = DEFAULT_DB_PATH
     config_path = DEFAULT_CONFIG_PATH
 
-    # â”€â”€ Load config & SMTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
     except Exception as exc:
-        logging.warning("Daily digest: could not read environment settings â€” %s", exc)
+        logging.warning("Daily digest: could not read environment settings - %s", exc)
         return
 
     if not bool(cfg.get("auto_daily_digest_email", False)):
@@ -8661,7 +9584,7 @@ def run_daily_digest(_app: FastAPI) -> None:
 
     smtp_accounts = cfg.get("smtp_accounts", [])
     if not smtp_accounts:
-        logging.warning("Daily digest: no SMTP accounts configured â€” skipping.")
+        logging.warning("Daily digest: no SMTP accounts configured - skipping.")
         return
 
     acct = smtp_accounts[0]
@@ -8674,17 +9597,15 @@ def run_daily_digest(_app: FastAPI) -> None:
     from_name = str(acct.get("from_name", "") or "").strip()
     from_header = f"{from_name} <{smtp_email}>" if from_name else smtp_email
 
-    # digest_email in config (optional, defaults to SMTP sender)
     recipient = str(cfg.get("digest_email", "") or "").strip() or smtp_email
     if not recipient or not smtp_host or not smtp_password:
-        logging.warning("Daily digest: incomplete SMTP config â€” skipping.")
+        logging.warning("Daily digest: incomplete SMTP config - skipping.")
         return
 
-    # â”€â”€ Gather data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         stats = get_dashboard_stats(db_path)
     except Exception as exc:
-        logging.warning("Daily digest: could not gather stats â€” %s", exc)
+        logging.warning("Daily digest: could not gather stats - %s", exc)
         return
 
     mrr = stats.get("monthly_recurring_revenue", 0)
@@ -8694,7 +9615,6 @@ def run_daily_digest(_app: FastAPI) -> None:
     total_leads = stats.get("total_leads", 0)
     emails_sent = stats.get("emails_sent", 0)
 
-    # AI Niche recommendation for today's campaign focus
     recommendation = get_niche_recommendation(db_path, config_path)
     top_pick = recommendation.get("top_pick", {}) if isinstance(recommendation, dict) else {}
     niche_keyword = str(top_pick.get("keyword", "AC Repair in Phoenix, AZ") or "AC Repair in Phoenix, AZ")
@@ -8702,7 +9622,6 @@ def run_daily_digest(_app: FastAPI) -> None:
     campaign_base = str(cfg.get("dashboard_url", "http://localhost:5173") or "http://localhost:5173").rstrip("/")
     campaign_link = f"{campaign_base}/?niche={quote_plus(niche_keyword)}"
 
-    # Golden leads in the last 24 h
     golden_count = 0
     uptime_alerts: list[dict] = []
     try:
@@ -8715,7 +9634,7 @@ def run_daily_digest(_app: FastAPI) -> None:
                   AND datetime(enriched_at) >= datetime('now', '-1 day')
                 """
             ).fetchone()
-            golden_count = int(row[0] if row else 0)
+            golden_count = int(row[0] or 0) if row else 0
 
             alert_rows = conn.execute(
                 """
@@ -8731,30 +9650,28 @@ def run_daily_digest(_app: FastAPI) -> None:
                     payload = json.loads(ar["request_payload"] or "{}")
                     uptime_alerts.append(payload)
                 except json.JSONDecodeError:
-                    pass
+                    continue
     except Exception as exc:
-        logging.warning("Daily digest: DB read failed â€” %s", exc)
+        logging.warning("Daily digest: DB read failed - %s", exc)
 
-    # â”€â”€ Build email â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     today_str = datetime.now(timezone.utc).strftime("%A, %d %b %Y")
     progress_bar = ("\u2588" * (mrr_progress // 10)).ljust(10, "\u2591")
 
-    alert_lines = ""
     if uptime_alerts:
         lines = []
         for a in uptime_alerts:
             name = a.get("business_name", "?")
             url = a.get("website_url", "?")
             code = a.get("http_status", 0) or "unreachable"
-            lines.append(f"  âš   {name} ({url}) â€” HTTP {code}")
+            lines.append(f"  !  {name} ({url}) - HTTP {code}")
         alert_lines = "\n\nUptime Alerts (last 24h):\n" + "\n".join(lines)
     else:
-        alert_lines = "\n\nUptime Alerts: none âś…"
+        alert_lines = "\n\nUptime Alerts: none"
 
     body = (
         f"Good morning! Here is your Daily Profit Digest for {today_str}.\n"
         f"{'=' * 50}\n\n"
-        f"MRR:             \u20ac{mrr:,.0f} / \u20ac{mrr_goal:,.0f}\n"
+        f"MRR:             EUR {mrr:,.0f} / EUR {mrr_goal:,.0f}\n"
         f"Goal progress:   [{progress_bar}] {mrr_progress}%\n"
         f"Paid clients:    {paid_count}\n"
         f"Total leads:     {total_leads}\n"
@@ -8766,9 +9683,8 @@ def run_daily_digest(_app: FastAPI) -> None:
         f"{'=' * 50}\n"
         f"Keep pushing. You're {100 - mrr_progress}% from the finish line.\n"
     )
-    subject = f"[Digest] MRR \u20ac{mrr:,.0f} | {mrr_progress}% to goal | {today_str}"
+    subject = f"[Digest] MRR EUR {mrr:,.0f} | {mrr_progress}% to goal | {today_str}"
 
-    # â”€â”€ Send â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     import smtplib
     from email.message import EmailMessage
 
@@ -8792,8 +9708,11 @@ def run_daily_digest(_app: FastAPI) -> None:
                 smtp.login(smtp_email, smtp_password)
                 smtp.send_message(msg)
         logging.info(
-            "Daily digest sent to %s (MRR=\u20ac%s, golden=%s, alerts=%s).",
-            recipient, mrr, golden_count, len(uptime_alerts),
+            "Daily digest sent to %s (MRR=EUR %s, golden=%s, alerts=%s).",
+            recipient,
+            mrr,
+            golden_count,
+            len(uptime_alerts),
         )
     except Exception as exc:
         logging.warning("Daily digest SMTP send failed: %s", exc)
@@ -8862,7 +9781,13 @@ def run_uptime_check(_app: FastAPI) -> None:
 
 def run_autopilot_cycle(app: FastAPI) -> None:
     db_path = DEFAULT_DB_PATH
-    ensure_system_tables(db_path)
+    try:
+        ensure_system_tables(db_path)
+    except Exception as exc:
+        if _is_db_capacity_error(exc):
+            logging.warning("Autopilot cycle skipped because the database is saturated.")
+            return
+        raise
 
     queued_for_mail = queue_high_score_enriched_leads(db_path)
     if queued_for_mail:
@@ -8900,7 +9825,13 @@ def run_drip_dispatch_cycle(app: FastAPI) -> None:
         return
 
     db_path = DEFAULT_DB_PATH
-    ensure_system_tables(db_path)
+    try:
+        ensure_system_tables(db_path)
+    except Exception as exc:
+        if _is_db_capacity_error(exc):
+            logging.warning("Drip dispatch cycle skipped because the database is saturated.")
+            return
+        raise
 
     queue_high_score_enriched_leads(db_path)
 
@@ -9007,10 +9938,11 @@ def start_scheduler(app: FastAPI) -> None:
     scheduler.start()
     app.state.scheduler = scheduler
 
-    launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
-    launch_detached_task(lambda _app, _payload: run_monthly_credit_reset_cycle(_app), app, {})
-    if AUTO_DRIP_DISPATCH_ENABLED:
-        launch_detached_task(lambda _app, _payload: run_drip_dispatch_cycle(_app), app, {})
+    if RUN_STARTUP_JOBS:
+        launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
+        launch_detached_task(lambda _app, _payload: run_monthly_credit_reset_cycle(_app), app, {})
+        if AUTO_DRIP_DISPATCH_ENABLED:
+            launch_detached_task(lambda _app, _payload: run_drip_dispatch_cycle(_app), app, {})
 
 
 def stop_scheduler(app: FastAPI) -> None:
@@ -10002,6 +10934,10 @@ def create_app() -> FastAPI:
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
         session_token = require_authenticated_session(request)
+        cache_key = str(session_token)
+        cached = _get_cached_api("config", cache_key, _CONFIG_CACHE_TTL)
+        if cached is not None:
+            return cached
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -10009,17 +10945,25 @@ def create_app() -> FastAPI:
             cfg = {}
         openai_key = str(cfg.get("openai", {}).get("api_key", "") or "")
         smtp_accounts = load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH)
+        billing = load_user_billing_context(session_token, allow_stripe_recovery=False)
+        plan_key = _normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY)
+        custom_smtp_allowed = plan_key != "free"
+        system_smtp_account = get_system_smtp_account(DEFAULT_CONFIG_PATH)
         mailer_cfg = cfg.get("mailer", {}) if isinstance(cfg, dict) else {}
         safe_accounts = _safe_smtp_accounts(smtp_accounts)
         first_smtp = smtp_accounts[0] if smtp_accounts else {}
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
-        return {
+        result = {
             "openai_api_key": "***" if openai_key and openai_key != "YOUR_OPENAI_API_KEY" else "",
             "smtp_host": first_smtp.get("host", ""),
             "smtp_port": first_smtp.get("port", 587),
             "smtp_email": first_smtp.get("email", ""),
             "smtp_password_set": bool(str(first_smtp.get("password", "") or "").strip()),
             "smtp_accounts": safe_accounts,
+            "smtp_custom_allowed": bool(custom_smtp_allowed),
+            "system_smtp_enabled": bool(system_smtp_account),
+            "system_smtp_sender": str(system_smtp_account.get("email", "") or ""),
+            "system_smtp_limit": int(SYSTEM_SMTP_DEFAULT_SEND_LIMIT),
             "sending_strategy": normalize_sending_strategy(mailer_cfg.get("sending_strategy", "round_robin")),
             "mail_signature": str(cfg.get("mail_signature", "") or ""),
             "ghost_subject_template": str(cfg.get("ghost_subject_template", DEFAULT_GHOST_SUBJECT_TEMPLATE) or DEFAULT_GHOST_SUBJECT_TEMPLATE),
@@ -10033,6 +10977,8 @@ def create_app() -> FastAPI:
             "open_tracking_base_url": str(cfg.get("open_tracking_base_url", "") or ""),
             "hubspot_webhook_url": str(cfg.get("hubspot_webhook_url", "") or ""),
             "google_sheets_webhook_url": str(cfg.get("google_sheets_webhook_url", "") or ""),
+            "developer_webhook_url": str(cfg.get("developer_webhook_url", "") or ""),
+            "developer_score_drop_threshold": dev_threshold,
             "auto_weekly_report_email": bool(cfg.get("auto_weekly_report_email", True)),
             "auto_monthly_report_email": bool(cfg.get("auto_monthly_report_email", True)),
             "proxy_url": str(cfg.get("proxy_url", "") or ""),
@@ -10042,6 +10988,8 @@ def create_app() -> FastAPI:
             "supabase_service_role_key_set": bool(supabase_settings.get("has_service_role")),
             "supabase_primary_mode": bool(supabase_settings.get("primary_mode", False)),
         }
+        _set_cached_api("config", cache_key, result)
+        return result
 
     @app.put("/api/config")
     def update_config(payload: ConfigUpdateRequest, request: Request) -> dict:
@@ -10051,6 +10999,16 @@ def create_app() -> FastAPI:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
+
+        smtp_update_requested = payload.smtp_accounts is not None or any(
+            value is not None
+            for value in [payload.smtp_host, payload.smtp_port, payload.smtp_email, payload.smtp_password]
+        )
+        if smtp_update_requested:
+            billing = load_user_billing_context(session_token, allow_stripe_recovery=False)
+            plan_key = _normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY)
+            if plan_key == "free":
+                raise HTTPException(status_code=403, detail="Custom SMTP is available on paid plans only.")
 
         if payload.openai_api_key is not None:
             cfg.setdefault("openai", {})["api_key"] = payload.openai_api_key.strip()
@@ -10121,6 +11079,12 @@ def create_app() -> FastAPI:
         if payload.google_sheets_webhook_url is not None:
             cfg["google_sheets_webhook_url"] = payload.google_sheets_webhook_url.strip()
 
+        if payload.developer_webhook_url is not None:
+            cfg["developer_webhook_url"] = payload.developer_webhook_url.strip()
+
+        if payload.developer_score_drop_threshold is not None:
+            cfg["developer_score_drop_threshold"] = max(0.0, min(10.0, float(payload.developer_score_drop_threshold)))
+
         if payload.auto_weekly_report_email is not None:
             cfg["auto_weekly_report_email"] = bool(payload.auto_weekly_report_email)
 
@@ -10154,11 +11118,17 @@ def create_app() -> FastAPI:
         with DEFAULT_CONFIG_PATH.open("w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
 
+        _invalidate_api_cache("config")
+
         return {"status": "saved", **load_config_health(DEFAULT_CONFIG_PATH)}
 
     @app.post("/api/config/test-smtp")
     def test_smtp_connection(payload: SMTPTestRequest, request: Request) -> dict:
         session_token = require_authenticated_session(request)
+        billing = load_user_billing_context(session_token, allow_stripe_recovery=False)
+        plan_key = _normalize_plan_key((billing or {}).get("plan_key"), fallback=DEFAULT_PLAN_KEY)
+        if plan_key == "free":
+            raise HTTPException(status_code=403, detail="SMTP testing is available on paid plans only.")
         try:
             with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -10252,6 +11222,101 @@ def create_app() -> FastAPI:
                 "Expires": "0",
             },
         )
+
+    @app.post("/api/webhooks/incoming-email")
+    def incoming_email_webhook(payload: IncomingEmailWebhookRequest, request: Request) -> dict:
+        ensure_system_tables(DEFAULT_DB_PATH)
+        cfg: dict[str, Any] = {}
+        try:
+            with DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                cfg = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            cfg = {}
+
+        expected_secret = str(
+            os.environ.get("SNIPED_INBOUND_WEBHOOK_SECRET")
+            or cfg.get("inbound_email_webhook_secret", "")
+            or ""
+        ).strip()
+        if not expected_secret:
+            raise HTTPException(status_code=503, detail="Inbound webhook secret is not configured.")
+
+        provided_secret = str(
+            request.headers.get("x-sniped-webhook-secret")
+            or request.headers.get("x-webhook-secret")
+            or ""
+        ).strip()
+        if not provided_secret or not hmac.compare_digest(provided_secret, expected_secret):
+            raise HTTPException(status_code=401, detail="Invalid webhook secret.")
+
+        event_type = _normalize_campaign_event_type(payload.event_type)
+        if event_type != "reply":
+            return {"status": "ignored", "reason": f"unsupported_event:{event_type}"}
+
+        lead_row: Optional[pgdb.Row] = None
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            if payload.lead_id is not None:
+                lead_row = conn.execute(
+                    "SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id FROM leads WHERE id = ? LIMIT 1",
+                    (int(payload.lead_id),),
+                ).fetchone()
+
+            if lead_row is None and str(payload.thread_token or "").strip():
+                lead_row = conn.execute(
+                    """
+                    SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id
+                    FROM leads
+                    WHERE open_tracking_token = ?
+                    LIMIT 1
+                    """,
+                    (str(payload.thread_token or "").strip(),),
+                ).fetchone()
+
+            if lead_row is None and str(payload.email or "").strip():
+                lead_row = conn.execute(
+                    """
+                    SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id
+                    FROM leads
+                    WHERE LOWER(COALESCE(email, '')) = ?
+                    ORDER BY datetime(COALESCE(last_contacted_at, sent_at, created_at)) DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (str(payload.email or "").strip().lower(),),
+                ).fetchone()
+
+        if lead_row is None:
+            raise HTTPException(status_code=404, detail="No matching lead for inbound reply.")
+
+        metadata = dict(payload.metadata or {})
+        metadata.setdefault("source", "incoming_email_webhook")
+        if payload.thread_token:
+            metadata.setdefault("thread_token", str(payload.thread_token).strip())
+        if payload.from_email:
+            metadata.setdefault("from_email", str(payload.from_email).strip())
+
+        event = record_mailer_campaign_event(
+            DEFAULT_DB_PATH,
+            user_id=str(lead_row["user_id"] or "legacy"),
+            payload={
+                "lead_id": int(lead_row["id"]),
+                "email": str(payload.email or lead_row["email"] or "").strip(),
+                "event_type": "reply",
+                "subject_line": str(payload.subject_line or "").strip() or None,
+                "reason": str(payload.reason or "").strip() or None,
+                "metadata": metadata,
+            },
+        )
+        maybe_sync_supabase(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH)
+        _invalidate_leads_cache()
+
+        return {
+            "status": "recorded",
+            "lead_id": int(lead_row["id"]),
+            "pipeline_stage": "Replied",
+            "event": event,
+        }
 
     @app.get("/api/supabase-health")
     def supabase_health() -> dict:
@@ -10585,8 +11650,7 @@ def create_app() -> FastAPI:
     def add_revenue(payload: RevenueEntryRequest, request: Request) -> dict:
         user_id = require_current_user_id(request)
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            # Prefer service-role client for server-side reads to avoid RLS visibility mismatches.
-            client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
 
@@ -10639,12 +11703,120 @@ def create_app() -> FastAPI:
             "is_recurring": payload.is_recurring,
         }
 
+    @app.post("/api/revenue/won-deal")
+    @auth_required
+    def add_won_deal_revenue(payload: WonDealRevenueRequest, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        currency = str(payload.currency or "EUR").upper().strip() or "EUR"
+        note = str(payload.note or "").strip()
+        now_iso = utc_now_iso()
+
+        lead_name: Optional[str] = None
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
+            if client is None:
+                raise HTTPException(status_code=500, detail="Supabase not configured")
+            lead_rows = client.table("leads").select("id,user_id,business_name").eq("id", int(payload.lead_id)).limit(1).execute().data or []
+            if not lead_rows:
+                raise HTTPException(status_code=404, detail="Lead not found")
+            if str(lead_rows[0].get("user_id") or "") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            lead_name = str(lead_rows[0].get("business_name") or "").strip() or None
+
+            if supabase_table_available(DEFAULT_CONFIG_PATH, "revenue_logs"):
+                client.table("revenue_logs").insert(
+                    {
+                        "user_id": user_id,
+                        "lead_id": int(payload.lead_id),
+                        "amount": float(payload.amount),
+                        "currency": currency,
+                        "event_type": "won_stage_manual",
+                        "note": note or None,
+                        "created_at": now_iso,
+                    }
+                ).execute()
+
+            inserted = client.table("revenue_log").insert(
+                {
+                    "user_id": user_id,
+                    "amount": float(payload.amount),
+                    "service_type": "Won Deal",
+                    "lead_name": lead_name,
+                    "lead_id": int(payload.lead_id),
+                    "is_recurring": 0,
+                    "date": now_iso,
+                }
+            ).execute().data or []
+
+            return {
+                "id": int(inserted[0].get("id")) if inserted else None,
+                "lead_id": int(payload.lead_id),
+                "lead_name": lead_name,
+                "amount": float(payload.amount),
+                "currency": currency,
+                "event_type": "won_stage_manual",
+            }
+
+        db_path = DEFAULT_DB_PATH
+        ensure_revenue_log_table(db_path)
+        ensure_revenue_logs_table(db_path)
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            lead_row = conn.execute("SELECT id, user_id, business_name FROM leads WHERE id = ? LIMIT 1", (int(payload.lead_id),)).fetchone()
+            if lead_row is None:
+                raise HTTPException(status_code=404, detail="Lead not found")
+            if str(lead_row["user_id"] or "") != user_id:
+                raise HTTPException(status_code=403, detail="Forbidden")
+            lead_name = str(lead_row["business_name"] or "").strip() or None
+
+            conn.execute(
+                """
+                INSERT INTO revenue_logs (user_id, lead_id, amount, currency, event_type, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    int(payload.lead_id),
+                    float(payload.amount),
+                    currency,
+                    "won_stage_manual",
+                    note or None,
+                    now_iso,
+                ),
+            )
+            cursor = conn.execute(
+                """
+                INSERT INTO revenue_log (user_id, amount, service_type, lead_name, lead_id, is_recurring, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    float(payload.amount),
+                    "Won Deal",
+                    lead_name,
+                    int(payload.lead_id),
+                    0,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+
+        maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        return {
+            "id": cursor.lastrowid,
+            "lead_id": int(payload.lead_id),
+            "lead_name": lead_name,
+            "amount": float(payload.amount),
+            "currency": currency,
+            "event_type": "won_stage_manual",
+        }
+
     @app.get("/api/revenue")
     @auth_required
     def get_revenue(request: Request, limit: int = Query(10, ge=1, le=100)) -> dict:
         user_id = require_current_user_id(request)
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
             rows = supabase_select_rows(
@@ -10722,7 +11894,7 @@ def create_app() -> FastAPI:
         now_iso = utc_now_iso()
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
 
@@ -10779,21 +11951,20 @@ def create_app() -> FastAPI:
         debug_all: bool = Query(default=False),
     ) -> dict:
         user_id = require_current_user_id(request)
-        print(f"Fetching leads for user_id: {user_id}")
-        print(
-            "Incoming /api/leads filters:",
-            {
-                "status": status,
-                "search": search,
-                "sort": sort,
-                "quick_filter": quick_filter,
-                "include_blacklisted": include_blacklisted,
-                "debug_all": debug_all,
-                "limit": limit,
-                "page": page,
-            },
+        if debug_all:
+            logging.warning("[/api/leads] Ignoring client-provided debug_all for user_id=%s", user_id)
+        debug_all = False
+        logging.debug(
+            "[/api/leads] user_id=%s status=%s search=%s sort=%s quick_filter=%s include_blacklisted=%s page=%s limit=%s",
+            user_id,
+            status,
+            search,
+            sort,
+            quick_filter,
+            include_blacklisted,
+            page,
+            limit,
         )
-        logging.info("[/api/leads] request resolved user_id=%s debug_all=%s", user_id, bool(debug_all))
         page_size = max(1, min(int(limit or 50), 200))
         page_number = max(1, int(page or 1))
         offset = max(0, (page_number - 1) * page_size)
@@ -10812,6 +11983,19 @@ def create_app() -> FastAPI:
             # Ensure every value is JSON-serializable for FastAPI responses.
             return json.loads(json.dumps(raw_rows, default=str))
 
+        def _quick_filter_sql_clause(quick_filter_value: str) -> str:
+            if quick_filter_value == "qualified":
+                return "(COALESCE(ai_score, 0) >= 7 OR LOWER(COALESCE(status, '')) IN ('queued_mail','emailed','interested','replied','meeting set','zoom scheduled','closed','paid','qualified_not_interested','qualified not interested'))"
+            if quick_filter_value == "not_qualified":
+                return "(COALESCE(ai_score, 0) < 7 AND LOWER(COALESCE(status, '')) NOT IN ('queued_mail','emailed','interested','replied','meeting set','zoom scheduled','closed','paid','qualified_not_interested','qualified not interested'))"
+            if quick_filter_value == "mailed":
+                return "(sent_at IS NOT NULL OR last_contacted_at IS NOT NULL OR NULLIF(last_sender_email, '') IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('emailed','interested','replied','meeting set','zoom scheduled','closed','paid'))"
+            if quick_filter_value == "opened":
+                return "(COALESCE(open_count, 0) > 0 OR first_opened_at IS NOT NULL OR last_opened_at IS NOT NULL)"
+            if quick_filter_value == "replied":
+                return "(reply_detected_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('replied','interested','meeting set','zoom scheduled','closed','paid','qualified_not_interested','qualified not interested'))"
+            return ""
+
         def _post_process_rows(raw_rows: list[dict]) -> list[dict]:
             normalized_rows: list[dict] = []
             for raw in raw_rows:
@@ -10820,295 +12004,152 @@ def create_app() -> FastAPI:
                 item.setdefault("enrichment_status", "pending")
                 normalized_rows.append(_augment_lead_with_deep_intelligence(item))
 
-            if normalized_status:
-                normalized_rows = [
-                    row for row in normalized_rows
-                    if str(row.get("status") or "pending").strip().lower() == normalized_status
-                ]
+            lead_ids = [int(row.get("id")) for row in normalized_rows if str(row.get("id") or "").isdigit()]
+            if not lead_ids:
+                return normalized_rows
 
-            if not include_blacklisted:
-                normalized_rows = [row for row in normalized_rows if not _lead_is_blacklisted_status(row.get("status"))]
+            placeholders = ",".join(["?"] * len(lead_ids))
+            history_map: dict[int, list[float]] = {int(lead_id): [] for lead_id in lead_ids}
+            try:
+                with pgdb.connect(DEFAULT_DB_PATH) as trend_conn:
+                    trend_conn.row_factory = pgdb.Row
+                    trend_rows = trend_conn.execute(
+                        f"""
+                        SELECT lead_id, seo_score, performance_score
+                        FROM lead_history
+                        WHERE user_id = ? AND lead_id IN ({placeholders})
+                        ORDER BY captured_at ASC, id ASC
+                        """,
+                        [str(user_id or "legacy"), *lead_ids],
+                    ).fetchall()
+                for row in trend_rows:
+                    lead_id = int(row["lead_id"])
+                    if lead_id not in history_map:
+                        continue
+                    seo_val = _to_float_or_none(row["seo_score"])
+                    perf_val = _to_float_or_none(row["performance_score"])
+                    if seo_val is None and perf_val is None:
+                        continue
+                    if seo_val is not None and perf_val is not None:
+                        history_map[lead_id].append(round((seo_val + perf_val) / 2.0, 1))
+                    else:
+                        history_map[lead_id].append(round(float(seo_val if seo_val is not None else perf_val), 1))
+            except Exception:
+                history_map = {int(lead_id): [] for lead_id in lead_ids}
 
-            if normalized_search:
-                normalized_rows = [
-                    row
-                    for row in normalized_rows
-                    if normalized_search in " ".join(
-                        [
-                            str(row.get("business_name") or ""),
-                            str(row.get("contact_name") or ""),
-                            str(row.get("email") or ""),
-                            str(row.get("website_url") or ""),
-                            str(row.get("address") or ""),
-                            str(row.get("search_keyword") or ""),
-                            " ".join(_lead_normalize_string_list(row.get("tech_stack"), limit=5)),
-                        ]
-                    ).lower()
-                ]
+            active_share_ids: set[int] = set()
+            try:
+                with pgdb.connect(DEFAULT_DB_PATH) as share_conn:
+                    share_conn.row_factory = pgdb.Row
+                    share_rows = share_conn.execute(
+                        f"""
+                        SELECT lead_id
+                        FROM lead_reports
+                        WHERE user_id = ? AND active = 1 AND lead_id IN ({placeholders})
+                        GROUP BY lead_id
+                        """,
+                        [str(user_id or "legacy"), *lead_ids],
+                    ).fetchall()
+                active_share_ids = {int(row["lead_id"]) for row in share_rows}
+            except Exception:
+                active_share_ids = set()
 
-            if normalized_quick_filter not in {"", "all"}:
-                normalized_rows = [row for row in normalized_rows if _lead_matches_quick_filter(row, normalized_quick_filter)]
+            for item in normalized_rows:
+                lead_id = int(item.get("id") or 0)
+                seo_score, performance_score = _extract_scores_from_lead_payload(item)
+                item["seo_score"] = seo_score
+                item["performance_score"] = performance_score
+                current_point = None
+                if seo_score is not None and performance_score is not None:
+                    current_point = round((float(seo_score) + float(performance_score)) / 2.0, 1)
+                elif seo_score is not None:
+                    current_point = float(seo_score)
+                elif performance_score is not None:
+                    current_point = float(performance_score)
 
-            normalized_rows.sort(
-                key=lambda row: _lead_dashboard_sort_key(row, normalized_sort),
-                reverse=normalized_sort != "name",
-            )
+                points = list(history_map.get(lead_id) or [])
+                if current_point is not None:
+                    points.append(round(current_point, 1))
+                trend_points = _build_score_trend_points(points, limit=LEAD_TREND_POINTS_LIMIT)
+                trend_direction, trend_delta = _resolve_trend_direction(trend_points)
+                item["score_trend_points"] = trend_points
+                item["score_trend_direction"] = trend_direction
+                item["score_trend_delta"] = trend_delta
+                item["has_active_report_share"] = lead_id in active_share_ids
             return normalized_rows
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
-            if client is None:
-                raise HTTPException(status_code=500, detail="Supabase not configured")
-
+            # SQL-only path: filtering, sorting, and pagination are performed by PostgreSQL.
             try:
-                all_rows_probe = supabase_select_rows(client, "leads", columns="id", limit=1)
-                all_count_probe = len(
-                    supabase_select_rows(
-                        client,
-                        "leads",
-                        columns="id",
-                    )
-                )
-                print(
-                    f"Total leads in Supabase (no user_id filter): {all_count_probe}"
-                    + ("" if all_rows_probe else " (probe returned empty)")
-                )
-            except Exception as supabase_total_exc:
-                print(f"Could not fetch total leads in Supabase without user_id filter: {supabase_total_exc}")
+                engine = pg_get_engine(str(DEFAULT_DB_PATH))
+                where_clauses = ["CAST(user_id AS TEXT) = :uid"]
+                sql_params: dict[str, Any] = {"uid": str(user_id), "limit": page_size, "offset": offset}
 
-            supabase_columns = (
-                "id,business_name,contact_name,email,website_url,maps_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,twitter_url,youtube_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,enrichment_status,scraped_at,enriched_at,"
-                "sent_at,last_contacted_at,follow_up_count,generated_email_body,crm_comment,status_updated_at,last_sender_email,"
-                "is_ads_client,is_website_client,worker_id,assigned_worker_at,paid_at,enrichment_data,pipeline_stage,client_folder_id,"
-                "open_tracking_token,open_count,first_opened_at,last_opened_at,"
-                "phone_formatted,phone_type,created_at"
-            )
-            legacy_columns = (
-                "id,business_name,contact_name,email,website_url,phone_number,rating,review_count,address,"
-                "search_keyword,google_claimed,linkedin_url,instagram_url,facebook_url,tiktok_url,twitter_url,youtube_url,ig_link,fb_link,has_pixel,tech_stack,insecure_site,main_shortcoming,ai_description,ai_score,qualification_score,client_tier,status,scraped_at,enriched_at,"
-                "sent_at,last_contacted_at,follow_up_count,crm_comment,status_updated_at,last_sender_email,enrichment_data,pipeline_stage,client_folder_id,"
-                "worker_id,assigned_worker_at,paid_at"
-            )
-            primary_filters = None if debug_all else ({"user_id": int(user_id)} if str(user_id).isdigit() else {"user_id": str(user_id)})
-            fallback_filters = None if debug_all else ({"user_id": str(user_id)} if str(user_id).isdigit() else None)
-            try:
-                rows = supabase_select_rows(
-                    client,
-                    "leads",
-                    columns=supabase_columns,
-                    filters=primary_filters,
-                    order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
-                    desc=normalized_sort != "name",
-                )
-                if not rows and fallback_filters is not None:
-                    # Numeric user_id filters can silently return empty when the column is text.
-                    rows = supabase_select_rows(
-                        client,
-                        "leads",
-                        columns=supabase_columns,
-                        filters=fallback_filters,
-                        order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
-                        desc=normalized_sort != "name",
+                if normalized_status:
+                    where_clauses.append("LOWER(COALESCE(status, 'pending')) = :status")
+                    sql_params["status"] = normalized_status
+
+                if not include_blacklisted:
+                    where_clauses.append("LOWER(COALESCE(status, 'pending')) NOT IN ('blacklisted', 'skipped (unsubscribed)')")
+
+                if normalized_search:
+                    where_clauses.append(
+                        "(" 
+                        "LOWER(COALESCE(business_name, '')) LIKE :search OR "
+                        "LOWER(COALESCE(contact_name, '')) LIKE :search OR "
+                        "LOWER(COALESCE(email, '')) LIKE :search OR "
+                        "LOWER(COALESCE(website_url, '')) LIKE :search OR "
+                        "LOWER(COALESCE(address, '')) LIKE :search OR "
+                        "LOWER(COALESCE(search_keyword, '')) LIKE :search OR "
+                        "LOWER(COALESCE(CAST(tech_stack AS TEXT), '')) LIKE :search"
+                        ")"
                     )
-            except Exception as exc:
-                if fallback_filters is not None:
-                    try:
-                        rows = supabase_select_rows(
-                            client,
-                            "leads",
-                            columns=supabase_columns,
-                            filters=fallback_filters,
-                            order_by="created_at" if normalized_sort in {"recent", "best"} else ("business_name" if normalized_sort == "name" else "ai_score"),
-                            desc=normalized_sort != "name",
-                        )
-                    except Exception as exc_retry:
-                        logging.warning("Supabase leads query failed for both user_id filter types; fallback to legacy columns: %s", exc_retry)
-                        rows = None
+                    sql_params["search"] = f"%{normalized_search}%"
+
+                if normalized_quick_filter not in {"", "all"}:
+                    quick_clause = _quick_filter_sql_clause(normalized_quick_filter)
+                    if quick_clause:
+                        where_clauses.append(quick_clause)
+
+                where_fragment = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+                if normalized_sort == "name":
+                    order_clause = "ORDER BY LOWER(COALESCE(business_name, '')) ASC, id DESC"
+                elif normalized_sort in {"score", "best"}:
+                    order_clause = "ORDER BY COALESCE(ai_score, 0) DESC, COALESCE(created_at, scraped_at) DESC, id DESC"
                 else:
-                    rows = None
+                    order_clause = "ORDER BY COALESCE(created_at, scraped_at) DESC, id DESC"
 
-                if rows is None:
-                    logging.warning("Supabase leads query fallback to legacy columns: %s", exc)
-                try:
-                    try:
-                        rows = supabase_select_rows(
-                            client,
-                            "leads",
-                            columns=legacy_columns,
-                            filters=primary_filters,
-                            order_by="id",
-                            desc=True,
-                        )
-                    except Exception:
-                        if fallback_filters is None:
-                            raise
-                        rows = supabase_select_rows(
-                            client,
-                            "leads",
-                            columns=legacy_columns,
-                            filters=fallback_filters,
-                            order_by="id",
-                            desc=True,
-                        )
-                except Exception as exc2:
-                    logging.warning("Supabase leads user_id filter failed; returning empty result instead of unfiltered query: %s", exc2)
-                    rows = []
-                for row in rows:
-                    row.setdefault("ai_description", None)
-                    row.setdefault("google_claimed", None)
-                    row.setdefault("linkedin_url", None)
-                    row.setdefault("instagram_url", None)
-                    row.setdefault("facebook_url", None)
-                    row.setdefault("tiktok_url", None)
-                    row.setdefault("twitter_url", None)
-                    row.setdefault("youtube_url", None)
-                    row.setdefault("maps_url", None)
-                    row.setdefault("ig_link", row.get("instagram_url"))
-                    row.setdefault("fb_link", row.get("facebook_url"))
-                    row.setdefault("has_pixel", 0)
-                    row.setdefault("tech_stack", None)
-                    row.setdefault("qualification_score", None)
-                    row.setdefault("enrichment_status", "pending")
-                    row.setdefault("generated_email_body", None)
-                    row.setdefault("is_ads_client", 0)
-                    row.setdefault("is_website_client", 0)
-                    row.setdefault("open_tracking_token", None)
-                    row.setdefault("open_count", 0)
-                    row.setdefault("first_opened_at", None)
-                    row.setdefault("last_opened_at", None)
-                    row.setdefault("phone_formatted", None)
-                    row.setdefault("phone_type", None)
-                    row.setdefault("created_at", row.get("scraped_at"))
+                count_sql = text(f"SELECT COUNT(*) AS c FROM leads{where_fragment}")
+                page_sql = text(f"SELECT * FROM leads{where_fragment} {order_clause} LIMIT :limit OFFSET :offset")
 
-            if not rows:
-                try:
-                    admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH)
-                    if admin_client is not None:
-                        admin_probe = supabase_select_rows(
-                            admin_client,
-                            "leads",
-                            columns="id",
-                            filters=primary_filters,
-                            limit=1,
-                        )
-                        if not admin_probe and fallback_filters is not None:
-                            admin_probe = supabase_select_rows(
-                                admin_client,
-                                "leads",
-                                columns="id",
-                                filters=fallback_filters,
-                                limit=1,
-                            )
-                        if admin_probe:
-                            logging.warning(
-                                "Supabase /api/leads visibility mismatch for user_id=%s: admin can see rows but API query returned none (possible RLS/key mismatch).",
-                                user_id,
-                            )
-                    else:
-                        settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
-                        if not bool(settings.get("has_service_role")):
-                            logging.warning(
-                                "Supabase /api/leads returned no rows and service-role key is not configured; RLS may block data visibility."
-                            )
-                except Exception as visibility_exc:
-                    logging.warning("Supabase /api/leads visibility probe failed: %s", visibility_exc)
+                with engine.connect() as conn:
+                    total = int(conn.execute(count_sql, sql_params).scalar() or 0)
+                    raw_rows = conn.execute(page_sql, sql_params).fetchall()
 
-            filtered_rows = _post_process_rows(rows)
-            total = len(filtered_rows)
-
-            if total == 0:
-                try:
-                    direct_engine = pg_get_engine(str(DEFAULT_DB_PATH))
-                    with direct_engine.connect() as conn:
-                        total_all = int(conn.execute(text("SELECT COUNT(*) FROM leads")).scalar() or 0)
-                        total_for_user = int(
-                            conn.execute(
-                                text("SELECT COUNT(*) FROM leads WHERE CAST(user_id AS TEXT) = :uid"),
-                                {"uid": str(user_id)},
-                            ).scalar()
-                            or 0
-                        )
-                        sample_user_rows = conn.execute(
-                            text(
-                                "SELECT CAST(user_id AS TEXT) AS uid, COUNT(*) AS c "
-                                "FROM leads GROUP BY CAST(user_id AS TEXT) ORDER BY c DESC LIMIT 5"
-                            )
-                        ).fetchall()
-                        sample_users = [dict(r._mapping) for r in sample_user_rows]
-
-                    logging.warning(
-                        "[/api/leads] Supabase returned 0 rows for user_id=%s (debug_all=%s). Direct DB counts: total_all=%s total_for_user=%s sample_users=%s",
-                        user_id,
-                        bool(debug_all),
-                        total_all,
-                        total_for_user,
-                        sample_users,
-                    )
-
-                    if total_for_user > 0 or (debug_all and total_all > 0):
-                        where_sql = ""
-                        params: dict[str, Any] = {"limit": page_size, "offset": offset}
-                        if not debug_all:
-                            where_sql = " WHERE CAST(user_id AS TEXT) = :uid"
-                            params["uid"] = str(user_id)
-
-                        if normalized_sort == "name":
-                            order_sql = "ORDER BY LOWER(COALESCE(business_name, '')) ASC, id DESC"
-                        elif normalized_sort in {"score", "best"}:
-                            order_sql = "ORDER BY COALESCE(ai_score, 0) DESC, created_at DESC, id DESC"
-                        else:
-                            order_sql = "ORDER BY created_at DESC, id DESC"
-
-                        with direct_engine.connect() as conn:
-                            direct_rows_raw = conn.execute(
-                                text(f"SELECT * FROM leads{where_sql} {order_sql} LIMIT :limit OFFSET :offset"),
-                                params,
-                            ).fetchall()
-
-                        direct_rows = _post_process_rows([dict(r._mapping) for r in direct_rows_raw])
-                        direct_page_items = _json_safe_rows(direct_rows)
-                        effective_total = total_for_user if not debug_all else total_all
-                        direct_result = {
-                            "count": len(direct_page_items),
-                            "total": effective_total,
-                            "page": page_number,
-                            "page_size": page_size,
-                            "has_more": offset + len(direct_page_items) < effective_total,
-                            "items": direct_page_items,
-                            "leads": direct_page_items,
-                            "source": "direct-db-fallback",
-                        }
-                        _set_cached_leads(cache_key, direct_result)
-                        print(f"Sending {len(direct_page_items)} leads to frontend for user {user_id} (debug_all={debug_all}) source=direct-db-fallback")
-                        return direct_result
-                except Exception as fallback_exc:
-                    logging.warning("[/api/leads] direct DB fallback diagnostics failed: %s", fallback_exc)
-
-            page_items = _json_safe_rows(filtered_rows[offset: offset + page_size])
-            print(f"Leads found for user_id {user_id}: total={total}, page_items={len(page_items)}")
-            print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
-            result = {
-                "count": len(page_items),
-                "total": total,
-                "page": page_number,
-                "page_size": page_size,
-                "has_more": offset + len(page_items) < total,
-                "items": page_items,
-                "leads": page_items,
-            }
-            _set_cached_leads(cache_key, result)
-            return result
+                page_items = _json_safe_rows(_post_process_rows([dict(r._mapping) for r in raw_rows]))
+                result = {
+                    "count": len(page_items),
+                    "total": total,
+                    "page": page_number,
+                    "page_size": page_size,
+                    "has_more": offset + len(page_items) < total,
+                    "items": page_items,
+                    "leads": page_items,
+                    "source": "sql-fastpath",
+                }
+                _set_cached_leads(cache_key, result)
+                return result
+            except Exception as sql_fast_exc:
+                if _is_db_capacity_error(sql_fast_exc):
+                    record_pool_saturation_event(sql_fast_exc)
+                    logging.warning("[/api/leads] DB connection pool is saturated; returning 503")
+                    raise HTTPException(status_code=503, detail="Database is temporarily busy. Please retry in a few seconds.")
+                logging.exception("[/api/leads] SQL-only Supabase query failed")
+                raise HTTPException(status_code=500, detail=f"Leads query failed: {sql_fast_exc}")
 
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
-
-        try:
-            with pgdb.connect(db_path) as conn:
-                total_all_local = int(conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0] or 0)
-            print(f"Total leads in local DB (no user_id filter): {total_all_local}")
-        except Exception as local_total_exc:
-            print(f"Could not fetch total leads in local DB without user_id filter: {local_total_exc}")
 
         select_clause = """
             SELECT
@@ -11136,6 +12177,8 @@ def create_app() -> FastAPI:
                 ai_description,
                 ai_score,
                 qualification_score,
+                seo_score,
+                performance_score,
                 client_tier,
                 status,
                 enrichment_status,
@@ -11185,10 +12228,16 @@ def create_app() -> FastAPI:
                 "LOWER(COALESCE(email, '')) LIKE ? OR "
                 "LOWER(COALESCE(website_url, '')) LIKE ? OR "
                 "LOWER(COALESCE(address, '')) LIKE ? OR "
-                "LOWER(COALESCE(search_keyword, '')) LIKE ?"
+                "LOWER(COALESCE(search_keyword, '')) LIKE ? OR "
+                "LOWER(COALESCE(tech_stack, '')) LIKE ?"
                 ")"
             )
-            params.extend([search_like] * 6)
+            params.extend([search_like] * 7)
+
+        if normalized_quick_filter not in {"", "all"}:
+            quick_clause = _quick_filter_sql_clause(normalized_quick_filter)
+            if quick_clause:
+                where_clauses.append(quick_clause)
 
         order_clause = "datetime(COALESCE(created_at, scraped_at)) DESC, id DESC"
         if normalized_sort == "name":
@@ -11207,8 +12256,6 @@ def create_app() -> FastAPI:
             rows = conn.execute(query, [*params, page_size, offset]).fetchall()
 
         page_items = _json_safe_rows(_post_process_rows([dict(row) for row in rows]))
-        print(f"Leads found for user_id {user_id}: total={total}, page_items={len(page_items)}")
-        print(f"Sending {len(page_items)} leads to frontend for user {user_id} (debug_all={debug_all})")
         result = {
             "count": len(page_items),
             "total": total,
@@ -11220,6 +12267,176 @@ def create_app() -> FastAPI:
         }
         _set_cached_leads(cache_key, result)
         return result
+
+    @app.get("/api/leads/{lead_id}/report", response_class=HTMLResponse)
+    def get_lead_gap_report(lead_id: int, request: Request) -> HTMLResponse:
+        user_id = require_current_user_id(request)
+        db_path = DEFAULT_DB_PATH
+        ensure_system_tables(db_path)
+
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                """
+                SELECT id, user_id, business_name, contact_name, website_url, insecure_site, main_shortcoming,
+                       enrichment_data, seo_score, performance_score
+                FROM leads
+                WHERE id = ?
+                """,
+                (lead_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = dict(row)
+        if str(lead.get("user_id") or "") != str(user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        seo_score, performance_score = _extract_scores_from_lead_payload(lead)
+        report_html = _build_gap_report_html(
+            lead=lead,
+            seo_score=seo_score,
+            performance_score=performance_score,
+            report_title=f"{lead.get('business_name') or 'Lead'} - Gap Report",
+        )
+        return HTMLResponse(
+            content=report_html,
+            status_code=200,
+            headers={"X-Robots-Tag": "noindex, nofollow, noarchive"},
+        )
+
+    @app.post("/api/leads/{lead_id}/report/share")
+    def generate_shareable_lead_report(lead_id: int, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        db_path = DEFAULT_DB_PATH
+        ensure_system_tables(db_path)
+
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                """
+                SELECT id, user_id, business_name, contact_name, website_url, insecure_site, main_shortcoming,
+                       enrichment_data, seo_score, performance_score
+                FROM leads
+                WHERE id = ?
+                """,
+                (lead_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Lead not found")
+
+        lead = dict(row)
+        if str(lead.get("user_id") or "") != str(user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        seo_score, performance_score = _extract_scores_from_lead_payload(lead)
+        report_html = _build_gap_report_html(
+            lead=lead,
+            seo_score=seo_score,
+            performance_score=performance_score,
+            report_title=f"{lead.get('business_name') or 'Lead'} - Shared Gap Report",
+        )
+        token = secrets.token_urlsafe(24)
+        created_at = utc_now_iso()
+
+        with pgdb.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO lead_reports (lead_id, user_id, token, report_html, created_at, active)
+                VALUES (?, ?, ?, ?, ?, 1)
+                """,
+                (int(lead_id), str(user_id), token, report_html, created_at),
+            )
+            conn.commit()
+
+        base = str(request.base_url).rstrip("/")
+        share_url = f"{base}/public/report/{token}"
+        return {
+            "status": "ok",
+            "lead_id": int(lead_id),
+            "token": token,
+            "share_url": share_url,
+            "created_at": created_at,
+        }
+
+    @app.delete("/api/leads/{lead_id}/report/share")
+    def revoke_shareable_lead_report(lead_id: int, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        db_path = DEFAULT_DB_PATH
+        ensure_system_tables(db_path)
+
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            lead_row = conn.execute(
+                """
+                SELECT id, user_id
+                FROM leads
+                WHERE id = ?
+                """,
+                (lead_id,),
+            ).fetchone()
+            if lead_row is None:
+                raise HTTPException(status_code=404, detail="Lead not found")
+            if str(lead_row["user_id"] or "") != str(user_id):
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+            active_row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM lead_reports
+                WHERE lead_id = ? AND user_id = ? AND active = 1
+                """,
+                (int(lead_id), str(user_id)),
+            ).fetchone()
+            active_before = int((active_row["total"] if active_row else 0) or 0)
+
+            conn.execute(
+                """
+                UPDATE lead_reports
+                SET active = 0
+                WHERE lead_id = ? AND user_id = ? AND active = 1
+                """,
+                (int(lead_id), str(user_id)),
+            )
+            conn.commit()
+
+        return {
+            "status": "ok",
+            "lead_id": int(lead_id),
+            "revoked": active_before,
+            "active": False,
+        }
+
+    @app.get("/public/report/{token}", response_class=HTMLResponse)
+    def public_lead_gap_report(token: str) -> HTMLResponse:
+        normalized_token = str(token or "").strip()
+        if not normalized_token:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        db_path = DEFAULT_DB_PATH
+        ensure_system_tables(db_path)
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                """
+                SELECT report_html, active
+                FROM lead_reports
+                WHERE token = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (normalized_token,),
+            ).fetchone()
+        if row is None or int(row["active"] or 0) != 1:
+            raise HTTPException(status_code=404, detail="Report not found")
+        content = str(row["report_html"] or "").strip()
+        if not content:
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        return HTMLResponse(
+            content=content,
+            status_code=200,
+            headers={"X-Robots-Tag": "noindex, nofollow, noarchive"},
+        )
 
     @app.post("/api/leads/ai-filter")
     def ai_filter_leads(payload: AILeadFilterRequest, request: Request) -> dict:
@@ -11335,6 +12552,56 @@ def create_app() -> FastAPI:
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
 
         return {"status": "created", "lead_id": lead_id, "blacklisted_synced": blacklisted_synced}
+
+    @app.post("/api/leads/bulk-delete")
+    def bulk_delete_leads(payload: BulkDeleteLeadsRequest, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        lead_ids = [int(x) for x in (payload.lead_ids or []) if int(x) > 0][:500]
+        if not lead_ids:
+            raise HTTPException(status_code=400, detail="No lead IDs provided.")
+
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
+            if client is None:
+                raise HTTPException(status_code=500, detail="Supabase not configured")
+            existing_rows = (
+                client.table("leads")
+                .select("id")
+                .eq("user_id", user_id)
+                .in_("id", lead_ids)
+                .limit(1000)
+                .execute()
+                .data
+                or []
+            )
+            allowed_ids = [int(row.get("id")) for row in existing_rows if row.get("id") is not None]
+            deleted = 0
+            if allowed_ids:
+                deleted_rows = (
+                    client.table("leads")
+                    .delete()
+                    .eq("user_id", user_id)
+                    .in_("id", allowed_ids)
+                    .execute()
+                    .data
+                    or []
+                )
+                deleted = len(deleted_rows)
+            _invalidate_leads_cache()
+            return {"status": "deleted", "deleted": int(deleted), "requested": len(lead_ids)}
+
+        db_path = DEFAULT_DB_PATH
+        ensure_system_tables(db_path)
+        placeholders = ", ".join(["?"] * len(lead_ids))
+        with pgdb.connect(db_path) as conn:
+            cursor = conn.execute(
+                f"DELETE FROM leads WHERE user_id = ? AND id IN ({placeholders})",
+                [user_id, *lead_ids],
+            )
+            conn.commit()
+        maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        _invalidate_leads_cache()
+        return {"status": "deleted", "deleted": int(cursor.rowcount or 0), "requested": len(lead_ids)}
 
     @app.post("/api/leads/repair-hardcoded-user")
     def repair_hardcoded_user_leads(request: Request) -> dict:
@@ -11488,13 +12755,16 @@ def create_app() -> FastAPI:
 
         if scored_count > 0:
             try:
-                ensure_users_table(DEFAULT_DB_PATH)
-                with pgdb.connect(DEFAULT_DB_PATH) as conn:
-                    conn.execute(
-                        "UPDATE users SET credits_balance = GREATEST(0, credits_balance - ?) WHERE token = ?",
-                        (scored_count, session_token),
-                    )
-                    conn.commit()
+                deduct_credits_on_success(
+                    user_id=str(require_current_user_id(request)),
+                    credits_to_deduct=scored_count,
+                    db_path=DEFAULT_DB_PATH,
+                    action_type="lead_scoring",
+                    metadata={
+                        "scored_count": int(scored_count),
+                        "shown_count": int(shown_count),
+                    },
+                )
             except Exception as exc:
                 logging.warning("Credit deduction failed for lead scoring: %s", exc)
 
@@ -11510,20 +12780,48 @@ def create_app() -> FastAPI:
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
+        normalized_email = str(email or "").strip().lower()
+        target_user_ids: set[str] = set()
+
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            add_blacklist_entry_supabase(
-                DEFAULT_CONFIG_PATH,
-                kind="email",
-                value=email,
-                reason="Unsubscribe link",
-            )
+            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            if client is not None and normalized_email:
+                rows = (
+                    client.table("leads")
+                    .select("user_id")
+                    .eq("email", normalized_email)
+                    .limit(1000)
+                    .execute()
+                    .data
+                    or []
+                )
+                target_user_ids = {str(row.get("user_id") or "").strip() for row in rows if str(row.get("user_id") or "").strip()}
         else:
-            add_blacklist_entry(
-                db_path,
-                kind="email",
-                value=email,
-                reason="Unsubscribe link",
-            )
+            with pgdb.connect(db_path) as conn:
+                rows = conn.execute("SELECT DISTINCT user_id FROM leads WHERE LOWER(COALESCE(email, '')) = ?", (normalized_email,)).fetchall()
+            target_user_ids = {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+        if not target_user_ids:
+            target_user_ids = {"legacy"}
+
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            for target_user_id in sorted(target_user_ids):
+                add_blacklist_entry_supabase(
+                    DEFAULT_CONFIG_PATH,
+                    user_id=target_user_id,
+                    kind="email",
+                    value=normalized_email,
+                    reason="Unsubscribe link",
+                )
+        else:
+            for target_user_id in sorted(target_user_ids):
+                add_blacklist_entry(
+                    db_path,
+                    user_id=target_user_id,
+                    kind="email",
+                    value=normalized_email,
+                    reason="Unsubscribe link",
+                )
 
         _invalidate_leads_cache()
         return HTMLResponse(
@@ -11542,15 +12840,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/blacklist")
     def get_blacklist_entries(request: Request) -> dict:
-        require_current_user_id(request)
+        user_id = require_current_user_id(request)
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
             items = (
                 client.table("lead_blacklist")
                 .select("id,kind,value,reason,created_at")
+                .eq("user_id", user_id)
                 .order("created_at", desc=True)
                 .limit(200)
                 .execute()
@@ -11564,7 +12863,8 @@ def create_app() -> FastAPI:
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             rows = conn.execute(
-                "SELECT id, kind, value, reason, created_at FROM lead_blacklist ORDER BY datetime(created_at) DESC, id DESC LIMIT 200"
+                "SELECT id, kind, value, reason, created_at FROM lead_blacklist WHERE user_id = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 200",
+                (user_id,),
             ).fetchall()
         return {
             "items": [dict(row) for row in rows],
@@ -11573,13 +12873,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/blacklist")
     def create_blacklist_entry(payload: BlacklistEntryRequest, request: Request) -> dict:
-        require_current_user_id(request)
+        user_id = require_current_user_id(request)
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
             return add_blacklist_entry_supabase(
                 DEFAULT_CONFIG_PATH,
+                user_id=user_id,
                 kind=payload.kind,
                 value=payload.value,
                 reason=payload.reason or "Manual blacklist",
@@ -11587,6 +12888,7 @@ def create_app() -> FastAPI:
 
         return add_blacklist_entry(
             db_path,
+            user_id=user_id,
             kind=payload.kind,
             value=payload.value,
             reason=payload.reason or "Manual blacklist",
@@ -11594,14 +12896,14 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/blacklist")
     def delete_blacklist_entry(request: Request, kind: str = Query(...), value: str = Query(...)) -> dict:
-        require_current_user_id(request)
+        user_id = require_current_user_id(request)
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            return remove_blacklist_entry_supabase(DEFAULT_CONFIG_PATH, kind=kind, value=value)
+            return remove_blacklist_entry_supabase(DEFAULT_CONFIG_PATH, user_id=user_id, kind=kind, value=value)
 
-        return remove_blacklist_entry(db_path, kind=kind, value=value)
+        return remove_blacklist_entry(db_path, user_id=user_id, kind=kind, value=value)
 
     @app.post("/api/leads/{lead_id}/blacklist")
     def blacklist_lead(lead_id: int, request: Request) -> dict:
@@ -11610,7 +12912,7 @@ def create_app() -> FastAPI:
         ensure_system_tables(db_path)
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
             rows = client.table("leads").select("id,user_id").eq("id", lead_id).limit(1).execute().data or []
@@ -11636,7 +12938,7 @@ def create_app() -> FastAPI:
         ensure_system_tables(db_path)
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
             rows = client.table("leads").select("id,user_id").eq("id", lead_id).limit(1).execute().data or []
@@ -11679,7 +12981,7 @@ def create_app() -> FastAPI:
                     raise HTTPException(status_code=403, detail="Forbidden")
                 return blacklist_lead_and_matches_supabase(lead_id, "Manual status blacklist", DEFAULT_CONFIG_PATH)
 
-            lead_rows = client.table("leads").select("id,user_id,paid_at,sent_at,last_contacted_at,reply_detected_at").eq("id", lead_id).limit(1).execute().data or []
+            lead_rows = client.table("leads").select("id,user_id,business_name,status,pipeline_stage,paid_at,sent_at,last_contacted_at,reply_detected_at").eq("id", lead_id).limit(1).execute().data or []
             if not lead_rows:
                 raise HTTPException(status_code=404, detail="Lead not found")
             if str(lead_rows[0].get("user_id") or "") != user_id:
@@ -11689,6 +12991,10 @@ def create_app() -> FastAPI:
             existing_sent_at = lead_rows[0].get("sent_at")
             existing_last_contacted_at = lead_rows[0].get("last_contacted_at")
             existing_reply_detected_at = lead_rows[0].get("reply_detected_at")
+            previous_stage = _derive_pipeline_stage(
+                status=str(lead_rows[0].get("status") or ""),
+                pipeline_stage=str(lead_rows[0].get("pipeline_stage") or ""),
+            )
             paid_at_value = now_iso if next_status_normalized == "paid" and not existing_paid_at else existing_paid_at
             sent_at_value = now_iso if pipeline_stage_value in {"Contacted", "Replied", "Won (Paid)"} and not existing_sent_at else existing_sent_at
             last_contacted_at_value = now_iso if pipeline_stage_value in {"Contacted", "Replied", "Won (Paid)"} else existing_last_contacted_at
@@ -11712,6 +13018,20 @@ def create_app() -> FastAPI:
             if next_status_normalized == "paid":
                 auto_assign_result = auto_assign_worker_to_paid_lead_supabase(lead_id, DEFAULT_CONFIG_PATH)
                 delivery_result = ensure_delivery_task_for_paid_lead_supabase(lead_id, DEFAULT_CONFIG_PATH)
+
+            if previous_stage != "Replied" and pipeline_stage_value == "Replied":
+                _dispatch_developer_webhook_event(
+                    event_type="lead.moved_to_replied",
+                    user_id=user_id,
+                    lead_id=int(lead_id),
+                    payload={
+                        "lead_id": int(lead_id),
+                        "business_name": str(lead_rows[0].get("business_name") or "").strip() or None,
+                        "old_stage": previous_stage,
+                        "new_stage": pipeline_stage_value,
+                        "new_status": next_status,
+                    },
+                )
 
             _invalidate_leads_cache()
             return {
@@ -11738,13 +13058,17 @@ def create_app() -> FastAPI:
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             owner_row = conn.execute(
-                "SELECT user_id, paid_at, sent_at, last_contacted_at, reply_detected_at FROM leads WHERE id = ?",
+                "SELECT user_id, business_name, status, pipeline_stage, paid_at, sent_at, last_contacted_at, reply_detected_at FROM leads WHERE id = ?",
                 (lead_id,),
             ).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
             if str(owner_row["user_id"] or "") != user_id:
                 raise HTTPException(status_code=403, detail="Forbidden")
+            previous_stage = _derive_pipeline_stage(
+                status=str(owner_row["status"] or ""),
+                pipeline_stage=str(owner_row["pipeline_stage"] or ""),
+            )
             paid_at_value = now_iso if next_status_normalized == "paid" and not owner_row["paid_at"] else owner_row["paid_at"]
             sent_at_value = now_iso if pipeline_stage_value in {"Contacted", "Replied", "Won (Paid)"} and not owner_row["sent_at"] else owner_row["sent_at"]
             last_contacted_at_value = now_iso if pipeline_stage_value in {"Contacted", "Replied", "Won (Paid)"} else owner_row["last_contacted_at"]
@@ -11787,6 +13111,20 @@ def create_app() -> FastAPI:
         if next_status_normalized == "paid":
             auto_assign_result = auto_assign_worker_to_paid_lead(db_path, lead_id)
             delivery_result = ensure_delivery_task_for_paid_lead(db_path, lead_id)
+
+        if previous_stage != "Replied" and pipeline_stage_value == "Replied":
+            _dispatch_developer_webhook_event(
+                event_type="lead.moved_to_replied",
+                user_id=user_id,
+                lead_id=int(lead_id),
+                payload={
+                    "lead_id": int(lead_id),
+                    "business_name": str(owner_row["business_name"] or "").strip() or None,
+                    "old_stage": previous_stage,
+                    "new_stage": pipeline_stage_value,
+                    "new_status": next_status,
+                },
+            )
 
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
         _invalidate_leads_cache()
@@ -12023,12 +13361,21 @@ def create_app() -> FastAPI:
     @app.get("/api/workers")
     def get_workers(request: Request) -> dict:
         user_id = require_current_user_id(request)
+        cache_key = str(user_id)
+        cached = _get_cached_api("workers", cache_key, _WORKERS_CACHE_TTL)
+        if cached is not None:
+            return cached
+
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
-            return get_workers_snapshot_supabase(DEFAULT_CONFIG_PATH, user_id=user_id)
+            result = get_workers_snapshot_supabase(DEFAULT_CONFIG_PATH, user_id=user_id)
+            _set_cached_api("workers", cache_key, result)
+            return result
 
         db_path = DEFAULT_DB_PATH
         ensure_system_tables(db_path)
-        return get_workers_snapshot(db_path, user_id=user_id)
+        result = get_workers_snapshot(db_path, user_id=user_id)
+        _set_cached_api("workers", cache_key, result)
+        return result
 
     @app.post("/api/workers")
     def create_worker(payload: WorkerCreateRequest, request: Request) -> dict:
@@ -12063,6 +13410,7 @@ def create_app() -> FastAPI:
                 message=f"Created worker '{payload.worker_name.strip()}' ({payload.role.strip().upper()}).",
                 actor="api",
             )
+            _invalidate_api_cache("workers", str(user_id))
             return {"status": "created", "worker_id": worker_id}
 
         db_path = DEFAULT_DB_PATH
@@ -12100,6 +13448,7 @@ def create_app() -> FastAPI:
             actor="api",
         )
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        _invalidate_api_cache("workers", str(user_id))
 
         return {"status": "created", "worker_id": worker_id}
 
@@ -12145,6 +13494,7 @@ def create_app() -> FastAPI:
                 message=f"Updated worker '{worker_name}' profile.",
                 actor="api",
             )
+            _invalidate_api_cache("workers", str(user_id))
             return {"status": "updated", "worker_id": worker_id}
 
         db_path = DEFAULT_DB_PATH
@@ -12188,6 +13538,7 @@ def create_app() -> FastAPI:
             actor="api",
         )
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        _invalidate_api_cache("workers", str(user_id))
         return {"status": "updated", "worker_id": worker_id}
 
     @app.delete("/api/workers/{worker_id}")
@@ -12217,6 +13568,8 @@ def create_app() -> FastAPI:
                 message=f"Deleted worker '{worker_name}'. Unassigned leads: {unassigned_leads}.",
                 actor="api",
             )
+            _invalidate_api_cache("workers", str(user_id))
+            _invalidate_leads_cache()
             return {"status": "deleted", "worker_id": worker_id, "unassigned_leads": unassigned_leads}
 
         db_path = DEFAULT_DB_PATH
@@ -12253,6 +13606,8 @@ def create_app() -> FastAPI:
 
         _ = delete_supabase_row("workers", worker_id, DEFAULT_CONFIG_PATH)
         maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+        _invalidate_api_cache("workers", str(user_id))
+        _invalidate_leads_cache()
 
         return {"status": "deleted", "worker_id": worker_id, "unassigned_leads": unassigned_leads}
 
@@ -12757,6 +14112,101 @@ def create_app() -> FastAPI:
             ).fetchall()
         return {"items": [dict(r) for r in rows]}
 
+    @app.get("/api/scrape")
+    @auth_required
+    def list_scrape_jobs(
+        request: Request,
+        limit: int = Query(20, ge=1, le=200),
+        page: int = Query(1, ge=1),
+        status: Optional[str] = Query(default=None),
+        sort: str = Query("recent"),
+    ) -> dict:
+        user_id = require_current_user_id(request)
+        page_size = max(1, min(int(limit or 20), 200))
+        page_number = max(1, int(page or 1))
+        offset = max(0, (page_number - 1) * page_size)
+        normalized_status = str(status or "").strip().lower()
+        normalized_sort = str(sort or "recent").strip().lower() or "recent"
+
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            try:
+                engine = pg_get_engine(str(DEFAULT_DB_PATH))
+                where_clauses = ["CAST(user_id AS TEXT) = :uid", "LOWER(COALESCE(type, '')) = 'scrape'"]
+                sql_params: dict[str, Any] = {"uid": str(user_id), "limit": page_size, "offset": offset}
+
+                if normalized_status:
+                    where_clauses.append("LOWER(COALESCE(status, 'queued')) = :status")
+                    sql_params["status"] = normalized_status
+
+                where_fragment = f" WHERE {' AND '.join(where_clauses)}"
+                order_clause = "ORDER BY COALESCE(created_at, updated_at) DESC, id DESC"
+                if normalized_sort == "oldest":
+                    order_clause = "ORDER BY COALESCE(created_at, updated_at) ASC, id ASC"
+                elif normalized_sort == "status":
+                    order_clause = "ORDER BY LOWER(COALESCE(status, 'queued')) ASC, COALESCE(created_at, updated_at) DESC, id DESC"
+
+                count_sql = text(f"SELECT COUNT(*) AS c FROM jobs{where_fragment}")
+                page_sql = text(
+                    "SELECT id,user_id,type,status,error,created_at,started_at,completed_at,updated_at "
+                    f"FROM jobs{where_fragment} {order_clause} LIMIT :limit OFFSET :offset"
+                )
+                with engine.connect() as conn:
+                    total = int(conn.execute(count_sql, sql_params).scalar() or 0)
+                    rows = conn.execute(page_sql, sql_params).fetchall()
+
+                items = [dict(r._mapping) for r in rows]
+                return {
+                    "count": len(items),
+                    "total": total,
+                    "page": page_number,
+                    "page_size": page_size,
+                    "has_more": offset + len(items) < total,
+                    "items": items,
+                }
+            except Exception as scrape_jobs_exc:
+                if _is_db_capacity_error(scrape_jobs_exc):
+                    record_pool_saturation_event(scrape_jobs_exc)
+                    logging.warning("[/api/scrape] DB connection pool is saturated; returning 503")
+                    raise HTTPException(status_code=503, detail="Database is temporarily busy. Please retry in a few seconds.")
+                raise
+
+        db_path = DEFAULT_DB_PATH
+        ensure_jobs_queue_table(db_path)
+        where_clauses = ["user_id = ?", "LOWER(COALESCE(type,'')) = 'scrape'"]
+        params: list[Any] = [user_id]
+
+        if normalized_status:
+            where_clauses.append("LOWER(COALESCE(status, 'queued')) = ?")
+            params.append(normalized_status)
+
+        order_clause = "datetime(COALESCE(created_at, updated_at)) DESC, id DESC"
+        if normalized_sort == "oldest":
+            order_clause = "datetime(COALESCE(created_at, updated_at)) ASC, id ASC"
+        elif normalized_sort == "status":
+            order_clause = "LOWER(COALESCE(status, 'queued')) ASC, datetime(COALESCE(created_at, updated_at)) DESC, id DESC"
+
+        where_fragment = f" WHERE {' AND '.join(where_clauses)}"
+        count_query = f"SELECT COUNT(*) FROM jobs{where_fragment}"
+        query = (
+            "SELECT id,user_id,type,status,error,created_at,started_at,completed_at,updated_at "
+            f"FROM jobs{where_fragment} ORDER BY {order_clause} LIMIT ? OFFSET ?"
+        )
+
+        with pgdb.connect(db_path) as conn:
+            conn.row_factory = pgdb.Row
+            total = int(conn.execute(count_query, params).fetchone()[0] or 0)
+            rows = conn.execute(query, [*params, page_size, offset]).fetchall()
+
+        items = [dict(r) for r in rows]
+        return {
+            "count": len(items),
+            "total": total,
+            "page": page_number,
+            "page_size": page_size,
+            "has_more": offset + len(items) < total,
+            "items": items,
+        }
+
     @app.post("/api/scrape")
     def run_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks, request: Request) -> dict:
         logging.info("[scrape] POST /api/scrape | keyword=%r results=%s", payload.keyword, payload.results)
@@ -12783,8 +14233,17 @@ def create_app() -> FastAPI:
 
         payload_data = payload.model_dump()
         requested_results = max(1, int(payload.results or 25))
+        required_scrape_credits = requested_results * SCRAPE_CREDIT_COST_PER_LEAD
+        if available_credits < required_scrape_credits:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Insufficient credits for scrape. Required: {required_scrape_credits}, "
+                    f"available: {available_credits}."
+                ),
+            )
         payload_data["country"] = normalize_country_value(payload.country, payload.country_code)
-        payload_data["results"] = min(requested_results, available_credits)
+        payload_data["results"] = requested_results
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))
         logging.info(
             "[scrape] enqueueing task | user_id=%s keyword=%r results=%s headless=%s country=%s",
@@ -12941,8 +14400,12 @@ def create_app() -> FastAPI:
         if not token:
             return False
 
+        jwt_user_id = resolve_supabase_auth_user_id(token, DEFAULT_CONFIG_PATH)
+        if jwt_user_id:
+            return True
+
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
-            sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            sb_client = get_supabase_client_for_token(DEFAULT_CONFIG_PATH, token)
             if sb_client is None:
                 return False
             try:
@@ -12969,8 +14432,12 @@ def create_app() -> FastAPI:
         if not token:
             raise HTTPException(status_code=401, detail="Authentication required.")
 
+        jwt_user_id = resolve_supabase_auth_user_id(token, DEFAULT_CONFIG_PATH)
+        if jwt_user_id:
+            return jwt_user_id
+
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
-            sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            sb_client = get_supabase_client_for_token(DEFAULT_CONFIG_PATH, token)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
             try:
@@ -13856,9 +15323,22 @@ def create_app() -> FastAPI:
         payload_data["_plan_type"] = str(access.get("plan_type") or billing.get("plan_key") or DEFAULT_PLAN_KEY)
         requested_limit = int(payload_data.get("limit") or 50)
         effective_limit = max(1, min(requested_limit, 200))
+        requested_lead_ids = payload_data.get("lead_ids") or []
+        if isinstance(requested_lead_ids, list) and requested_lead_ids:
+            effective_limit = min(effective_limit, len(requested_lead_ids))
+        required_enrich_credits = max(1, effective_limit) * ENRICH_CREDIT_COST_PER_LEAD
+        current_credits = max(0, int((billing or {}).get("credits_balance") or 0))
+        if current_credits < required_enrich_credits:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Insufficient credits for enrichment. Required: {required_enrich_credits}, "
+                    f"available: {current_credits}."
+                ),
+            )
         payload_data["limit"] = effective_limit
         payload_data["requested_limit"] = requested_limit
-        payload_data["_credits_per_success"] = 0
+        payload_data["_credits_per_success"] = ENRICH_CREDIT_COST_PER_LEAD
         raw_lead_ids = payload_data.get("lead_ids") or []
         if isinstance(raw_lead_ids, list):
             payload_data["lead_ids"] = [int(x) for x in raw_lead_ids if str(x).strip().isdigit()][:500]
@@ -13934,14 +15414,28 @@ def create_app() -> FastAPI:
         if available_credits <= 0:
             raise HTTPException(status_code=403, detail="Out of credits. Please upgrade.")
 
-        ensure_user_mailer_smtp_ready(session_token=session_token, user_id=user_id, db_path=db_path)
-
         payload_data = payload.model_dump()
         requested_limit = max(1, int(payload_data.get("limit") or 10))
-        payload_data["limit"] = min(requested_limit, available_credits)
+        smtp_resolution = resolve_mailer_smtp_accounts_for_send(
+            session_token=session_token,
+            user_id=user_id,
+            billing=billing,
+            requested_limit=requested_limit,
+            db_path=db_path,
+        )
+        payload_data["limit"] = min(
+            requested_limit,
+            available_credits,
+            int(smtp_resolution.get("effective_limit") or requested_limit),
+        )
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))
         payload_data["_ai_model"] = str(access.get("ai_model") or DEFAULT_AI_MODEL)
         payload_data["_credit_capped"] = bool(payload_data["limit"] < requested_limit)
+        payload_data["_smtp_accounts_override"] = list(smtp_resolution.get("accounts") or [])
+        payload_data["_smtp_source"] = str(smtp_resolution.get("source") or "custom")
+        payload_data["_smtp_quota_limit"] = int(smtp_resolution.get("system_quota_limit") or SYSTEM_SMTP_DEFAULT_SEND_LIMIT)
+        payload_data["_smtp_quota_remaining_before"] = int(smtp_resolution.get("system_quota_remaining") or 0)
+        payload_data["_smtp_quota_capped"] = bool(int(smtp_resolution.get("effective_limit") or requested_limit) < requested_limit)
         # Auto-detect server base URL for open tracking pixel (used if not manually configured)
         payload_data["_auto_base_url"] = str(request.base_url).rstrip("/")
         return enqueue_task(app, background_tasks, db_path, user_id, "mailer", payload_data)
@@ -14880,6 +16374,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid or expired session token.")
         ensure_supabase_runtime("auth profile")
         billing = load_user_billing_context(token)
+        jwt_user_id = resolve_supabase_auth_user_id(token, DEFAULT_CONFIG_PATH)
 
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
             if not ensure_supabase_users_table(DEFAULT_CONFIG_PATH):
@@ -14887,7 +16382,7 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="Supabase users table is missing. Run supabase_schema.sql in Supabase SQL Editor.",
                 )
-            sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            sb_client = get_supabase_client_for_token(DEFAULT_CONFIG_PATH, token)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
             row_dict = None
@@ -14897,7 +16392,12 @@ def create_app() -> FastAPI:
                 "email,niche,display_name,contact_name,account_type",
             ]:
                 try:
-                    response = sb_client.table("users").select(attempt_cols).eq("token", token).limit(1).execute()
+                    query = sb_client.table("users").select(attempt_cols)
+                    if jwt_user_id:
+                        query = query.eq("auth_user_id", jwt_user_id)
+                    else:
+                        query = query.eq("token", token)
+                    response = query.limit(1).execute()
                     rows = list(getattr(response, "data", None) or [])
                     if not rows:
                         raise HTTPException(status_code=401, detail="Invalid or expired session token.")
@@ -15110,6 +16610,7 @@ def create_app() -> FastAPI:
         token = str(req.token or "").strip()
         if not token:
             raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+        jwt_user_id = resolve_supabase_auth_user_id(token, DEFAULT_CONFIG_PATH)
 
         new_password = (req.new_password or "").strip()
         current_password = req.current_password or ""
@@ -15150,22 +16651,32 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="Supabase users table is missing. Run supabase_schema.sql in Supabase SQL Editor.",
                 )
-            sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            sb_client = get_supabase_client_for_token(DEFAULT_CONFIG_PATH, token)
             if sb_client is None:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
 
             try:
-                response = sb_client.table("users").select(
+                query = sb_client.table("users").select(
                     "id,email,niche,display_name,contact_name,account_type,password_hash,salt,quickstart_completed,average_deal_value"
-                ).eq("token", token).limit(1).execute()
+                )
+                if jwt_user_id:
+                    query = query.eq("auth_user_id", jwt_user_id)
+                else:
+                    query = query.eq("token", token)
+                response = query.limit(1).execute()
             except Exception as exc:
                 if "does not exist" in str(exc):
                     # Retry with minimal columns if schema is incomplete
                     logging.warning(f"Supabase column mismatch on profile update lookup: {exc}, retrying with fewer columns")
                     try:
-                        response = sb_client.table("users").select(
+                        query = sb_client.table("users").select(
                             "id,email,niche,display_name,contact_name,account_type,password_hash,salt"
-                        ).eq("token", token).limit(1).execute()
+                        )
+                        if jwt_user_id:
+                            query = query.eq("auth_user_id", jwt_user_id)
+                        else:
+                            query = query.eq("token", token)
+                        response = query.limit(1).execute()
                         # Remove columns that don't exist from the updates dict too
                         updates.pop("quickstart_completed", None)
                         updates.pop("average_deal_value", None)

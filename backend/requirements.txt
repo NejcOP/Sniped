@@ -13,3 +13,5 @@ supabase>=2.0.0
 python-multipart>=0.0.9
 SQLAlchemy>=2.0.36
 psycopg2-binary>=2.9.9
+locust>=2.32.8
+python-dotenv>=1.0.1

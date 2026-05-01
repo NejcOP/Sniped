@@ -1,0 +1,181 @@
+Count,Message,Traceback,Nodes
+12493,Invalid URL '1000/api/leads': No scheme supplied. Perhaps you meant https://1000/api/leads?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 51, in leads
+    self.client.get(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local
+5116,Invalid URL '1000/api/workers': No scheme supplied. Perhaps you meant https://1000/api/workers?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 60, in workers
+    self.client.get(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local
+5046,Invalid URL '1000/api/health': No scheme supplied. Perhaps you meant https://1000/api/health?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 31, in health
+    self.client.get(""/api/health"", name=""GET /api/health"")
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local
+2497,Invalid URL '1000/api/jobs': No scheme supplied. Perhaps you meant https://1000/api/jobs?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 85, in jobs
+    self.client.get(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local
+2495,Invalid URL '1000/api/config': No scheme supplied. Perhaps you meant https://1000/api/config?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 68, in config
+    self.client.get(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local
+2473,Invalid URL '1000/api/scrape': No scheme supplied. Perhaps you meant https://1000/api/scrape?,"  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 363, in run
+    self.execute_next_task()
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 396, in execute_next_task
+    self.execute_task(self._task_queue.popleft())
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\user\task.py"", line 513, in execute_task
+    task(self.user)
+  File ""C:\Users\nejco\Desktop\Scraper\benchmarks\locustfile.py"", line 76, in scrape_list
+    self.client.get(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 268, in get
+    return self.request(""GET"", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 203, in request
+    response = self._send_request_safe_mode(method, complete_url, data=data, json=json, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 250, in _send_request_safe_mode
+    return super().request(method, url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 575, in request
+    prep = self.prepare_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\locust\clients.py"", line 258, in prepare_request
+    prep = super().prepare_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\sessions.py"", line 484, in prepare_request
+    p.prepare(
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 367, in prepare
+    self.prepare_url(url, params)
+  File ""C:\Users\nejco\Desktop\Scraper\.venv\Lib\site-packages\requests\models.py"", line 438, in prepare_url
+    raise MissingSchema(
+",local

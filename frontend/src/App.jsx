@@ -46,7 +46,7 @@ import {
   Users,
   Zap,
 } from 'lucide-react'
-import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core'
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion as Motion } from 'framer-motion'
@@ -61,13 +61,18 @@ import { useDebounce } from './hooks/useDebounce'
 import { invalidateLeadsCache } from './hooks/useLeadsCache'
 import { LeadCardSkeletonList, StatCardSkeletonList } from './components/SkeletonLoaders'
 import { ScrapeProgressBar, ScrapeProgressBadge } from './components/ScrapeProgressBar'
+import OnboardingWizard from './components/OnboardingWizard'
 
 const MRR_GOAL_EUR = 16000
 const SETUP_MILESTONE_EUR = 6500
 const DEFAULT_AVERAGE_DEAL_VALUE = 1000
 const LEADS_PAGE_SIZE = 50
+const SCRAPE_CREDIT_COST_PER_LEAD = 1
+const ENRICH_CREDIT_COST_PER_LEAD = 2
+const LOW_CREDITS_THRESHOLD = 20
+const ONBOARDING_COMPLETED_KEY = 'lf_onboarding_completed_v1'
+const ONBOARDING_DISMISSED_KEY = 'lf_onboarding_dismissed_v1'
 const BYPASS_LEAD_FILTERS = false
-const DEBUG_ALL_LEADS = true
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 
 const AI_QUICK_FILTERS = [
@@ -957,6 +962,50 @@ function normalizeLeadStatus(status) {
   return 'Pending'
 }
 
+const REQUEST_ABORT_REGISTRY = new Map()
+const RESPONSE_CACHE_REGISTRY = new Map()
+const ENDPOINT_CACHE_RULES = [
+  { prefix: '/api/config', ttlMs: 45000 },
+  { prefix: '/api/workers', ttlMs: 12000 },
+]
+
+function getEndpointCacheTtl(pathname) {
+  const normalized = String(pathname || '').toLowerCase()
+  const rule = ENDPOINT_CACHE_RULES.find((entry) => normalized.startsWith(entry.prefix))
+  return Number(rule?.ttlMs || 0)
+}
+
+function getAbortGroupForRequest(pathname, method, explicitAbortKey) {
+  if (explicitAbortKey) return String(explicitAbortKey)
+  if (String(method || '').toUpperCase() !== 'GET') return ''
+  const normalized = String(pathname || '').toLowerCase()
+  if (normalized.startsWith('/api/leads')) return 'leads-list'
+  if (normalized.startsWith('/api/workers')) return 'workers-list'
+  if (normalized.startsWith('/api/config')) return 'config-load'
+  if (normalized.startsWith('/api/scrape')) return 'scrape-list'
+  return ''
+}
+
+function invalidateResponseCacheByPrefix(pathPrefix) {
+  const normalizedPrefix = String(pathPrefix || '').toLowerCase()
+  if (!normalizedPrefix) return
+  for (const key of Array.from(RESPONSE_CACHE_REGISTRY.keys())) {
+    if (key.toLowerCase().includes(`:${normalizedPrefix}`)) {
+      RESPONSE_CACHE_REGISTRY.delete(key)
+    }
+  }
+}
+
+function abortRequestGroup(groupKey) {
+  const key = String(groupKey || '').trim()
+  if (!key) return
+  const controller = REQUEST_ABORT_REGISTRY.get(key)
+  if (controller) {
+    controller.abort()
+    REQUEST_ABORT_REGISTRY.delete(key)
+  }
+}
+
 async function fetchJson(path, options) {
   const apiBaseRaw = String(import.meta.env.VITE_API_BASE_URL || '').trim()
   const apiBase = apiBaseRaw ? apiBaseRaw.replace(/\/$/, '') : ''
@@ -978,6 +1027,12 @@ async function fetchJson(path, options) {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
   const method = String(options?.method || 'GET').toUpperCase()
+  const abortKey = String(options?.abortKey || '').trim()
+  const bypassCache = Boolean(options?.bypassCache)
+  const externalSignal = options?.signal
+  const requestOptions = { ...(options || {}) }
+  delete requestOptions.abortKey
+  delete requestOptions.bypassCache
   const isDynamicPollingEndpoint =
     method === 'GET' && (
       normalizedPath === '/api/tasks'
@@ -985,20 +1040,63 @@ async function fetchJson(path, options) {
       || normalizedPath === '/api/stats'
     )
 
-  const response = await fetch(requestUrl, {
-    ...(options || {}),
-    headers,
-    ...(isDynamicPollingEndpoint ? { cache: 'no-store' } : {}),
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const detail = typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`
-    const error = new Error(detail)
-    error.status = response.status
-    error.path = requestUrl
-    throw error
+  const pathnameOnly = normalizedPath.split('?')[0] || normalizedPath
+  const cacheTtlMs = !isDynamicPollingEndpoint && method === 'GET' && !bypassCache
+    ? getEndpointCacheTtl(pathnameOnly)
+    : 0
+  const responseCacheKey = `${method}:${normalizedPath}`
+  if (cacheTtlMs > 0) {
+    const cached = RESPONSE_CACHE_REGISTRY.get(responseCacheKey)
+    if (cached && (Date.now() - Number(cached.ts || 0)) < cacheTtlMs) {
+      return cached.data
+    }
   }
-  return data
+
+  const controller = new AbortController()
+  const abortGroup = getAbortGroupForRequest(pathnameOnly, method, abortKey)
+  if (abortGroup) {
+    abortRequestGroup(abortGroup)
+    REQUEST_ABORT_REGISTRY.set(abortGroup, controller)
+  }
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort()
+    } else {
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
+  }
+
+  try {
+    const response = await fetch(requestUrl, {
+      ...requestOptions,
+      headers,
+      signal: controller.signal,
+      ...(isDynamicPollingEndpoint ? { cache: 'no-store' } : {}),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : `Request failed (${response.status})`
+      const error = new Error(detail)
+      error.status = response.status
+      error.path = requestUrl
+      throw error
+    }
+
+    if (cacheTtlMs > 0) {
+      RESPONSE_CACHE_REGISTRY.set(responseCacheKey, { ts: Date.now(), data })
+    }
+
+    if (method !== 'GET') {
+      if (pathnameOnly.startsWith('/api/config')) invalidateResponseCacheByPrefix('/api/config')
+      if (pathnameOnly.startsWith('/api/workers')) invalidateResponseCacheByPrefix('/api/workers')
+      if (pathnameOnly.startsWith('/api/leads')) invalidateResponseCacheByPrefix('/api/leads')
+    }
+    return data
+  } finally {
+    if (abortGroup && REQUEST_ABORT_REGISTRY.get(abortGroup) === controller) {
+      REQUEST_ABORT_REGISTRY.delete(abortGroup)
+    }
+  }
 }
 
 function buildApiUrl(path) {
@@ -1238,6 +1336,65 @@ function pipelineStageBadgeClass(stage) {
   return 'border-slate-600/40 bg-slate-800/70 text-slate-300'
 }
 
+function PipelineDropColumn({ stage, children }) {
+  const { setNodeRef, isOver } = useDroppable({ id: stage })
+  return (
+    <section
+      ref={setNodeRef}
+      className={`min-h-[240px] rounded-2xl border p-3 transition ${isOver ? 'border-cyan-400/70 bg-cyan-500/10' : 'border-slate-700/50 bg-slate-900/70'}`}
+    >
+      {children}
+    </section>
+  )
+}
+
+function PipelineLeadCard({ lead, onOpenDetails, pendingStatusLeadId }) {
+  const draggableId = `pipeline-lead-${lead.id}`
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useDraggable({
+    id: draggableId,
+    data: { leadId: Number(lead.id) },
+  })
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+  }
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-xl border border-white/10 bg-slate-950/70 p-3 ${isDragging ? 'opacity-80 shadow-[0_16px_34px_rgba(6,182,212,0.22)]' : ''}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <button
+          type="button"
+          className="min-w-0 text-left"
+          onClick={() => onOpenDetails(lead)}
+        >
+          <p className="truncate text-sm font-semibold text-white">{lead.business_name || 'Unknown business'}</p>
+          <p className="truncate text-xs text-slate-400">{lead.email || lead.contact_name || 'No email yet'}</p>
+        </button>
+        <button
+          type="button"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-600/70 bg-slate-900/80 text-slate-300"
+          title="Drag to another stage"
+          {...listeners}
+          {...attributes}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-400">
+        <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 font-semibold text-cyan-200">
+          Score {formatLeadScoreValue(resolveBestLeadScore(lead))}/10
+        </span>
+        {pendingStatusLeadId === lead.id ? (
+          <span className="inline-flex items-center gap-1 text-cyan-300"><RefreshCw className="h-3 w-3 animate-spin" /> Saving</span>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
 function normalizeLeadScoreTen(rawScore) {
   const numeric = Number(rawScore || 0)
   if (!Number.isFinite(numeric) || numeric <= 0) return 0
@@ -1321,6 +1478,51 @@ function resolveLeadSignalScore(lead) {
     return normalizeLeadScoreTen(rawSignal)
   }
   return resolveBestLeadScore(lead)
+}
+
+function resolveLeadTrendPoints(lead) {
+  const raw = Array.isArray(lead?.score_trend_points) ? lead.score_trend_points : []
+  const points = raw
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  if (points.length >= 2) return points.slice(-8)
+
+  const fallback = Number(resolveBestLeadScore(lead) || 0)
+  if (fallback <= 0) return []
+  return [Math.max(0, fallback - 0.4), fallback]
+}
+
+function buildTrendSparklinePath(points, width = 54, height = 15) {
+  const safe = Array.isArray(points) ? points.filter((value) => Number.isFinite(Number(value))) : []
+  if (!safe.length) return ''
+  const numeric = safe.map((value) => Number(value))
+  const min = Math.min(...numeric)
+  const max = Math.max(...numeric)
+  const span = Math.max(0.01, max - min)
+  const step = numeric.length > 1 ? width / (numeric.length - 1) : width
+  return numeric
+    .map((value, index) => {
+      const x = (index * step).toFixed(2)
+      const y = (height - ((value - min) / span) * height).toFixed(2)
+      return `${index === 0 ? 'M' : 'L'}${x} ${y}`
+    })
+    .join(' ')
+}
+
+function resolveLeadTrendMeta(lead) {
+  const points = resolveLeadTrendPoints(lead)
+  const first = Number(points[0] || 0)
+  const last = Number(points[points.length - 1] || 0)
+  const fallbackDelta = Number((last - first).toFixed(1))
+  const rawDelta = Number(lead?.score_trend_delta)
+  const delta = Number.isFinite(rawDelta) ? rawDelta : fallbackDelta
+  const direction = String(lead?.score_trend_direction || '').toLowerCase()
+  if (direction === 'up' || direction === 'down' || direction === 'flat') {
+    return { points, delta, direction }
+  }
+  if (delta > 0.2) return { points, delta, direction: 'up' }
+  if (delta < -0.2) return { points, delta, direction: 'down' }
+  return { points, delta, direction: 'flat' }
 }
 
 function titleCaseLeadLabel(value) {
@@ -1849,14 +2051,19 @@ function App({ initialTab = 'leads' }) {
   const [showBlacklisted, setShowBlacklisted] = useState(false)
   const [loadingLeads, setLoadingLeads] = useState(false)
   const [leadServerTotal, setLeadServerTotal] = useState(0)
+  const leadReplyNotifySnapshotRef = useRef(new Map())
+  const leadReplyNotifyPrimedRef = useRef(false)
   const [lastLeadsApiPayload, setLastLeadsApiPayload] = useState(null)
   const [leadFilterPanelOpen, setLeadFilterPanelOpen] = useState(false)
-  const [aiFilterOpen, setAiFilterOpen] = useState(false)
+  const [leadsViewMode, setLeadsViewMode] = useState('table')
   const [aiFilterPrompt, setAiFilterPrompt] = useState('')
   const [aiFilterLoading, setAiFilterLoading] = useState(false)
   const [aiFilterLeadIds, setAiFilterLeadIds] = useState([])
+  const [selectedLeadIds, setSelectedLeadIds] = useState([])
+  const [shareReportStateByLeadId, setShareReportStateByLeadId] = useState({})
+  const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false)
+  const [onboardingLaunching, setOnboardingLaunching] = useState(false)
   const [aiFilterSummary, setAiFilterSummary] = useState('')
-  const [aiFilterPreview, setAiFilterPreview] = useState(null)
   const [advancedLeadFilters, setAdvancedLeadFilters] = useState({
     industries: [],
     revenueBands: [],
@@ -1890,9 +2097,6 @@ function App({ initialTab = 'leads' }) {
         include_blacklisted: showBlacklisted ? '1' : '0',
         _ts: String(Date.now()),
       })
-      if (DEBUG_ALL_LEADS) {
-        params.set('debug_all', '1')
-      }
       if (leadStatusFilter !== 'all') {
         params.set('status', leadStatusFilter)
       }
@@ -1920,16 +2124,11 @@ function App({ initialTab = 'leads' }) {
         maps_url: lead?.maps_url || '',
         phone_number: lead?.phone_number || lead?.phone || '',
       }))
-      console.log('[LeadManagement] /api/leads response', {
-        url: `/api/leads?${params.toString()}`,
-        total: Number(data?.total || data?.count || data?.total_count || items.length || 0),
-        itemsLength: items.length,
-        sample: items.slice(0, 3),
-      })
       setLastLeadsApiPayload(data)
       setLeads(items)
       setLeadServerTotal(Number(data?.total || data?.count || data?.total_count || items.length || 0))
     } catch (error) {
+      if (error?.name === 'AbortError') return
       console.error('[leads] fetch failed:', error)
     } finally {
       if (!silent) {
@@ -1937,6 +2136,58 @@ function App({ initialTab = 'leads' }) {
       }
     }
   }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, showBlacklisted])
+
+  useEffect(() => {
+    const nextSnapshot = new Map()
+    const newlyReplied = []
+    for (const lead of (Array.isArray(leads) ? leads : [])) {
+      const leadId = Number(lead?.id || 0)
+      if (!leadId) continue
+      const marker = hasReply(lead)
+        ? (String(lead?.reply_detected_at || '').trim() || 'replied')
+        : ''
+      const prevMarker = String(leadReplyNotifySnapshotRef.current.get(leadId) || '')
+      if (leadReplyNotifyPrimedRef.current && marker && !prevMarker) {
+        newlyReplied.push(lead)
+      }
+      nextSnapshot.set(leadId, marker)
+    }
+    leadReplyNotifySnapshotRef.current = nextSnapshot
+    if (!leadReplyNotifyPrimedRef.current) {
+      leadReplyNotifyPrimedRef.current = true
+      return
+    }
+    if (!newlyReplied.length) return
+
+    newlyReplied.slice(0, 3).forEach((lead) => {
+      const who = lead?.business_name || lead?.contact_name || lead?.email || `Lead #${lead?.id}`
+      toast.success(`Reply detected from ${who}`)
+    })
+
+    if (typeof window === 'undefined' || !('Notification' in window)) return
+    const firstLead = newlyReplied[0]
+    const title = 'New lead reply detected'
+    const body = `${firstLead?.business_name || firstLead?.contact_name || firstLead?.email || 'A lead'} moved to Replied.`
+    const showNativeNotification = () => {
+      try {
+        const n = new Notification(title, { body })
+        n.onclick = () => window.focus()
+      } catch {
+        // Ignore browser notification errors and keep toast fallback.
+      }
+    }
+    if (Notification.permission === 'granted') {
+      showNativeNotification()
+      return
+    }
+    if (Notification.permission === 'default') {
+      void Notification.requestPermission().then((permission) => {
+        if (permission === 'granted') {
+          showNativeNotification()
+        }
+      })
+    }
+  }, [leads])
   const [savingSegment, setSavingSegment] = useState(false)
   const [segmentNameDraft, setSegmentNameDraft] = useState('')
   const [deletingSegmentId, setDeletingSegmentId] = useState(null)
@@ -1970,6 +2221,8 @@ function App({ initialTab = 'leads' }) {
     proxy_urls: '',
     hubspot_webhook_url: '',
     google_sheets_webhook_url: '',
+    developer_webhook_url: '',
+    developer_score_drop_threshold: 6,
     auto_weekly_report_email: true,
     auto_monthly_report_email: true,
     mail_signature: '',
@@ -1983,6 +2236,7 @@ function App({ initialTab = 'leads' }) {
     speed_body_template: '',
   })
   const [configFormLoaded, setConfigFormLoaded] = useState(false)
+  const [configSettingsTab, setConfigSettingsTab] = useState('platform')
   const [savingConfig, setSavingConfig] = useState(false)
   const [showSmtpPasswords, setShowSmtpPasswords] = useState({})
   const [smtpTestResults, setSmtpTestResults] = useState({})
@@ -2819,24 +3073,6 @@ function App({ initialTab = 'leads' }) {
 
   const isAiFilterActive = aiFilterLeadIds.length > 0
 
-  const aiInterpretedPreviewRows = useMemo(() => {
-    const spec = aiFilterPreview?.interpreted_filters
-    if (!spec || typeof spec !== 'object') return []
-
-    const rows = []
-    if (spec.city) rows.push(`City: ${spec.city}`)
-    if (Array.isArray(spec.search_terms) && spec.search_terms.length) rows.push(`Keywords: ${spec.search_terms.join(', ')}`)
-    if (spec.min_score != null && String(spec.min_score).trim() !== '') rows.push(`Min score: ${Number(spec.min_score).toFixed(1)} / 10`)
-    if (spec.min_rating != null && String(spec.min_rating).trim() !== '') rows.push(`Rating >= ${Number(spec.min_rating).toFixed(1)}`)
-    if (spec.max_rating != null && String(spec.max_rating).trim() !== '') rows.push(`Rating <= ${Number(spec.max_rating).toFixed(1)}`)
-    if (spec.require_missing_pixel) rows.push('Missing Facebook Pixel')
-    if (spec.require_website_fix) rows.push('Website fix needed')
-    if (spec.require_seo_gap) rows.push('Weak SEO signals')
-    if (spec.require_social_gap) rows.push('At least one social profile missing')
-    if (spec.require_no_socials) rows.push('No social profiles at all')
-    return rows
-  }, [aiFilterPreview])
-
   const filteredLeads = useMemo(() => {
     let result = [...leads]
     if (!BYPASS_LEAD_FILTERS) {
@@ -2922,6 +3158,40 @@ function App({ initialTab = 'leads' }) {
     const start = leadPage * LEADS_PAGE_SIZE
     return filteredLeads.slice(start, start + LEADS_PAGE_SIZE)
   }, [filteredLeads, leadPage])
+
+  const kanbanColumns = useMemo(() => {
+    const buckets = {
+      Scraped: [],
+      Contacted: [],
+      Replied: [],
+      'Won (Paid)': [],
+    }
+    for (const lead of pagedLeads) {
+      const stage = resolvePipelineStage(lead)
+      if (buckets[stage]) {
+        buckets[stage].push(lead)
+      } else {
+        buckets.Scraped.push(lead)
+      }
+    }
+    return buckets
+  }, [pagedLeads])
+
+  const handleLeadPipelineDragEnd = (event) => {
+    const activeId = String(event?.active?.id || '')
+    const overId = String(event?.over?.id || '')
+    if (!activeId.startsWith('pipeline-lead-')) return
+    if (!leadPipelineOptions.includes(overId)) return
+
+    const leadId = Number(activeId.replace('pipeline-lead-', ''))
+    if (!Number.isFinite(leadId)) return
+    const currentLead = (Array.isArray(leads) ? leads : []).find((item) => Number(item?.id) === leadId)
+    if (!currentLead) return
+
+    const currentStage = resolvePipelineStage(currentLead)
+    if (currentStage === overId) return
+    void updateLeadStatus(leadId, overId)
+  }
 
   const hasSearchOrAiFilter = Boolean(debouncedLeadSearch.trim()) || isAiFilterActive
   const emptyLeadsMessage = hasSearchOrAiFilter
@@ -3010,11 +3280,62 @@ function App({ initialTab = 'leads' }) {
     }
   }, [leadQuickCountSource])
 
+  const getEligibleEnrichmentLeadIds = useCallback((limitValue) => {
+    const requested = Number(limitValue)
+    const normalizedBatchSize = Math.max(1, Math.min(Number.isFinite(requested) ? Math.floor(requested) : 50, 200))
+    const doneStatuses = new Set([
+      'enriched',
+      'queued_mail',
+      'emailed',
+      'interested',
+      'replied',
+      'meeting set',
+      'zoom scheduled',
+      'closed',
+      'paid',
+      'invalid_email',
+    ])
+    return leads
+      .filter((lead) => {
+        const status = String(lead.status || '').toLowerCase().trim()
+        const enrichmentStatus = String(lead.enrichment_status || '').toLowerCase().trim()
+        if (!lead?.id) return false
+        if (lead.enriched_at != null && String(lead.enriched_at).trim() !== '') return false
+        if (doneStatuses.has(status)) return false
+        return ['pending', 'failed', '', 'processing'].includes(enrichmentStatus) || status === 'scraped'
+      })
+      .map((lead) => Number(lead.id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+      .slice(0, normalizedBatchSize)
+  }, [leads])
+
+  const selectedLeadIdSet = useMemo(
+    () => new Set(selectedLeadIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)),
+    [selectedLeadIds],
+  )
+
+  const selectedLeadRows = useMemo(
+    () => filteredLeads.filter((lead) => selectedLeadIdSet.has(Number(lead?.id))),
+    [filteredLeads, selectedLeadIdSet],
+  )
+
+  const enrichmentEligibleLeadIds = useMemo(
+    () => getEligibleEnrichmentLeadIds(enrichForm.limit),
+    [getEligibleEnrichmentLeadIds, enrichForm.limit],
+  )
+
+  const requiredScrapeCredits = Math.max(1, Number(scrapeForm.results || 1)) * SCRAPE_CREDIT_COST_PER_LEAD
+  const requiredEnrichCredits = Math.max(1, enrichmentEligibleLeadIds.length) * ENRICH_CREDIT_COST_PER_LEAD
+  const pageLeadIds = useMemo(
+    () => pagedLeads.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0),
+    [pagedLeads],
+  )
+  const areAllPageLeadsSelected = pageLeadIds.length > 0 && pageLeadIds.every((id) => selectedLeadIdSet.has(id))
+
   const clearAiFilter = useCallback(() => {
     setAiFilterLeadIds([])
     setAiFilterSummary('')
     setAiFilterPrompt('')
-    setAiFilterPreview(null)
     setAiFilterLoading(false)
   }, [])
 
@@ -3025,19 +3346,135 @@ function App({ initialTab = 'leads' }) {
     setShowBlacklisted(false)
     setAdvancedLeadFilters({ industries: [], revenueBands: [], techStacks: [], highScoreOnly: false })
     setLeadPage(0)
-    setAiFilterOpen(false)
     clearAiFilter()
   }, [clearAiFilter])
 
-  const applyAiFilterPreview = useCallback(() => {
-    const ids = Array.isArray(aiFilterPreview?.lead_ids)
-      ? aiFilterPreview.lead_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
-      : []
-    setAiFilterLeadIds(ids)
-    setAiFilterSummary(String(aiFilterPreview?.assistant_message || `I found ${ids.length} lead(s) matching your request.`))
-    setLeadPage(0)
-    toast.success(`Applied AI filter (${ids.length} leads)`)
-  }, [aiFilterPreview])
+  useEffect(() => {
+    const allowed = new Set(filteredLeads.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0))
+    setSelectedLeadIds((prev) => prev.filter((id) => allowed.has(Number(id))))
+  }, [filteredLeads])
+
+  const toggleLeadSelection = useCallback((leadId) => {
+    const normalizedId = Number(leadId)
+    if (!Number.isFinite(normalizedId) || normalizedId <= 0) return
+    setSelectedLeadIds((prev) => (
+      prev.includes(normalizedId)
+        ? prev.filter((id) => id !== normalizedId)
+        : [...prev, normalizedId]
+    ))
+  }, [])
+
+  const toggleSelectAllPageLeads = useCallback(() => {
+    setSelectedLeadIds((prev) => {
+      const current = new Set(prev)
+      const allSelected = pageLeadIds.length > 0 && pageLeadIds.every((id) => current.has(id))
+      if (allSelected) {
+        pageLeadIds.forEach((id) => current.delete(id))
+      } else {
+        pageLeadIds.forEach((id) => current.add(id))
+      }
+      return Array.from(current)
+    })
+  }, [pageLeadIds])
+
+  const clearSelectedLeads = useCallback(() => {
+    setSelectedLeadIds([])
+  }, [])
+
+  const bulkExportSelectedCsv = useCallback(() => {
+    if (!selectedLeadRows.length) {
+      toast('Select at least one lead first.', { icon: 'ℹ️' })
+      return
+    }
+    if (!canBulkExport) {
+      toast('CSV exports unlock on The Growth and above.', { icon: '🔒' })
+      return
+    }
+    const headers = [
+      'id', 'business_name', 'contact_name', 'email', 'phone_number', 'website_url', 'maps_url', 'status', 'ai_score', 'qualification_score', 'pipeline_stage',
+    ]
+    const escapeCsv = (value) => {
+      const text = String(value ?? '')
+      if (text.includes('"') || text.includes(',') || text.includes('\n')) {
+        return `"${text.replace(/"/g, '""')}"`
+      }
+      return text
+    }
+    const rows = selectedLeadRows.map((lead) => headers.map((key) => escapeCsv(lead?.[key])).join(','))
+    const csv = [headers.join(','), ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const objectUrl = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = `selected_leads_${selectedLeadRows.length}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(objectUrl)
+    toast.success(`Exported ${selectedLeadRows.length} selected leads`) 
+  }, [selectedLeadRows, canBulkExport])
+
+  const bulkAiFilterSelected = useCallback(async () => {
+    if (!selectedLeadRows.length) {
+      toast('Select at least one lead first.', { icon: 'ℹ️' })
+      return
+    }
+    const prompt = window.prompt('AI Filter prompt for selected leads:', aiFilterPrompt || 'Show only high priority leads with strong buying intent')
+    if (!prompt || !String(prompt).trim()) return
+
+    setAiFilterLoading(true)
+    try {
+      const response = await fetchJson('/api/leads/ai-filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: String(prompt).trim(),
+          limit: 5000,
+          include_blacklisted: showBlacklisted,
+        }),
+      })
+      const returnedIds = new Set(
+        (Array.isArray(response?.lead_ids) ? response.lead_ids : [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id) && id > 0),
+      )
+      const selectedSet = new Set(selectedLeadRows.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0))
+      const intersected = Array.from(returnedIds).filter((id) => selectedSet.has(id))
+      setAiFilterLeadIds(intersected)
+      setAiFilterPrompt(String(prompt).trim())
+      setAiFilterSummary(`AI filter matched ${intersected.length} of ${selectedLeadRows.length} selected leads.`)
+      setLeadPage(0)
+      toast.success(`AI filter matched ${intersected.length}/${selectedLeadRows.length} selected leads`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Bulk AI filter failed')
+    } finally {
+      setAiFilterLoading(false)
+    }
+  }, [selectedLeadRows, aiFilterPrompt, showBlacklisted])
+
+  const bulkDeleteSelectedLeads = useCallback(async () => {
+    const ids = selectedLeadRows.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0)
+    if (!ids.length) {
+      toast('Select at least one lead first.', { icon: 'ℹ️' })
+      return
+    }
+    const confirmed = window.confirm(`Delete ${ids.length} selected leads? This cannot be undone.`)
+    if (!confirmed) return
+
+    try {
+      const result = await fetchJson('/api/leads/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead_ids: ids }),
+      })
+      const deletedCount = Number(result?.deleted || 0)
+      toast.success(`Deleted ${deletedCount} leads`)
+      setSelectedLeadIds([])
+      await Promise.allSettled([refreshLeads(), refreshStats()])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Bulk delete failed')
+    }
+  }, [selectedLeadRows, refreshLeads])
 
   const runAiFilter = useCallback(async (rawPrompt) => {
     const prompt = String(rawPrompt || aiFilterPrompt || '').trim()
@@ -3059,12 +3496,7 @@ function App({ initialTab = 'leads' }) {
         }),
       })
       const ids = Array.isArray(response?.lead_ids) ? response.lead_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id)) : []
-      setAiFilterPreview({
-        ...response,
-        lead_ids: ids,
-      })
       setAiFilterSummary(String(response?.assistant_message || `I found ${ids.length} lead(s) matching your request.`))
-      setAiFilterOpen(true)
       setAiFilterPrompt(prompt)
       toast.success(`AI interpreted your filter (${ids.length} potential leads)`)
     } catch (error) {
@@ -3075,6 +3507,42 @@ function App({ initialTab = 'leads' }) {
       setAiFilterLoading(false)
     }
   }, [aiFilterPrompt, showBlacklisted, setLastError])
+
+  const hasLeadsForOnboarding = useMemo(
+    () => Math.max(Number(leadServerTotal || 0), Number(leads?.length || 0)) > 0,
+    [leadServerTotal, leads],
+  )
+
+  const closeOnboardingWizard = useCallback((completed = false) => {
+    setOnboardingWizardOpen(false)
+    if (typeof window === 'undefined') return
+    if (completed) {
+      window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, '1')
+      window.localStorage.removeItem(ONBOARDING_DISMISSED_KEY)
+      return
+    }
+    window.localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1')
+  }, [])
+
+  useEffect(() => {
+    if (loadingLeads) return
+    if (hasLeadsForOnboarding) return
+    if (typeof window === 'undefined') return
+
+    const completed = window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === '1'
+    const dismissed = window.localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1'
+    if (completed || dismissed) return
+
+    setOnboardingWizardOpen(true)
+  }, [loadingLeads, hasLeadsForOnboarding])
+
+  useEffect(() => {
+    if (!hasLeadsForOnboarding) return
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, '1')
+    window.localStorage.removeItem(ONBOARDING_DISMISSED_KEY)
+    setOnboardingWizardOpen(false)
+  }, [hasLeadsForOnboarding])
 
   const refreshLeadsRef = useRef(refreshLeads)
 
@@ -3425,6 +3893,8 @@ function App({ initialTab = 'leads' }) {
         proxy_urls: data.proxy_urls || '',
         hubspot_webhook_url: data.hubspot_webhook_url || '',
         google_sheets_webhook_url: data.google_sheets_webhook_url || '',
+        developer_webhook_url: data.developer_webhook_url || '',
+        developer_score_drop_threshold: Number.isFinite(Number(data.developer_score_drop_threshold)) ? Number(data.developer_score_drop_threshold) : 6,
         auto_weekly_report_email: data.auto_weekly_report_email !== false,
         auto_monthly_report_email: data.auto_monthly_report_email !== false,
         mail_signature: data.mail_signature || '',
@@ -3947,6 +4417,8 @@ function App({ initialTab = 'leads' }) {
           proxy_urls: String(configForm.proxy_urls || '').trim() || null,
           hubspot_webhook_url: String(configForm.hubspot_webhook_url || '').trim() || null,
           google_sheets_webhook_url: String(configForm.google_sheets_webhook_url || '').trim() || null,
+          developer_webhook_url: String(configForm.developer_webhook_url || '').trim() || null,
+          developer_score_drop_threshold: Number(configForm.developer_score_drop_threshold || 0),
           auto_weekly_report_email: Boolean(configForm.auto_weekly_report_email),
           auto_monthly_report_email: Boolean(configForm.auto_monthly_report_email),
           mail_signature: configForm.mail_signature,
@@ -4561,6 +5033,15 @@ function App({ initialTab = 'leads' }) {
   }, [setLastError])
 
   useEffect(() => {
+    if (activeTab !== 'leads') {
+      abortRequestGroup('leads-list')
+    }
+    if (activeTab !== 'workers' && activeTab !== 'tasks' && activeTab !== 'history') {
+      abortRequestGroup('workers-list')
+    }
+  }, [activeTab])
+
+  useEffect(() => {
     const initialRequests = [
       checkHealth(),
       refreshConfigHealth(),
@@ -4718,6 +5199,7 @@ function App({ initialTab = 'leads' }) {
       })
       setWorkerAudit(Array.isArray(data.audit) ? data.audit : [])
     } catch (error) {
+      if (error?.name === 'AbortError') return
       console.error('[workers] fetch failed:', error)
     }
   }
@@ -5322,6 +5804,11 @@ function App({ initialTab = 'leads' }) {
       setLastError(friendlyMessage)
       toast.error(friendlyMessage)
 
+      const creditErrorText = String(rawMessage || friendlyMessage || '').toLowerCase()
+      if (status === 403 && (creditErrorText.includes('credit') || creditErrorText.includes('out of credits') || creditErrorText.includes('insufficient credits'))) {
+        void handleTopUpClick()
+      }
+
       const shouldRetry = action === 'enrich' && retries < 1 && status >= 500
       if (shouldRetry) {
         window.setTimeout(() => {
@@ -5394,7 +5881,8 @@ function App({ initialTab = 'leads' }) {
   }
 
   async function updateLeadStatus(leadId, nextStatus) {
-    const wasPaid = nextStatus === 'Paid'
+    const normalizedNextStatus = String(nextStatus || '').trim().toLowerCase()
+    const wasPaid = ['paid', 'won', 'won paid', 'won (paid)'].includes(normalizedNextStatus)
     setPendingStatusLeadId(leadId)
     setLastError('')
     try {
@@ -5404,7 +5892,35 @@ function App({ initialTab = 'leads' }) {
         body: JSON.stringify({ status: nextStatus }),
       })
       toast.success(`Lead \u2192 ${nextStatus}`)
-      if (wasPaid) shootConfetti()
+      if (wasPaid) {
+        shootConfetti()
+        const lead = (Array.isArray(leads) ? leads : []).find((item) => Number(item?.id) === Number(leadId))
+        const estimateInput = window.prompt('Congrats! What is the estimated deal value?')
+        const estimate = Number(String(estimateInput || '').replace(',', '.').trim())
+        if (Number.isFinite(estimate) && estimate > 0) {
+          try {
+            await fetchJson('/api/revenue/won-deal', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                lead_id: Number(leadId),
+                amount: estimate,
+                currency: 'EUR',
+                note: `Captured from ${nextStatus} transition`,
+              }),
+            })
+            toast.success(`Estimated deal value saved: ${formatCurrencyEur(estimate)}`)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Could not save estimated deal value'
+            toast.error(message)
+          }
+        } else if (String(estimateInput || '').trim()) {
+          toast.error('Please enter a valid positive number for deal value')
+        }
+        if (!lead && !estimateInput) {
+          // no-op: user dismissed prompt and lead may be stale while list is refreshing
+        }
+      }
       await Promise.allSettled([refreshLeads(), refreshStats(), refreshWorkers(), refreshDeliveryTasks()])
       return true
     } catch (error) {
@@ -5565,19 +6081,131 @@ function App({ initialTab = 'leads' }) {
     )
   }
 
-  async function onScrapeSubmit(e) {
+  async function generateShareableLeadReport(lead) {
+    if (!lead?.id) return
+    const leadId = Number(lead.id)
+    if (!Number.isFinite(leadId) || leadId <= 0) return
+
+    setShareReportStateByLeadId((prev) => ({
+      ...prev,
+      [leadId]: {
+        ...(prev[leadId] || {}),
+        generating: true,
+      },
+    }))
+
+    try {
+      const result = await fetchJson(`/api/leads/${leadId}/report/share`, { method: 'POST' })
+      const shareUrl = String(result?.share_url || '').trim()
+      if (!shareUrl) throw new Error('Share link could not be generated')
+
+      setShareReportStateByLeadId((prev) => ({
+        ...prev,
+        [leadId]: {
+          ...(prev[leadId] || {}),
+          shareUrl,
+          isActive: true,
+          generating: false,
+          revoking: false,
+        },
+      }))
+
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl)
+      }
+      toast.success('Shareable report link copied')
+    } catch (error) {
+      setShareReportStateByLeadId((prev) => ({
+        ...prev,
+        [leadId]: {
+          ...(prev[leadId] || {}),
+          generating: false,
+        },
+      }))
+      const message = error instanceof Error ? error.message : 'Could not generate share link'
+      toast.error(message)
+    }
+  }
+
+  function openLeadGapReportPreview(lead) {
+    if (!lead?.id) return
+    const leadId = Number(lead.id)
+    if (!Number.isFinite(leadId) || leadId <= 0) return
+    const reportUrl = `/api/leads/${leadId}/report`
+    const win = window.open(reportUrl, '_blank', 'noopener,noreferrer')
+    if (!win) {
+      toast.error('Popup blocked. Please allow popups for this site.')
+    }
+  }
+
+  async function revokeShareableLeadReport(lead) {
+    if (!lead?.id) return
+    const leadId = Number(lead.id)
+    if (!Number.isFinite(leadId) || leadId <= 0) return
+
+    const previous = shareReportStateByLeadId[leadId] || { isActive: Boolean(lead?.has_active_report_share) }
+    setShareReportStateByLeadId((prev) => ({
+      ...prev,
+      [leadId]: {
+        ...(prev[leadId] || {}),
+        isActive: false,
+        revoking: true,
+      },
+    }))
+
+    try {
+      await fetchJson(`/api/leads/${leadId}/report/share`, { method: 'DELETE' })
+      setShareReportStateByLeadId((prev) => ({
+        ...prev,
+        [leadId]: {
+          ...(prev[leadId] || {}),
+          isActive: false,
+          revoking: false,
+          revokedFlash: true,
+        },
+      }))
+      window.setTimeout(() => {
+        setShareReportStateByLeadId((prev) => ({
+          ...prev,
+          [leadId]: {
+            ...(prev[leadId] || {}),
+            revokedFlash: false,
+          },
+        }))
+      }, 2000)
+      toast.success('Share link revoked')
+    } catch (error) {
+      setShareReportStateByLeadId((prev) => ({
+        ...prev,
+        [leadId]: {
+          ...previous,
+          revoking: false,
+        },
+      }))
+      const message = error instanceof Error ? error.message : 'Could not revoke share link'
+      toast.error(message)
+    }
+  }
+
+  async function onScrapeSubmit(e, overrides = null) {
     e?.preventDefault?.()
-    const keyword = String(scrapeForm.keyword || '').trim()
+    const keyword = String(overrides?.keyword ?? scrapeForm.keyword ?? '').trim()
+    const results = Number(overrides?.results ?? scrapeForm.results)
+    const country = String(overrides?.country ?? scrapeForm.country ?? 'US')
+    const headless = Boolean(overrides?.headless ?? scrapeForm.headless)
+    const exportTargets = Boolean(overrides?.exportTargets ?? scrapeForm.exportTargets)
+    const speedMode = Boolean(overrides?.speedMode ?? scrapeForm.speedMode)
     if (!keyword || keyword.length < 2) {
       setLastError('Keyword must be at least 2 characters')
       toast.error('Keyword required (min 2 chars)')
       return
     }
-    if (creditsBalance <= 0) {
-      toast.error('Out of credits. Please upgrade or buy more credits.')
+    if (!canRunScrape) {
+      toast.error(`Not enough credits for this scrape. Need ${requiredScrapeCredits}, available ${creditsBalance}.`)
+      void handleTopUpClick()
       return
     }
-    if (scrapeForm.exportTargets && !canBulkExport) {
+    if (exportTargets && !canBulkExport) {
       toast('Auto-export unlocks on The Growth and above.', { icon: '🔒' })
       return
     }
@@ -5587,7 +6215,7 @@ function App({ initialTab = 'leads' }) {
       await fetchJson('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword, results: Number(scrapeForm.results), country: scrapeForm.country, headless: Boolean(scrapeForm.headless), export_targets: Boolean(scrapeForm.exportTargets), min_rating: 3.5, speed_mode: Boolean(scrapeForm.speedMode) }),
+        body: JSON.stringify({ keyword, results, country, headless, export_targets: exportTargets, min_rating: 3.5, speed_mode: speedMode }),
       })
       setTasks((prev) => ({
         ...prev,
@@ -5598,12 +6226,12 @@ function App({ initialTab = 'leads' }) {
           last_request: {
             ...(prev?.scrape?.last_request || {}),
             keyword,
-            results: Number(scrapeForm.results),
-            country: scrapeForm.country,
+            results,
+            country,
           },
           result: {
             phase: 'queued',
-            total_to_find: Number(scrapeForm.results || 0),
+            total_to_find: Number(results || 0),
             current_found: 0,
             scanned_count: 0,
             inserted: 0,
@@ -5621,6 +6249,29 @@ function App({ initialTab = 'leads' }) {
       setPendingRequest('')
     }
   }
+
+  async function runOnboardingMagicSearch({ niche, location }) {
+    const normalizedNiche = String(niche || '').trim()
+    const normalizedLocation = String(location || '').trim()
+    if (!normalizedNiche || !normalizedLocation) {
+      toast.error('Please fill niche and location first.')
+      return
+    }
+
+    const keyword = `${normalizedNiche} in ${normalizedLocation}`
+    setOnboardingLaunching(true)
+    setScrapeForm((prev) => ({ ...prev, keyword }))
+    setAiFilterPrompt(`Find ${normalizedNiche} in ${normalizedLocation} with slow websites`)
+    openMainTab('leads')
+
+    try {
+      await onScrapeSubmit(null, { keyword })
+      closeOnboardingWizard(true)
+      toast.success('Magic Search launched. Watching live results now…')
+    } finally {
+      setOnboardingLaunching(false)
+    }
+  }
   function onEnrichSubmit(e) {
     e?.preventDefault?.()
     const requested = Number(enrichForm.limit)
@@ -5629,33 +6280,18 @@ function App({ initialTab = 'leads' }) {
       setEnrichForm((prev) => ({ ...prev, limit: normalizedBatchSize }))
     }
 
-    const doneStatuses = new Set([
-      'enriched',
-      'queued_mail',
-      'emailed',
-      'interested',
-      'replied',
-      'meeting set',
-      'zoom scheduled',
-      'closed',
-      'paid',
-      'invalid_email',
-    ])
-    const selectedLeadIds = leads
-      .filter((lead) => {
-        const status = String(lead.status || '').toLowerCase().trim()
-        const enrichmentStatus = String(lead.enrichment_status || '').toLowerCase().trim()
-        if (!lead?.id) return false
-        if (lead.enriched_at != null && String(lead.enriched_at).trim() !== '') return false
-        if (doneStatuses.has(status)) return false
-        return ['pending', 'failed', '', 'processing'].includes(enrichmentStatus) || status === 'scraped'
-      })
-      .map((lead) => Number(lead.id))
-      .filter((id) => Number.isFinite(id) && id > 0)
-      .slice(0, normalizedBatchSize)
+    const selectedLeadIds = getEligibleEnrichmentLeadIds(normalizedBatchSize)
 
     if (!selectedLeadIds.length) {
       toast('No eligible leads to enrich in current view.', { icon: 'ℹ️' })
+      setEnrichRunRequested(false)
+      return
+    }
+
+    const requiredCredits = selectedLeadIds.length * ENRICH_CREDIT_COST_PER_LEAD
+    if (creditsBalance < requiredCredits) {
+      toast.error(`Not enough credits for enrichment. Need ${requiredCredits}, available ${creditsBalance}.`)
+      void handleTopUpClick()
       setEnrichRunRequested(false)
       return
     }
@@ -5913,6 +6549,9 @@ function App({ initialTab = 'leads' }) {
   const creditsLimit = Math.max(baseCreditsLimit, creditsBalance, baseCreditsLimit + topupCreditsBalance)
   const creditsPercent = Math.max(0, Math.min(100, Math.round((creditsBalance / creditsLimit) * 100)))
   const isOutOfCredits = creditsBalance <= 0
+  const canRunScrape = creditsBalance >= requiredScrapeCredits
+  const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && creditsBalance >= requiredEnrichCredits
+  const isLowOnCredits = creditsBalance > 0 && creditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
     ? `${topupCreditsBalance.toLocaleString('en-US')} purchased top-up credits included`
     : ''
@@ -6528,6 +7167,113 @@ function App({ initialTab = 'leads' }) {
           </section>
         ) : null}
 
+        {isLowOnCredits ? (
+          <section className="glass-card mb-6 rounded-[24px] border border-amber-500/25 bg-amber-500/10 p-5 shadow-[0_12px_40px_rgba(245,158,11,0.12)]">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="label-overline text-amber-300">Low credits warning</p>
+                <h3 className="mt-1 text-lg font-semibold text-white">You are running low on credits.</h3>
+                <p className="mt-1 text-sm text-slate-300">
+                  Current balance: {creditsBalance.toLocaleString('en-US')} credits. Scrape uses 1/lead, AI enrichment uses 2/lead.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button className="btn-primary" type="button" onClick={handleTopUpClick}>
+                  <PlusCircle className="h-4 w-4" /> Buy Credits
+                </button>
+                <button className="btn-ghost" type="button" onClick={openPricingSection}>
+                  <Zap className="h-4 w-4" /> Upgrade Plan
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="glass-card mb-6 rounded-[24px] border border-cyan-500/25 bg-[linear-gradient(135deg,rgba(8,47,73,0.35),rgba(15,23,42,0.9))] p-5 shadow-[0_14px_42px_rgba(14,116,144,0.2)]">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="label-overline text-cyan-300">AI Smart Filter</p>
+              <h3 className="mt-1 text-xl font-semibold text-white">Describe your perfect lead in plain English</h3>
+              <p className="mt-1 text-sm text-slate-300">Try: “Find plumbers in London with slow websites”</p>
+            </div>
+            <button
+              type="button"
+              className="btn-ghost px-3 py-2 text-sm"
+              onClick={() => {
+                if (activeTab !== 'leads') openMainTab('leads')
+                leadSearchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+              }}
+            >
+              <Search className="h-4 w-4" /> Go to Leads Table
+            </button>
+          </div>
+
+          <form
+            className="mt-4 flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (activeTab !== 'leads') openMainTab('leads')
+              void runAiFilter(aiFilterPrompt)
+            }}
+          >
+            <div className="relative min-w-[280px] flex-1">
+              <Sparkles className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-300" />
+              <input
+                className="glass-input h-11 w-full pl-9 text-sm"
+                type="text"
+                value={aiFilterPrompt}
+                placeholder="Find plumbers in London with slow websites"
+                onChange={(e) => setAiFilterPrompt(e.target.value)}
+              />
+            </div>
+            <button type="submit" className="btn-primary h-11 px-4" disabled={aiFilterLoading}>
+              <Sparkles className={`h-4 w-4 ${aiFilterLoading ? 'animate-spin' : ''}`} />
+              {aiFilterLoading ? 'Analyzing…' : 'Run AI Smart Filter'}
+            </button>
+            {isAiFilterActive ? (
+              <button type="button" className="btn-ghost h-11 px-3 text-sm" onClick={clearAiFilter}>
+                Clear
+              </button>
+            ) : null}
+          </form>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {[
+              'Find plumbers in London with slow websites',
+              'Show local dentists in Berlin with no Instagram',
+              'Find gyms in Miami with weak SEO and low reviews',
+            ].map((sample) => (
+              <button
+                key={sample}
+                type="button"
+                className="btn-ghost px-2.5 py-1.5 text-xs"
+                disabled={aiFilterLoading}
+                onClick={() => {
+                  setAiFilterPrompt(sample)
+                  if (activeTab !== 'leads') openMainTab('leads')
+                  void runAiFilter(sample)
+                }}
+              >
+                {sample}
+              </button>
+            ))}
+          </div>
+
+          {aiFilterSummary ? (
+            <p className="mt-3 text-xs text-cyan-100/90">{aiFilterSummary}</p>
+          ) : null}
+        </section>
+
+        <OnboardingWizard
+          open={onboardingWizardOpen}
+          submitting={onboardingLaunching}
+          onClose={() => closeOnboardingWizard(false)}
+          onComplete={runOnboardingMagicSearch}
+          completeCta="Run Magic Search"
+          subtitle="Welcome to Sniped"
+          title="Let’s launch your first lead stream"
+        />
+
         <section className="glass-card rounded-[28px] p-7" ref={workflowRef}>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -6581,9 +7327,17 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               </div>
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'scrape' || scrapeTask.running} onClick={onScrapeSubmit}>
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'scrape' || scrapeTask.running || !canRunScrape} onClick={onScrapeSubmit}>
                 <Database className="h-4 w-4" /> {submitLabel('scrape', scrapeTask.running, pendingRequest === 'scrape').replace('Start', 'Launch')}
               </button>
+              {!canRunScrape ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
+                  <span>Need {requiredScrapeCredits} credits for this scrape. You have {creditsBalance}.</span>
+                  <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
+                    <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
+                  </button>
+                </div>
+              ) : null}
 
               {scrapeProgress.isVisible ? (
                 <div className="scrape-progress-wrap">
@@ -6658,7 +7412,7 @@ function App({ initialTab = 'leads' }) {
                   Heavy traffic! We are processing other leads. Retry in <strong>{enrichRetrySeconds}s</strong>.
                 </div>
               ) : null}
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0} onClick={onEnrichSubmit}>
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0 || !canRunEnrich} onClick={onEnrichSubmit}>
                 {pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" /> AI is analyzing...
@@ -6673,6 +7427,20 @@ function App({ initialTab = 'leads' }) {
                   </>
                 )}
               </button>
+              {!canRunEnrich ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
+                  <span>
+                    {enrichmentEligibleLeadIds.length <= 0
+                      ? 'No eligible leads to enrich right now.'
+                      : `Need ${requiredEnrichCredits} credits for enrichment. You have ${creditsBalance}.`}
+                  </span>
+                  {enrichmentEligibleLeadIds.length > 0 ? (
+                    <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
+                      <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               {(pendingRequest === 'enrich' || isAnalyzing || enrichRunRequested || enrichTask.running || enrichRetrySeconds > 0) ? (
                 <button className="workflow-btn" type="button" onClick={resetEnrichUiState} style={{ marginTop: '0.6rem', background: 'linear-gradient(135deg,#334155,#0f172a)' }}>
                   Reset Enrichment Status
@@ -7080,113 +7848,6 @@ function App({ initialTab = 'leads' }) {
                     onChange={(e) => setLeadSearch(e.target.value)}
                   />
                 </div>
-                <div className="relative">
-                  <button
-                    type="button"
-                    className={`btn-ghost ai-filter-trigger px-3 py-2 text-sm ${aiFilterLoading ? 'ai-filter-working' : ''} ${isAiFilterActive ? 'ring-1 ring-cyan-400/70 text-cyan-200' : ''}`}
-                    onClick={() => setAiFilterOpen((prev) => !prev)}
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    AI Filter
-                  </button>
-
-                  {aiFilterOpen ? (
-                    <div className="absolute left-0 top-[calc(100%+0.5rem)] z-40 w-[min(500px,92vw)] rounded-2xl border border-cyan-500/25 bg-slate-950/95 p-3 shadow-[0_20px_65px_rgba(2,12,27,0.75)] backdrop-blur">
-                      <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200/90">AI assistant search</p>
-                        <button
-                          type="button"
-                          className="text-xs font-semibold text-slate-400 transition hover:text-white"
-                          onClick={() => setAiFilterOpen(false)}
-                        >
-                          Close
-                        </button>
-                      </div>
-
-                      <div className="mb-3 rounded-xl border border-slate-700/80 bg-slate-900/80 p-2.5">
-                        <input
-                          className="glass-input h-10 w-full text-sm"
-                          type="text"
-                          value={aiFilterPrompt}
-                          placeholder="Find high-priority gyms in Miami with weak SEO and no socials"
-                          onChange={(e) => setAiFilterPrompt(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault()
-                              void runAiFilter(aiFilterPrompt)
-                            }
-                          }}
-                        />
-                        <div className="mt-2 flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="btn-primary px-3 py-2 text-xs"
-                            disabled={aiFilterLoading}
-                            onClick={() => void runAiFilter(aiFilterPrompt)}
-                          >
-                            <Sparkles className={`h-3.5 w-3.5 ${aiFilterLoading ? 'animate-spin' : ''}`} />
-                            {aiFilterLoading ? 'Thinking…' : 'Analyze'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn-ghost px-2.5 py-2 text-xs"
-                            disabled={!aiFilterPreview || aiFilterLoading}
-                            onClick={applyAiFilterPreview}
-                          >
-                            Apply Filter
-                          </button>
-                          {isAiFilterActive ? (
-                            <button
-                              type="button"
-                              className="btn-ghost px-2.5 py-2 text-xs"
-                              onClick={clearAiFilter}
-                            >
-                              X Clear
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      <div className="mb-3 flex flex-wrap gap-2">
-                        {AI_QUICK_FILTERS.map((quick) => (
-                          <button
-                            key={quick.key}
-                            type="button"
-                            className="btn-ghost px-2.5 py-1.5 text-xs"
-                            disabled={aiFilterLoading}
-                            onClick={() => {
-                              setAiFilterPrompt(quick.prompt)
-                              void runAiFilter(quick.prompt)
-                            }}
-                          >
-                            {quick.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {aiFilterPreview ? (
-                        <div className="mb-2 rounded-xl border border-cyan-500/20 bg-slate-900/65 p-2.5">
-                          <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-slate-300">
-                            <span className="uppercase tracking-[0.14em] text-cyan-200/85">Interpreted filters</span>
-                            <span>{Number(aiFilterPreview?.matched_count || 0)} matches</span>
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {aiInterpretedPreviewRows.length ? aiInterpretedPreviewRows.map((row) => (
-                              <span key={row} className="rounded-full border border-slate-700 bg-slate-800/80 px-2 py-1 text-[11px] text-slate-200">{row}</span>
-                            )) : (
-                              <span className="text-xs text-slate-400">No interpreted filters yet.</span>
-                            )}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <p className="text-xs text-slate-400">
-                        {aiFilterSummary || 'Describe what you need. We will preview interpreted filters before applying.'}
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-
                 <button
                   type="button"
                   className="btn-ghost px-3 py-2 text-sm"
@@ -7234,6 +7895,23 @@ function App({ initialTab = 'leads' }) {
                 ) : null}
                 {/* Real-time scrape/enrich progress — GPU-composited, no layout shift */}
                 <ScrapeProgressBadge />
+              </div>
+
+              <div className="inline-flex items-center rounded-2xl border border-white/10 bg-white/[0.03] p-1">
+                <button
+                  type="button"
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${leadsViewMode === 'table' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                  onClick={() => setLeadsViewMode('table')}
+                >
+                  Table View
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${leadsViewMode === 'pipeline' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                  onClick={() => setLeadsViewMode('pipeline')}
+                >
+                  Pipeline View
+                </button>
               </div>
 
               {isAiFilterActive ? (
@@ -7297,6 +7975,44 @@ function App({ initialTab = 'leads' }) {
                   </button>
                 ) : null}
               </div>
+
+              {selectedLeadRows.length > 0 ? (
+                <div className="sticky bottom-4 z-30 mt-2 flex flex-wrap items-center gap-2 rounded-2xl border border-cyan-500/30 bg-slate-950/95 px-3 py-2 shadow-[0_16px_48px_rgba(2,6,23,0.5)] backdrop-blur">
+                  <span className="text-xs font-semibold text-cyan-200">
+                    {selectedLeadRows.length} lead{selectedLeadRows.length === 1 ? '' : 's'} selected
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-ghost px-2.5 py-1.5 text-xs"
+                    onClick={() => void bulkAiFilterSelected()}
+                    disabled={aiFilterLoading}
+                  >
+                    <Sparkles className="h-3.5 w-3.5" /> Bulk AI Filter
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost px-2.5 py-1.5 text-xs"
+                    onClick={() => bulkExportSelectedCsv()}
+                    disabled={!canBulkExport}
+                  >
+                    <Download className="h-3.5 w-3.5" /> Bulk Export (CSV)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost px-2.5 py-1.5 text-xs text-rose-200 ring-1 ring-rose-400/35"
+                    onClick={() => void bulkDeleteSelectedLeads()}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Bulk Delete
+                  </button>
+                  <button
+                    type="button"
+                    className="ml-auto text-xs font-semibold text-slate-400 transition hover:text-white"
+                    onClick={clearSelectedLeads}
+                  >
+                    Clear selection
+                  </button>
+                </div>
+              ) : null}
 
               <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
                 <aside className={`${leadFilterPanelOpen ? 'block' : 'hidden'} xl:block rounded-[24px] border border-slate-700/50 bg-slate-900/70 p-4 shadow-[0_10px_40px_rgba(2,6,23,0.22)]`}>
@@ -7440,15 +8156,48 @@ function App({ initialTab = 'leads' }) {
                 </aside>
 
                 <div className="space-y-4 min-w-0">
+                  {leadsViewMode === 'pipeline' ? (
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleLeadPipelineDragEnd}>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                        {leadPipelineOptions.map((stage) => {
+                          const stageLeads = kanbanColumns[stage] || []
+                          return (
+                            <PipelineDropColumn key={`pipeline-column-${stage}`} stage={stage}>
+                              <div className="mb-3 flex items-center justify-between gap-2">
+                                <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${pipelineStageBadgeClass(stage)}`}>{stage}</span>
+                                <span className="text-xs text-slate-400">{stageLeads.length}</span>
+                              </div>
+                              <div className="space-y-2">
+                                {stageLeads.length ? stageLeads.map((lead) => (
+                                  <PipelineLeadCard
+                                    key={`pipeline-card-${lead.id}`}
+                                    lead={lead}
+                                    onOpenDetails={openLeadDetailsModal}
+                                    pendingStatusLeadId={pendingStatusLeadId}
+                                  />
+                                )) : (
+                                  <div className="rounded-xl border border-dashed border-slate-700/70 px-3 py-6 text-center text-xs text-slate-500">
+                                    Drop lead here
+                                  </div>
+                                )}
+                              </div>
+                            </PipelineDropColumn>
+                          )
+                        })}
+                      </div>
+                    </DndContext>
+                  ) : null}
+
                   {/* Leads table */}
                   <div
                     id="leads-table"
                     key={`desktop-${leadFilterSignature}`}
-                    className="hidden overflow-hidden rounded-[24px] border border-slate-700/50 bg-slate-900/70 shadow-[0_10px_40px_rgba(2,6,23,0.28)] lg:block"
+                    className={`hidden overflow-hidden rounded-[24px] border border-slate-700/50 bg-slate-900/70 shadow-[0_10px_40px_rgba(2,6,23,0.28)] ${leadsViewMode === 'table' ? 'lg:block' : ''}`}
                   >
                 <div className="max-h-[68vh] overflow-auto leads-fade-in" style={{overflowX: 'auto'}}>
                   <table className="apollo-table w-full table-fixed text-xs tracking-tight">
                     <colgroup>
+                      <col style={{width: '4%'}} />
                       <col style={{width: '20%'}} />
                       <col style={{width: '12%'}} />
                       <col style={{width: '10%'}} />
@@ -7463,6 +8212,14 @@ function App({ initialTab = 'leads' }) {
                     </colgroup>
                     <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-xl">
                       <tr>
+                        <th className="th-cell text-center">
+                          <input
+                            type="checkbox"
+                            checked={areAllPageLeadsSelected}
+                            onChange={toggleSelectAllPageLeads}
+                            aria-label="Select all leads on this page"
+                          />
+                        </th>
                         <th className="th-cell">Business</th>
                         <th className="th-cell">Email</th>
                         <th className="th-cell">Phone</th>
@@ -7479,7 +8236,7 @@ function App({ initialTab = 'leads' }) {
                     <tbody className="divide-y divide-white/[0.04]">
                       {loadingLeads ? (
                         <tr key="lead-skeleton-row">
-                          <td colSpan={11} className="td-cell">
+                          <td colSpan={12} className="td-cell">
                             {/* Fixed-height skeletons — CLS = 0, shimmer animation via CSS only */}
                             <LeadCardSkeletonList count={6} />
                           </td>
@@ -7490,6 +8247,8 @@ function App({ initialTab = 'leads' }) {
                         const techStack = normalizeLeadInsightList(lead.tech_stack, 1)
                         const auditHighlights = normalizeLeadInsightList(lead.company_audit?.strengths, 2)
                         const bestLeadScore = resolveBestLeadScore(lead)
+                        const trendMeta = resolveLeadTrendMeta(lead)
+                        const trendPath = buildTrendSparklinePath(trendMeta.points)
                         const pipelineStage = resolvePipelineStage(lead)
                         const socialLinks = [
                           { key: 'linkedin', url: lead.linkedin_url, label: 'LinkedIn', Icon: Linkedin },
@@ -7501,8 +8260,21 @@ function App({ initialTab = 'leads' }) {
                         const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                         const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
                         const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : '—')
+                        const shareState = shareReportStateByLeadId[lead.id] || {}
+                        const hasActiveShareLink = shareState.isActive !== undefined
+                          ? Boolean(shareState.isActive)
+                          : Boolean(lead.has_active_report_share)
+                        const showRevokedFlash = Boolean(shareState.revokedFlash)
                         return (
                         <tr key={lead.id} className="td-row">
+                          <td className="td-cell text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedLeadIdSet.has(Number(lead.id))}
+                              onChange={() => toggleLeadSelection(lead.id)}
+                              aria-label={`Select lead ${lead.business_name || lead.id}`}
+                            />
+                          </td>
                           {/* Business + Niche + Contact merged */}
                           <td className="td-cell">
                             <div className="flex flex-col gap-0.5 min-w-0">
@@ -7559,6 +8331,15 @@ function App({ initialTab = 'leads' }) {
                                 <span className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold ${pipelineStageBadgeClass(pipelineStage)}`}>
                                   {pipelineStage}
                                 </span>
+                                {hasReply(lead) ? (
+                                  <span className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-100">
+                                    ↩ Replied
+                                  </span>
+                                ) : hasOpenedMail(lead) ? (
+                                  <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-100">
+                                    👁 Opened x{Math.max(1, Number(lead.open_count || 0))}
+                                  </span>
+                                ) : null}
                                 {Number(lead.qualification_score || 0) > 0 && (
                                   <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-100">
                                     Q {Math.round(Number(lead.qualification_score || 0))}/100
@@ -7685,6 +8466,15 @@ function App({ initialTab = 'leads' }) {
                                     Niche {formatLeadScoreValue(bestLeadScore)}/10
                                   </span>
                                 )}
+                                {trendMeta.points.length >= 2 && (
+                                  <span className={`inline-flex items-center gap-1 text-[10px] font-semibold ${trendMeta.direction === 'up' ? 'text-emerald-300' : trendMeta.direction === 'down' ? 'text-rose-300' : 'text-slate-400'}`}>
+                                    <svg width="54" height="15" viewBox="0 0 54 15" fill="none" aria-hidden="true">
+                                      <path d={trendPath} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                    </svg>
+                                    <TrendingUp className={`h-3 w-3 ${trendMeta.direction === 'down' ? 'rotate-180' : trendMeta.direction === 'flat' ? 'opacity-50' : ''}`} />
+                                    {trendMeta.delta > 0 ? '+' : ''}{trendMeta.delta.toFixed(1)}
+                                  </span>
+                                )}
                                 <span className={`text-[10px] font-semibold ${isQualifiedLead(lead) ? 'text-emerald-300' : 'text-amber-300'}`}>
                                   {isQualifiedLead(lead) ? 'Qualified' : 'Needs work'}
                                 </span>
@@ -7767,11 +8557,42 @@ function App({ initialTab = 'leads' }) {
                           {/* Actions — icon-only buttons */}
                           <td className="td-cell" style={{overflow: 'visible'}}>
                             <div className="flex items-center justify-center gap-2" style={{flexShrink: 0, flexWrap: 'nowrap'}}>
+                              {showRevokedFlash && (
+                                <span className="inline-flex items-center rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2 py-1 text-[10px] font-semibold text-emerald-100">
+                                  Revoked
+                                </span>
+                              )}
                               <button type="button" className="icon-action-btn" onClick={() => openLeadDetailsModal(lead)} title="View lead details">
                                 <Eye className="h-3.5 w-3.5" />
                               </button>
                               <button type="button" className="icon-action-btn" onClick={() => void moveLeadToMailer(lead)} title="Move to Mailer">
                                 <Mail className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-action-btn"
+                                onClick={() => void generateShareableLeadReport(lead)}
+                                disabled={Boolean(shareState.generating || shareState.revoking)}
+                                title={shareState.generating ? 'Generating share link…' : 'Generate shareable report link'}
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-action-btn"
+                                onClick={() => openLeadGapReportPreview(lead)}
+                                title="Open report preview"
+                              >
+                                <Globe className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-action-btn"
+                                disabled={!hasActiveShareLink || Boolean(shareState.generating || shareState.revoking)}
+                                onClick={() => void revokeShareableLeadReport(lead)}
+                                title={shareState.revoking ? 'Revoking share link…' : hasActiveShareLink ? 'Revoke active share link' : 'No active share link'}
+                              >
+                                <EyeOff className="h-3.5 w-3.5" />
                               </button>
                               <button
                                 type="button"
@@ -7800,7 +8621,7 @@ function App({ initialTab = 'leads' }) {
                         </tr>
                         )}) : (
                         <tr>
-                          <td colSpan={11} className="px-4 py-10 text-center text-sm text-slate-400">
+                          <td colSpan={12} className="px-4 py-10 text-center text-sm text-slate-400">
                               {emptyLeadsMessage}
                           </td>
                         </tr>
@@ -7810,12 +8631,13 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
 
-                  <div key={`mobile-${leadFilterSignature}`} className="space-y-3 lg:hidden leads-fade-in">
+                  <div key={`mobile-${leadFilterSignature}`} className={`space-y-3 lg:hidden leads-fade-in ${leadsViewMode === 'table' ? '' : 'hidden'}`}>
                     {loadingLeads ? (
                       /* Fixed-height mobile skeletons — CLS = 0 */
                       <LeadCardSkeletonList count={4} />
                     ) : pagedLeads.length ? pagedLeads.map((lead) => {
                       const bestLeadScore = resolveBestLeadScore(lead)
+                      const trendMeta = resolveLeadTrendMeta(lead)
                       const pipelineStage = resolvePipelineStage(lead)
                       const techStack = normalizeLeadInsightList(lead.tech_stack, 2)
                         const socialLinks = [
@@ -7828,10 +8650,23 @@ function App({ initialTab = 'leads' }) {
                       const enrichmentState = String(lead.enrichment_status || lead.status || '').toLowerCase()
                       const shouldShowSearchingEmail = !lead.email && ['processing', 'pending', 'queued', 'scraped', 'new'].includes(enrichmentState)
                       const emailDisplay = lead.email || (shouldShowSearchingEmail ? 'Searching...' : '—')
+                      const shareState = shareReportStateByLeadId[lead.id] || {}
+                      const hasActiveShareLink = shareState.isActive !== undefined
+                        ? Boolean(shareState.isActive)
+                        : Boolean(lead.has_active_report_share)
+                      const showRevokedFlash = Boolean(shareState.revokedFlash)
                       return (
                         <article key={`mobile-${lead.id}`} className="rounded-[22px] border border-slate-700/50 bg-slate-900/70 p-4 shadow-[0_8px_24px_rgba(2,6,23,0.2)]">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
+                              <label className="mb-1 inline-flex items-center gap-2 text-[11px] text-slate-400">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedLeadIdSet.has(Number(lead.id))}
+                                  onChange={() => toggleLeadSelection(lead.id)}
+                                />
+                                Select
+                              </label>
                               <p className="truncate text-base font-semibold text-white">{lead.business_name || '—'}</p>
                               <p className="truncate text-xs text-slate-400">{titleCaseLeadLabel(deriveLeadIndustry(lead))} • {deriveLeadRevenueBand(lead)}</p>
                             </div>
@@ -7859,7 +8694,18 @@ function App({ initialTab = 'leads' }) {
                             <p>{lead.phone_formatted || lead.phone_number || 'No phone yet'}</p>
                             <div className="flex flex-wrap gap-2">
                               <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-200">Niche {formatLeadScoreValue(bestLeadScore)}/10</span>
+                              {trendMeta.points.length >= 2 && (
+                                <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold ${trendMeta.direction === 'up' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : trendMeta.direction === 'down' ? 'border-rose-500/30 bg-rose-500/10 text-rose-100' : 'border-slate-600/40 bg-slate-700/30 text-slate-300'}`}>
+                                  <TrendingUp className={`h-3 w-3 ${trendMeta.direction === 'down' ? 'rotate-180' : trendMeta.direction === 'flat' ? 'opacity-50' : ''}`} />
+                                  {trendMeta.delta > 0 ? '+' : ''}{trendMeta.delta.toFixed(1)}
+                                </span>
+                              )}
                               <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${isQualifiedLead(lead) ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100' : 'border-amber-500/30 bg-amber-500/10 text-amber-100'}`}>{isQualifiedLead(lead) ? 'Qualified' : 'Needs work'}</span>
+                              {hasReply(lead) ? (
+                                <span className="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-100">↩ Replied</span>
+                              ) : hasOpenedMail(lead) ? (
+                                <span className="inline-flex items-center rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-100">👁 Opened x{Math.max(1, Number(lead.open_count || 0))}</span>
+                              ) : null}
                               {Number(lead.qualification_score || 0) > 0 && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-semibold text-amber-100">Q {Math.round(Number(lead.qualification_score || 0))}/100</span>}
                               {socialLinks.map((social) => (
                                 <a
@@ -7880,16 +8726,47 @@ function App({ initialTab = 'leads' }) {
                           </div>
 
                           <div className="mt-4 grid gap-2">
+                            {showRevokedFlash && (
+                              <div className="inline-flex items-center justify-center rounded-full border border-emerald-500/35 bg-emerald-500/15 px-3 py-1 text-[10px] font-semibold text-emerald-100">
+                                Revoked
+                              </div>
+                            )}
                             <button type="button" className="btn-primary w-full justify-center py-3 text-sm" onClick={() => void moveLeadToMailer(lead)}>
                               <Send className="h-4 w-4" />
                               Move to Mailer
                             </button>
-                            <div className="grid grid-cols-3 gap-2">
+                            <div className="grid grid-cols-6 gap-2">
                               <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => openLeadDetailsModal(lead)}>
                                 <Eye className="h-4 w-4" />
                               </button>
                               <button type="button" className="btn-ghost justify-center px-2 py-2 text-xs" onClick={() => openAiSummaryModal(lead)}>
                                 <Sparkles className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost justify-center px-2 py-2 text-xs"
+                                disabled={Boolean(shareState.generating || shareState.revoking)}
+                                onClick={() => void generateShareableLeadReport(lead)}
+                                title={shareState.generating ? 'Generating share link…' : 'Share report'}
+                              >
+                                <ExternalLink className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost justify-center px-2 py-2 text-xs"
+                                onClick={() => openLeadGapReportPreview(lead)}
+                                title="Open report preview"
+                              >
+                                <Globe className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost justify-center px-2 py-2 text-xs"
+                                disabled={!hasActiveShareLink || Boolean(shareState.generating || shareState.revoking)}
+                                onClick={() => void revokeShareableLeadReport(lead)}
+                                title={shareState.revoking ? 'Revoking share link…' : hasActiveShareLink ? 'Revoke share link' : 'No active share link'}
+                              >
+                                <EyeOff className="h-4 w-4" />
                               </button>
                               <button
                                 type="button"
@@ -8991,6 +9868,24 @@ function App({ initialTab = 'leads' }) {
                 </h3>
                 <p className="text-xs text-slate-500">API key is configured from environment-backed server settings.</p>
               </div>
+              <div className="inline-flex items-center rounded-2xl border border-white/10 bg-white/[0.03] p-1">
+                <button
+                  type="button"
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${configSettingsTab === 'platform' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                  onClick={() => setConfigSettingsTab('platform')}
+                >
+                  Platform
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${configSettingsTab === 'developer' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                  onClick={() => setConfigSettingsTab('developer')}
+                >
+                  Developer
+                </button>
+              </div>
+              {configSettingsTab === 'platform' ? (
+              <>
               <div>
                 <h3 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
                   <Mail className="h-4 w-4 text-cyan-400" /> SMTP
@@ -9212,6 +10107,38 @@ function App({ initialTab = 'leads' }) {
                   </div>
                 ) : null}
               </div>
+              </>
+              ) : (
+                <div className="space-y-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                  <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                    <TerminalSquare className="h-4 w-4 text-cyan-300" /> Developer Webhooks
+                  </h3>
+                  <p className="text-xs text-slate-400">POST events when lead state changes so your automations can react in real time.</p>
+                  <label className="field-label block">
+                    <span className="mb-1.5 block">Developer webhook URL</span>
+                    <input
+                      className="glass-input"
+                      type="url"
+                      placeholder="https://your-app.com/webhooks/leads"
+                      value={configForm.developer_webhook_url || ''}
+                      onChange={(e) => setConfigForm({ ...configForm, developer_webhook_url: e.target.value })}
+                    />
+                    <span className="mt-1 block text-[11px] text-slate-500">Events: <span className="text-slate-300">lead.moved_to_replied</span>, <span className="text-slate-300">lead.score_dropped_below_threshold</span></span>
+                  </label>
+                  <label className="field-label block max-w-sm">
+                    <span className="mb-1.5 block">Score-drop threshold (0-10)</span>
+                    <input
+                      className="glass-input"
+                      type="number"
+                      min="0"
+                      max="10"
+                      step="0.1"
+                      value={configForm.developer_score_drop_threshold ?? 6}
+                      onChange={(e) => setConfigForm({ ...configForm, developer_score_drop_threshold: e.target.value })}
+                    />
+                  </label>
+                </div>
+              )}
               <div className="flex items-center gap-4">
                 <button className="btn-primary" type="submit" disabled={savingConfig}>
                   <Save className="h-4 w-4" />

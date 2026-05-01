@@ -8,12 +8,16 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
+from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint, asc, create_engine, desc, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .models import Lead
+
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 def _utc_now() -> datetime:
@@ -98,14 +102,85 @@ class LeadRecord(Base):
 
 _ENGINE_CACHE: dict[str, Any] = {}
 _SESSION_FACTORY_CACHE: dict[str, sessionmaker[Session]] = {}
-DEFAULT_DB_POOL_SIZE = max(1, int(os.environ.get("DB_POOL_SIZE", "1")))
-DEFAULT_DB_MAX_OVERFLOW = max(0, int(os.environ.get("DB_MAX_OVERFLOW", "0")))
-DEFAULT_DB_POOL_RECYCLE = max(60, int(os.environ.get("DB_POOL_RECYCLE", "1800")))
+_ENGINE_CONNECT_COOLDOWN_UNTIL = 0.0
+_ENGINE_CONNECT_LAST_ERROR: Optional[Exception] = None
+
+# ---------------------------------------------------------------------------
+# Connection-limit monitoring
+# ---------------------------------------------------------------------------
+# Keeps timestamps (monotonic) of each pool-saturation event so we can
+# emit a rate-limited CRITICAL alert when the 200-connection ceiling is
+# being approached in production.
+_POOL_SATURATION_EVENTS: list[float] = []
+_POOL_SATURATION_WINDOW_SECS = 60          # look-back window for rate limiting
+_POOL_SATURATION_CRITICAL_THRESHOLD = 5    # CRITICAL log after N events/window
+
+
+def record_pool_saturation_event(exc: Optional[Exception] = None) -> None:
+    """Call this whenever a DB capacity / EMAXCONN error is caught.
+
+    Logs a WARNING immediately and escalates to CRITICAL when the event
+    rate exceeds *_POOL_SATURATION_CRITICAL_THRESHOLD* in the last minute.
+    This gives Railway log alerts an easy keyword to grep: ``POOL_SATURATION``.
+    """
+    now = time.monotonic()
+    _POOL_SATURATION_EVENTS.append(now)
+    # Purge events outside the look-back window.
+    cutoff = now - _POOL_SATURATION_WINDOW_SECS
+    while _POOL_SATURATION_EVENTS and _POOL_SATURATION_EVENTS[0] < cutoff:
+        _POOL_SATURATION_EVENTS.pop(0)
+
+    recent_count = len(_POOL_SATURATION_EVENTS)
+    err_str = f" ({exc})" if exc else ""
+    if recent_count >= _POOL_SATURATION_CRITICAL_THRESHOLD:
+        logging.critical(
+            "[POOL_SATURATION] DB pool saturated %d times in the last %ds%s. "
+            "Consider increasing SUPABASE_POOLER_POOL_SIZE_CAP or upgrading the Supabase plan.",
+            recent_count,
+            _POOL_SATURATION_WINDOW_SECS,
+            err_str,
+        )
+    else:
+        logging.warning(
+            "[POOL_SATURATION] DB pool saturation event #%d in last %ds%s.",
+            recent_count,
+            _POOL_SATURATION_WINDOW_SECS,
+            err_str,
+        )
+DEFAULT_DB_POOL_SIZE = max(1, int(os.environ.get("DB_POOL_SIZE", "4")))
+DEFAULT_DB_MAX_OVERFLOW = max(0, int(os.environ.get("DB_MAX_OVERFLOW", "8")))
+DEFAULT_DB_POOL_RECYCLE = max(60, int(os.environ.get("DB_POOL_RECYCLE", "900")))
+DEFAULT_DB_POOL_TIMEOUT = max(2, int(os.environ.get("DB_POOL_TIMEOUT", "10")))
 DEFAULT_DB_CONNECT_TIMEOUT = max(3, int(os.environ.get("DB_CONNECT_TIMEOUT", "10")))
-DEFAULT_DB_CONNECT_RETRIES = max(1, int(os.environ.get("DB_CONNECT_RETRIES", "4")))
+DEFAULT_DB_CONNECT_RETRIES = max(1, int(os.environ.get("DB_CONNECT_RETRIES", "2")))
 DEFAULT_DB_CONNECT_RETRY_DELAY = max(1, int(os.environ.get("DB_CONNECT_RETRY_DELAY", "2")))
+DEFAULT_DB_CONNECT_FAILURE_COOLDOWN = max(1, int(os.environ.get("DB_CONNECT_FAILURE_COOLDOWN", "2")))
+DB_POOL_SIZE_CAP = max(1, int(os.environ.get("DB_POOL_SIZE_CAP", "12")))
+DB_MAX_OVERFLOW_CAP = max(0, int(os.environ.get("DB_MAX_OVERFLOW_CAP", "24")))
+# Per-replica caps for the shared Supabase pooler.
+# Math: (pool_size_cap + max_overflow_cap) × replica_count <= 180 (leaving 20 for Supabase internals).
+# Default: (10 + 20) × 4 replicas = 120 < 180 — safe for 4 replicas.
+SUPABASE_POOLER_POOL_SIZE_CAP = max(1, int(os.environ.get("SUPABASE_POOLER_POOL_SIZE_CAP", "10")))
+SUPABASE_POOLER_MAX_OVERFLOW_CAP = max(0, int(os.environ.get("SUPABASE_POOLER_MAX_OVERFLOW_CAP", "20")))
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_FILE = ROOT_DIR / "environment settings"
+
+
+def _effective_pool_settings(engine_url: str) -> tuple[int, int]:
+    pool_size = min(DEFAULT_DB_POOL_SIZE, DB_POOL_SIZE_CAP)
+    max_overflow = min(DEFAULT_DB_MAX_OVERFLOW, DB_MAX_OVERFLOW_CAP)
+
+    try:
+        host = str(urlparse(engine_url).hostname or "").strip().lower()
+    except ValueError:
+        host = ""
+
+    # Shared Supabase pooler has strict global limits; keep per-process pools small.
+    if host.endswith(".pooler.supabase.com"):
+        pool_size = min(pool_size, SUPABASE_POOLER_POOL_SIZE_CAP)
+        max_overflow = min(max_overflow, SUPABASE_POOLER_MAX_OVERFLOW_CAP)
+
+    return max(1, pool_size), max(0, max_overflow)
 
 
 def _load_database_url_from_config_file() -> str:
@@ -361,6 +436,7 @@ def get_database_url(db_path: Optional[str] = None) -> str:
 
 
 def get_engine(db_path: Optional[str] = None) -> Any:
+    global _ENGINE_CONNECT_COOLDOWN_UNTIL, _ENGINE_CONNECT_LAST_ERROR
     primary_url = get_database_url(db_path)
     candidates = _build_database_url_candidates() or [primary_url]
 
@@ -370,23 +446,32 @@ def get_engine(db_path: Optional[str] = None) -> Any:
         if cached is not None:
             return cached
 
+    now_ts = time.monotonic()
+    if now_ts < _ENGINE_CONNECT_COOLDOWN_UNTIL:
+        raise RuntimeError(
+            "Database connection is cooling down after recent failures. "
+            f"Last error: {_ENGINE_CONNECT_LAST_ERROR}"
+        )
+
     last_error: Optional[Exception] = None
     for candidate_url in candidates:
         for attempt in range(1, DEFAULT_DB_CONNECT_RETRIES + 1):
             engine_url = _engine_connect_url(candidate_url)
+            pool_size, max_overflow = _effective_pool_settings(engine_url)
             try:
                 parsed_engine_url = urlparse(engine_url)
                 db_host = str(parsed_engine_url.hostname or "").strip()
             except ValueError:
                 db_host = ""
             if db_host:
-                print(f"Attempting connection to: {db_host}")
+                logging.debug("Attempting connection to: %s", db_host)
             engine = create_engine(
                 engine_url,
                 future=True,
                 pool_pre_ping=True,
-                pool_size=DEFAULT_DB_POOL_SIZE,
-                max_overflow=DEFAULT_DB_MAX_OVERFLOW,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                pool_timeout=DEFAULT_DB_POOL_TIMEOUT,
                 pool_recycle=DEFAULT_DB_POOL_RECYCLE,
                 pool_use_lifo=True,
                 connect_args={"sslmode": "require"},
@@ -395,9 +480,12 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
                 _ENGINE_CACHE[engine_url] = engine
+                _ENGINE_CONNECT_LAST_ERROR = None
+                _ENGINE_CONNECT_COOLDOWN_UNTIL = 0.0
                 return engine
             except Exception as exc:
                 last_error = exc
+                _ENGINE_CONNECT_LAST_ERROR = exc
                 try:
                     engine.dispose()
                 except Exception:
@@ -415,6 +503,8 @@ def get_engine(db_path: Optional[str] = None) -> Any:
                         exc,
                     )
                     time.sleep(DEFAULT_DB_CONNECT_RETRY_DELAY)
+
+    _ENGINE_CONNECT_COOLDOWN_UNTIL = time.monotonic() + DEFAULT_DB_CONNECT_FAILURE_COOLDOWN
 
     raise RuntimeError(
         "Database connection failed after retries. Check SUPABASE_DB_POOLER_URL/SUPABASE_POOLER_URL "

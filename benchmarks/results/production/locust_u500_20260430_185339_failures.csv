@@ -1,0 +1,3 @@
+Method,Name,Error,Occurrences
+GET,GET /api/scrape,HTTPError('500 Server Error:  for url: GET /api/scrape'),447
+GET,GET /api/leads,HTTPError('500 Server Error:  for url: GET /api/leads'),2149

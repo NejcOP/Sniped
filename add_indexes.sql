@@ -32,8 +32,13 @@ CREATE INDEX IF NOT EXISTS idx_leads_paid_at
     ON leads (paid_at);
 
 -- Blacklist fast lookup
-CREATE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value
-    ON lead_blacklist (kind, value);
+DROP INDEX IF EXISTS idx_lead_blacklist_kind_value;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_user_kind_value
+    ON lead_blacklist (user_id, kind, value);
+
+CREATE INDEX IF NOT EXISTS idx_lead_blacklist_user_id
+    ON lead_blacklist (user_id);
 
 -- Open-tracking pixel deduplication
 CREATE INDEX IF NOT EXISTS idx_leads_open_tracking_token

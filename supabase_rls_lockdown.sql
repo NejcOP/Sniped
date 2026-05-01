@@ -9,6 +9,36 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
+-- 0) Ensure tenant key exists before enforcing user_id ownership policies
+--    users table is handled separately via auth_user_id; system_runtime is global.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT t.table_schema, t.table_name
+        FROM information_schema.tables t
+        WHERE t.table_schema = 'public'
+          AND t.table_type = 'BASE TABLE'
+          AND t.table_name NOT IN ('users', 'system_runtime')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM information_schema.columns c
+              WHERE c.table_schema = t.table_schema
+                AND c.table_name = t.table_name
+                AND c.column_name = 'user_id'
+          )
+    LOOP
+        EXECUTE format('ALTER TABLE %I.%I ADD COLUMN IF NOT EXISTS user_id text', r.table_schema, r.table_name);
+        EXECUTE format('UPDATE %I.%I SET user_id = ''legacy'' WHERE COALESCE(user_id::text, '''') = ''''', r.table_schema, r.table_name);
+        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN user_id SET DEFAULT ''legacy''', r.table_schema, r.table_name);
+        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN user_id SET NOT NULL', r.table_schema, r.table_name);
+    END LOOP;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
 -- A) Lock down anonymous role and preserve backend service role capabilities
 -- ---------------------------------------------------------------------------
 REVOKE ALL ON SCHEMA public FROM anon;

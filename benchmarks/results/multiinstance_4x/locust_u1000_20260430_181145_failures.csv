@@ -1,0 +1,29 @@
+Method,Name,Error,Occurrences
+GET,GET /api/jobs,HTTPError('502 Server Error: Bad Gateway for url: GET /api/jobs'),68
+GET,GET /api/workers,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",117
+GET,GET /api/leads,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",5590
+GET,GET /api/leads,HTTPError('500 Server Error: Internal Server Error for url: GET /api/leads'),2334
+GET,GET /api/scrape,HTTPError('502 Server Error: Bad Gateway for url: GET /api/scrape'),70
+GET,GET /api/health,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",2230
+GET,GET /api/scrape,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",1097
+GET,GET /api/health,HTTPError('500 Server Error: Internal Server Error for url: GET /api/health'),903
+GET,GET /api/workers,HTTPError('500 Server Error: Internal Server Error for url: GET /api/workers'),950
+GET,GET /api/workers,HTTPError('502 Server Error: Bad Gateway for url: GET /api/workers'),133
+GET,GET /api/leads,HTTPError('502 Server Error: Bad Gateway for url: GET /api/leads'),277
+GET,GET /api/scrape,HTTPError('401 Client Error: Unauthorized for url: GET /api/scrape'),83
+GET,GET /api/leads,HTTPError('401 Client Error: Unauthorized for url: GET /api/leads'),415
+GET,GET /api/config,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",1160
+GET,GET /api/jobs,HTTPError('401 Client Error: Unauthorized for url: GET /api/jobs'),76
+GET,GET /api/jobs,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",1124
+GET,GET /api/scrape,HTTPError('500 Server Error: Internal Server Error for url: GET /api/scrape'),425
+GET,GET /api/config,HTTPError('401 Client Error: Unauthorized for url: GET /api/config'),92
+GET,GET /api/config,HTTPError('500 Server Error: Internal Server Error for url: GET /api/config'),434
+GET,GET /api/health,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",109
+GET,GET /api/leads,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",313
+GET,GET /api/config,HTTPError('502 Server Error: Bad Gateway for url: GET /api/config'),7
+GET,GET /api/config,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",66
+GET,GET /api/workers,HTTPError('401 Client Error: Unauthorized for url: GET /api/workers'),150
+GET,GET /api/jobs,HTTPError('500 Server Error: Internal Server Error for url: GET /api/jobs'),465
+GET,GET /api/workers,"OSError(10048, '[WinError 10048] Only one usage of each socket address (protocol/network address/port) is normally permitted.')",2203
+GET,GET /api/jobs,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",65
+GET,GET /api/scrape,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",60

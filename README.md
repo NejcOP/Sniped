@@ -49,6 +49,9 @@ Services:
 - POST /api/enrich
 - POST /api/export-ai
 - POST /api/mailer/send
+- GET /api/leads/{id}/report
+- POST /api/leads/{id}/report/share
+- GET /public/report/{token}
 - POST /api/create-checkout-session
 - GET /api/supabase-health
 - POST /api/supabase/sync-all
@@ -122,3 +125,46 @@ Notes:
 
 - Existing profile folders and anti-bot behavior are preserved via backend scraper modules.
 - If you need old CLI behavior, you can still run files from archive/ manually.
+
+## SMTP fallback and reply webhook
+
+You can run outreach without per-user SMTP setup by configuring a single system sender account.
+
+Required environment variables:
+
+- SNIPED_SYSTEM_SMTP_HOST
+- SNIPED_SYSTEM_SMTP_PORT (usually 587)
+- SNIPED_SYSTEM_SMTP_EMAIL
+- SNIPED_SYSTEM_SMTP_PASSWORD
+
+Optional environment variables:
+
+- SNIPED_SYSTEM_SMTP_FROM_NAME
+- SNIPED_SYSTEM_SMTP_USE_TLS (default true)
+- SNIPED_SYSTEM_SMTP_USE_SSL (default false)
+- SNIPED_SYSTEM_SMTP_SIGNATURE
+- SNIPED_SYSTEM_SMTP_SEND_LIMIT (default 50)
+
+Behavior:
+
+- Free plan users can send through system SMTP up to the system limit (default 50).
+- Custom SMTP testing/saving is paid-plan only.
+- Paid users can connect their own SMTP account and send from their own mailbox.
+
+Incoming reply webhook:
+
+- Endpoint: POST /api/webhooks/incoming-email
+- Secret header: x-sniped-webhook-secret
+- Configure secret with SNIPED_INBOUND_WEBHOOK_SECRET
+
+Minimal JSON payload example:
+
+{
+   "event_type": "reply",
+   "thread_token": "OPEN_TRACKING_OR_THREAD_TOKEN",
+   "email": "lead@example.com",
+   "from_email": "lead@example.com",
+   "subject_line": "Re: quick question"
+}
+
+When a reply is recorded, the matched lead is moved to pipeline stage Replied.

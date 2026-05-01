@@ -19,6 +19,7 @@ import { useSearchParams } from 'react-router-dom'
 import { clearUserSession, getRememberPreference, getStoredValue, setAuthSession } from './authStorage'
 import { ALLOWED_NICHES, ACCOUNT_TYPE_OPTIONS } from './constants'
 import Footer from './Footer'
+import OnboardingWizard from './components/OnboardingWizard'
 import { appToasterProps } from './toastTheme'
 
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
@@ -35,6 +36,8 @@ const inputClass =
 
 const DEFAULT_FREE_CREDIT_LIMIT = 50
 const DEFAULT_AVERAGE_DEAL_VALUE = 1000
+const ONBOARDING_COMPLETED_KEY = 'lf_onboarding_completed_v1'
+const ONBOARDING_DISMISSED_KEY = 'lf_onboarding_dismissed_v1'
 const selectClass = `${inputClass} saas-select`
 
 const createDefaultSmtp = () => ({
@@ -115,12 +118,21 @@ function StickyActions({ saving, loading, label }) {
   )
 }
 
-function ProfileTab({ profileForm, onProfileChange, onSave, saving, loading }) {
+function ProfileTab({ profileForm, onProfileChange, onSave, saving, loading, onReopenOnboarding }) {
   return (
     <form onSubmit={onSave} className="rounded-xl border border-slate-800 bg-[#0D1117] p-5">
       <div className="mb-5">
         <h2 className="text-lg font-semibold text-white">Profile</h2>
         <p className="mt-1 text-sm text-slate-400">Personal account details only.</p>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={onReopenOnboarding}
+            className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/50 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-200 transition-all duration-200 hover:border-cyan-400 hover:bg-cyan-500/20"
+          >
+            <Zap className="h-4 w-4" /> Re-open Onboarding
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -279,8 +291,9 @@ function SmtpSetupModal({ onClose }) {
   )
 }
 
-function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, loading }) {
+function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, loading, customSmtpAllowed }) {
   const [showSetupModal, setShowSetupModal] = useState(false)
+  const locked = !customSmtpAllowed
   return (
     <form onSubmit={onSave} className="rounded-xl border border-slate-800 bg-[#0D1117] p-5">
       {showSetupModal && <SmtpSetupModal onClose={() => setShowSetupModal(false)} />}
@@ -300,12 +313,19 @@ function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, load
           <button
             type="button"
             onClick={onAdd}
+            disabled={locked}
             className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-3 py-2 text-xs font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
           >
             <Plus className="h-3.5 w-3.5" /> Add SMTP Account
           </button>
         </div>
       </div>
+
+      {locked ? (
+        <div className="mb-4 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+          Free plan uses Sniped system SMTP for initial outreach (up to 50 sends). Custom SMTP/Google OAuth is available on paid plans.
+        </div>
+      ) : null}
 
       <div className="space-y-4">
         {smtpAccounts.map((account, index) => {
@@ -327,7 +347,7 @@ function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, load
                   type="button"
                   className="text-xs text-rose-300 transition-all duration-200 hover:text-rose-200 disabled:opacity-50"
                   onClick={() => onRemove(index)}
-                  disabled={smtpAccounts.length <= 1}
+                  disabled={locked || smtpAccounts.length <= 1}
                 >
                   Remove
                 </button>
@@ -336,19 +356,19 @@ function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, load
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block text-sm text-slate-300">
                   <span className="mb-1.5 block">Host</span>
-                  <input className={inputClass} type="text" value={account.host} onChange={(event) => onUpdate(index, 'host', event.target.value)} />
+                  <input className={inputClass} type="text" value={account.host} disabled={locked} onChange={(event) => onUpdate(index, 'host', event.target.value)} />
                 </label>
                 <label className="block text-sm text-slate-300">
                   <span className="mb-1.5 block">Port</span>
-                  <input className={inputClass} type="number" value={account.port} onChange={(event) => onUpdate(index, 'port', event.target.value)} />
+                  <input className={inputClass} type="number" value={account.port} disabled={locked} onChange={(event) => onUpdate(index, 'port', event.target.value)} />
                 </label>
                 <label className="block text-sm text-slate-300">
                   <span className="mb-1.5 block">Email</span>
-                  <input className={inputClass} type="email" value={account.email} onChange={(event) => onUpdate(index, 'email', event.target.value)} />
+                  <input className={inputClass} type="email" value={account.email} disabled={locked} onChange={(event) => onUpdate(index, 'email', event.target.value)} />
                 </label>
                 <label className="block text-sm text-slate-300">
                   <span className="mb-1.5 block">From Name</span>
-                  <input className={inputClass} type="text" value={account.from_name} onChange={(event) => onUpdate(index, 'from_name', event.target.value)} />
+                  <input className={inputClass} type="text" value={account.from_name} disabled={locked} onChange={(event) => onUpdate(index, 'from_name', event.target.value)} />
                 </label>
               </div>
 
@@ -358,6 +378,7 @@ function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, load
                   className={inputClass}
                   type="password"
                   value={account.password}
+                  disabled={locked}
                   placeholder={account.password_set ? 'Leave blank to keep existing password' : 'SMTP password'}
                   onChange={(event) => onUpdate(index, 'password', event.target.value)}
                 />
@@ -367,7 +388,7 @@ function SmtpTab({ smtpAccounts, onAdd, onRemove, onUpdate, onSave, saving, load
         })}
       </div>
 
-      <StickyActions saving={saving} loading={loading} label="Save SMTP Settings" />
+      <StickyActions saving={saving} loading={loading || locked} label="Save SMTP Settings" />
     </form>
   )
 }
@@ -610,6 +631,8 @@ export default function SettingsPage() {
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
+  const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false)
+  const [onboardingCompleting, setOnboardingCompleting] = useState(false)
 
   const [profileForm, setProfileForm] = useState({
     email: '',
@@ -995,6 +1018,23 @@ export default function SettingsPage() {
     return selected ? selected.label : 'Account'
   }, [profileForm.account_type])
 
+  const closeOnboardingWizard = useCallback(() => {
+    if (onboardingCompleting) return
+    setOnboardingWizardOpen(false)
+  }, [onboardingCompleting])
+
+  const completeOnboardingFromSettings = useCallback(async () => {
+    setOnboardingCompleting(true)
+    try {
+      localStorage.setItem(ONBOARDING_COMPLETED_KEY, '1')
+      localStorage.removeItem(ONBOARDING_DISMISSED_KEY)
+      toast.success('Onboarding walkthrough finished.')
+      setOnboardingWizardOpen(false)
+    } finally {
+      setOnboardingCompleting(false)
+    }
+  }, [])
+
   return (
     <div className="app-root min-h-screen text-slate-100">
       <Toaster {...appToasterProps} />
@@ -1007,13 +1047,23 @@ export default function SettingsPage() {
               <h1 className="mt-2 text-2xl font-bold tracking-tight text-white sm:text-3xl">Settings</h1>
             </div>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => window.location.assign('/app')}
-              className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/70 bg-[#FFC107]/10 px-3 py-2 text-sm font-semibold text-[#FFC107] transition-all duration-200 hover:border-[#FFC107] hover:bg-[#FFC107]/15"
-            >
-              <ArrowLeft className="h-4 w-4" /> Back to Dashboard
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => window.location.assign('/app')}
+                className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/70 bg-[#FFC107]/10 px-3 py-2 text-sm font-semibold text-[#FFC107] transition-all duration-200 hover:border-[#FFC107] hover:bg-[#FFC107]/15"
+              >
+                <ArrowLeft className="h-4 w-4" /> Back to Dashboard
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setOnboardingWizardOpen(true)}
+                className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/50 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-200 transition-all duration-200 hover:border-cyan-400 hover:bg-cyan-500/20"
+              >
+                <Zap className="h-4 w-4" /> Re-open Onboarding
+              </button>
+            </div>
 
             <div className="inline-flex items-center gap-2 rounded-xl border border-slate-800 bg-[#111827] px-3 py-2 text-xs text-slate-300">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
@@ -1034,6 +1084,7 @@ export default function SettingsPage() {
                     onSave={saveProfile}
                     saving={profileSaving}
                     loading={configLoading}
+                    onReopenOnboarding={() => setOnboardingWizardOpen(true)}
                   />
                 ) : null}
 
@@ -1046,6 +1097,7 @@ export default function SettingsPage() {
                     onSave={saveSmtp}
                     saving={smtpSaving}
                     loading={configLoading}
+                    customSmtpAllowed={Boolean(billingSnapshot.isSubscribed)}
                   />
                 ) : null}
 
@@ -1095,6 +1147,16 @@ export default function SettingsPage() {
         onPasswordChange={(value) => updateProfileField('delete_password', value)}
         onClose={closeDeleteModal}
         onDelete={deleteAccount}
+      />
+
+      <OnboardingWizard
+        open={onboardingWizardOpen}
+        submitting={onboardingCompleting}
+        onClose={closeOnboardingWizard}
+        onComplete={completeOnboardingFromSettings}
+        completeCta="Finish Onboarding"
+        subtitle="Settings walkthrough"
+        title="Replay your setup wizard"
       />
     </div>
   )

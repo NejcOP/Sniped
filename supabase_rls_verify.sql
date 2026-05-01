@@ -118,3 +118,20 @@ FROM pg_policies
 WHERE schemaname = 'public'
   AND tablename = 'users'
 ORDER BY policyname;
+
+-- 8) Tables still missing user_id (excluding special/global tables)
+SELECT
+  t.table_schema,
+  t.table_name
+FROM information_schema.tables t
+WHERE t.table_schema = 'public'
+  AND t.table_type = 'BASE TABLE'
+  AND t.table_name NOT IN ('users', 'system_runtime')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns c
+    WHERE c.table_schema = t.table_schema
+      AND c.table_name = t.table_name
+      AND c.column_name = 'user_id'
+  )
+ORDER BY t.table_name;

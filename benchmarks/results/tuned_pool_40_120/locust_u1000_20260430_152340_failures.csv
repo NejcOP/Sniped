@@ -1,0 +1,7 @@
+Method,Name,Error,Occurrences
+GET,GET /api/workers,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",539
+GET,GET /api/health,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",562
+GET,GET /api/leads,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",1254
+GET,GET /api/config,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",235
+GET,GET /api/jobs,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",254
+GET,GET /api/scrape,"ConnectionRefusedError(10061, '[WinError 10061] No connection could be made because the target machine actively refused it.')",233

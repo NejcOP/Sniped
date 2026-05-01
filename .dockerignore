@@ -20,6 +20,8 @@ frontend
 api
 profiles
 archive
+scripts
+benchmarks
 *.csv
 *.sql
 *.toml
