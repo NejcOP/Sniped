@@ -2060,6 +2060,8 @@ function App({ initialTab = 'leads' }) {
   const [aiFilterLoading, setAiFilterLoading] = useState(false)
   const [aiFilterLeadIds, setAiFilterLeadIds] = useState([])
   const [aiFilterApplied, setAiFilterApplied] = useState(false)
+  const [aiFilterToolbarOpen, setAiFilterToolbarOpen] = useState(false)
+  const [aiFilterInputFocused, setAiFilterInputFocused] = useState(false)
   const [selectedLeadIds, setSelectedLeadIds] = useState([])
   const [shareReportStateByLeadId, setShareReportStateByLeadId] = useState({})
   const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false)
@@ -7207,81 +7209,6 @@ function App({ initialTab = 'leads' }) {
           </section>
         ) : null}
 
-        <section className="glass-card mb-6 rounded-[24px] border border-cyan-500/25 bg-[linear-gradient(135deg,rgba(8,47,73,0.35),rgba(15,23,42,0.9))] p-5 shadow-[0_14px_42px_rgba(14,116,144,0.2)]">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="label-overline text-cyan-300">AI Smart Filter</p>
-              <h3 className="mt-1 text-xl font-semibold text-white">Describe your perfect lead in plain English</h3>
-              <p className="mt-1 text-sm text-slate-300">Try: “Find plumbers in London with slow websites”</p>
-            </div>
-            <button
-              type="button"
-              className="btn-ghost px-3 py-2 text-sm"
-              onClick={() => {
-                if (activeTab !== 'leads') openMainTab('leads')
-                leadSearchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-              }}
-            >
-              <Search className="h-4 w-4" /> Go to Leads Table
-            </button>
-          </div>
-
-          <form
-            className="mt-4 flex flex-wrap items-center gap-2"
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (activeTab !== 'leads') openMainTab('leads')
-              void runAiFilter(aiFilterPrompt)
-            }}
-          >
-            <div className="relative min-w-[280px] flex-1">
-              <Sparkles className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-300" />
-              <input
-                className="glass-input h-11 w-full pl-9 text-sm"
-                type="text"
-                value={aiFilterPrompt}
-                placeholder="Find plumbers in London with slow websites"
-                onChange={(e) => setAiFilterPrompt(e.target.value)}
-              />
-            </div>
-            <button type="submit" className="btn-primary h-11 px-4" disabled={aiFilterLoading}>
-              <Sparkles className={`h-4 w-4 ${aiFilterLoading ? 'animate-spin' : ''}`} />
-              {aiFilterLoading ? 'Analyzing…' : 'Run AI Smart Filter'}
-            </button>
-            {isAiFilterActive ? (
-              <button type="button" className="btn-ghost h-11 px-3 text-sm" onClick={clearAiFilter}>
-                Clear
-              </button>
-            ) : null}
-          </form>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            {[
-              'Find plumbers in London with slow websites',
-              'Show local dentists in Berlin with no Instagram',
-              'Find gyms in Miami with weak SEO and low reviews',
-            ].map((sample) => (
-              <button
-                key={sample}
-                type="button"
-                className="btn-ghost px-2.5 py-1.5 text-xs"
-                disabled={aiFilterLoading}
-                onClick={() => {
-                  setAiFilterPrompt(sample)
-                  if (activeTab !== 'leads') openMainTab('leads')
-                  void runAiFilter(sample)
-                }}
-              >
-                {sample}
-              </button>
-            ))}
-          </div>
-
-          {aiFilterSummary ? (
-            <p className="mt-3 text-xs text-cyan-100/90">{aiFilterSummary}</p>
-          ) : null}
-        </section>
-
         <OnboardingWizard
           open={onboardingWizardOpen}
           submitting={onboardingLaunching}
@@ -7852,6 +7779,82 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </form>
 
+              <div className="rounded-2xl border border-cyan-500/20 bg-[linear-gradient(140deg,rgba(8,47,73,0.2),rgba(15,23,42,0.65))] px-3 py-3 shadow-[0_10px_34px_rgba(14,116,144,0.16)]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition ${aiFilterToolbarOpen ? 'border-cyan-400/50 bg-cyan-500/15 text-cyan-100' : 'border-white/10 bg-white/[0.03] text-slate-300 hover:text-white'}`}
+                    onClick={() => setAiFilterToolbarOpen((prev) => !prev)}
+                  >
+                    <Sparkles className={`h-3.5 w-3.5 ${aiFilterLoading ? 'animate-spin' : ''}`} />
+                    AI Pro Search
+                  </button>
+                  {isAiFilterActive ? (
+                    <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                      <span className="truncate">{aiFilterSummary || `AI assistant narrowed this list to ${filteredLeads.length} lead(s).`}</span>
+                      <button type="button" className="ml-auto text-xs font-semibold text-cyan-200 hover:text-white" onClick={clearAiFilter}>Clear</button>
+                    </div>
+                  ) : null}
+                </div>
+
+                {aiFilterToolbarOpen ? (
+                  <>
+                    <form
+                      className="mt-2 flex flex-wrap items-center gap-2"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void runAiFilter(aiFilterPrompt)
+                      }}
+                    >
+                      <div className="relative min-w-[260px] flex-1">
+                        <Sparkles className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-cyan-300" />
+                        <input
+                          className="glass-input h-10 w-full pl-8 text-sm"
+                          type="text"
+                          value={aiFilterPrompt}
+                          placeholder="Find plumbers in London with slow websites"
+                          onFocus={() => setAiFilterInputFocused(true)}
+                          onBlur={() => setAiFilterInputFocused(false)}
+                          onChange={(e) => setAiFilterPrompt(e.target.value)}
+                        />
+                      </div>
+                      <button type="submit" className="btn-primary h-10 px-3 text-xs" disabled={aiFilterLoading}>
+                        {aiFilterLoading ? 'Analyzing…' : 'Run'}
+                      </button>
+                      {isAiFilterActive ? (
+                        <button type="button" className="btn-ghost h-10 px-3 text-xs" onClick={clearAiFilter}>
+                          Reset
+                        </button>
+                      ) : null}
+                    </form>
+
+                    {aiFilterInputFocused || !aiFilterPrompt.trim() ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {[
+                          'Find plumbers in London with slow websites',
+                          'Show local dentists in Berlin with no Instagram',
+                          'Find gyms in Miami with weak SEO and low reviews',
+                        ].map((sample) => (
+                          <button
+                            key={sample}
+                            type="button"
+                            className="rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] font-medium text-slate-300 transition hover:border-cyan-400/40 hover:text-cyan-100"
+                            disabled={aiFilterLoading}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setAiFilterPrompt(sample)
+                              void runAiFilter(sample)
+                            }}
+                          >
+                            {sample}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+
               {/* Search + filter row */}
               <div className="flex flex-wrap items-center gap-3">
                 <div className="relative min-w-[220px] flex-1">
@@ -7931,14 +7934,6 @@ function App({ initialTab = 'leads' }) {
                   Pipeline View
                 </button>
               </div>
-
-              {isAiFilterActive ? (
-                <div className="flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <span>{aiFilterSummary || `AI assistant narrowed this list to ${filteredLeads.length} lead(s).`}</span>
-                  <button type="button" className="ml-auto text-xs font-semibold text-cyan-200 hover:text-white" onClick={clearAiFilter}>X</button>
-                </div>
-              ) : null}
 
               <div className="flex flex-wrap gap-2">
                 <button
