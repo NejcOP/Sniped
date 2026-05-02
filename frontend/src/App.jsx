@@ -1483,6 +1483,37 @@ function deriveLeadRevenueBand(lead) {
   return '<$500k'
 }
 
+function resolveLeadTemplateKey(lead) {
+  if (!lead) return 'ghost'
+  const hasWebsite = Boolean(String(lead?.website_url || '').trim())
+  if (!hasWebsite) return 'ghost'
+
+  const speedSignals = [
+    Number(lead?.website_performance_score || 0),
+    Number(lead?.website_score || 0),
+    Number(lead?.page_speed_score || 0),
+  ].filter((value) => Number.isFinite(value) && value > 0)
+  if (speedSignals.some((value) => value < 60)) return 'speed'
+
+  const leadScore = Number(resolveBestLeadScore(lead) || 0)
+  if (leadScore >= 8.5) return 'golden'
+  return 'competitor'
+}
+
+function resolveLeadCityValue(lead) {
+  const direct = String(lead?.city || '').trim()
+  if (direct) return direct
+  const fromAddress = String(lead?.address || '').split(',')[0]?.trim()
+  if (fromAddress) return fromAddress
+  const keyword = String(lead?.search_keyword || '').trim()
+  const lower = keyword.toLowerCase()
+  const marker = lower.lastIndexOf(' in ')
+  if (marker >= 0) {
+    return keyword.slice(marker + 4).trim() || 'Local Area'
+  }
+  return 'Local Area'
+}
+
 function normalizeSavedSegmentFilters(filters) {
   const advanced = filters?.advancedLeadFilters || {}
   return {
@@ -2307,11 +2338,7 @@ function App({ initialTab = 'leads' }) {
   const [refreshingDashboard, setRefreshingDashboard] = useState(false)
   const [lastManualRefreshAt, setLastManualRefreshAt] = useState(null)
   const [mailPreview, setMailPreview] = useState({ subject: '', body: '', generatedAt: null })
-  const defaultColdOutreachForm = { businessName: '', city: '', niche: '', painPoint: '', competitors: '', monthlyLoss: '', contactName: '', contactEmail: '' }
-  const [coldOutreachForm, setColdOutreachForm] = useState(defaultColdOutreachForm)
-  const [coldOutreachResult, setColdOutreachResult] = useState({ subject: '', body: '', generatedAt: null })
-  const [coldOutreachLoading, setColdOutreachLoading] = useState(false)
-  const [coldOutreachError, setColdOutreachError] = useState('')
+  const [leadEmailDraft, setLeadEmailDraft] = useState({ leadId: null, templateKey: 'ghost', subject: '', body: '' })
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
   const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
@@ -3255,6 +3282,30 @@ function App({ initialTab = 'leads' }) {
     [filteredLeads, selectedLeadIdSet],
   )
 
+  const selectedLeadForEmailDraft = useMemo(
+    () => (selectedLeadRows.length === 1 ? selectedLeadRows[0] : null),
+    [selectedLeadRows],
+  )
+
+  const resolvedLeadDraftPreview = useMemo(() => {
+    if (!selectedLeadForEmailDraft || Number(leadEmailDraft.leadId || 0) !== Number(selectedLeadForEmailDraft.id || 0)) {
+      return { subject: '', body: '' }
+    }
+
+    const leadNiche = deriveLeadIndustry(selectedLeadForEmailDraft) || selectedUserNiche || 'Local Business'
+    const vars = {
+      BusinessName: selectedLeadForEmailDraft.business_name || selectedLeadForEmailDraft.name || 'Business Name',
+      City: resolveLeadCityValue(selectedLeadForEmailDraft),
+      Niche: leadNiche,
+      YourName: currentUserName || 'Your Name',
+    }
+
+    return {
+      subject: replaceTemplatePlaceholders(leadEmailDraft.subject, vars),
+      body: replaceTemplatePlaceholders(leadEmailDraft.body, vars),
+    }
+  }, [leadEmailDraft.body, leadEmailDraft.leadId, leadEmailDraft.subject, selectedLeadForEmailDraft, selectedUserNiche, currentUserName])
+
   const enrichmentEligibleLeadIds = useMemo(
     () => getEligibleEnrichmentLeadIds(enrichForm.limit),
     [getEligibleEnrichmentLeadIds, enrichForm.limit],
@@ -3290,6 +3341,24 @@ function App({ initialTab = 'leads' }) {
     const allowed = new Set(filteredLeads.map((lead) => Number(lead?.id)).filter((id) => Number.isFinite(id) && id > 0))
     setSelectedLeadIds((prev) => prev.filter((id) => allowed.has(Number(id))))
   }, [filteredLeads])
+
+  useEffect(() => {
+    if (!selectedLeadForEmailDraft) return
+    const leadId = Number(selectedLeadForEmailDraft.id || 0)
+    if (!leadId) return
+    if (Number(leadEmailDraft.leadId || 0) === leadId) return
+
+    const templateKey = resolveLeadTemplateKey(selectedLeadForEmailDraft)
+    const leadNiche = deriveLeadIndustry(selectedLeadForEmailDraft) || selectedUserNiche
+    const template = resolveSnipedTemplateForSelection(leadNiche, templateKey)
+
+    setLeadEmailDraft({
+      leadId,
+      templateKey,
+      subject: String(template?.subject || ''),
+      body: String(template?.body || ''),
+    })
+  }, [selectedLeadForEmailDraft, selectedUserNiche, leadEmailDraft.leadId])
 
   const toggleLeadSelection = useCallback((leadId) => {
     const normalizedId = Number(leadId)
@@ -5343,44 +5412,6 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function generateColdOutreach(e) {
-    e.preventDefault()
-    const { businessName, city, niche, painPoint, competitors, monthlyLoss } = coldOutreachForm
-    if (!businessName.trim() || !city.trim()) {
-      toast.error('Business name and city are required')
-      return
-    }
-    setColdOutreachLoading(true)
-    setColdOutreachError('')
-    try {
-      const data = await fetchJson('/api/mailer/cold-outreach', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          business_name: businessName.trim(),
-          city: city.trim(),
-          niche: niche.trim() || null,
-          pain_point: painPoint.trim() || null,
-          competitors: competitors.split(',').map((c) => c.trim()).filter(Boolean),
-          monthly_loss: monthlyLoss.trim() || null,
-        }),
-      })
-      setColdOutreachResult({ subject: data.subject, body: data.body, generatedAt: data.generated_at })
-      toast.success('Cold outreach email generated')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Generation failed'
-      setColdOutreachError(msg)
-      toast.error(msg)
-    } finally {
-      setColdOutreachLoading(false)
-    }
-  }
-
-  function copyColdOutreach() {
-    const text = `Subject: ${coldOutreachResult.subject}\n\n${coldOutreachResult.body}`
-    navigator.clipboard.writeText(text).then(() => toast.success('Copied to clipboard'))
-  }
-
   function mapCountryCodeToScrape(countryCode) {
     const supported = ['US', 'SI', 'DE', 'AT']
     const code = String(countryCode || '').toUpperCase()
@@ -6497,9 +6528,9 @@ function App({ initialTab = 'leads' }) {
     if (!activeCard) return
 
     const sampleVars = {
-      BusinessName: coldOutreachForm.businessName || 'GoFast',
-      City: coldOutreachForm.city || 'Ljubljana',
-      Niche: coldOutreachForm.niche || selectedUserNiche || 'Web Design',
+      BusinessName: 'GoFast',
+      City: 'Ljubljana',
+      Niche: selectedUserNiche || 'Web Design',
       YourName: currentUserName || 'Your Name',
     }
 
@@ -6515,9 +6546,6 @@ function App({ initialTab = 'leads' }) {
     })
   }, [
     activeLiveMailTemplateKey,
-    coldOutreachForm.businessName,
-    coldOutreachForm.city,
-    coldOutreachForm.niche,
     configForm,
     currentUserName,
     selectedUserNiche,
@@ -7960,6 +7988,91 @@ function App({ initialTab = 'leads' }) {
                 </div>
               ) : null}
 
+              {selectedLeadForEmailDraft ? (
+                <div className="mt-3 rounded-[24px] border border-cyan-500/25 bg-slate-900/70 p-4 shadow-[0_10px_32px_rgba(6,182,212,0.16)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-300">Selected lead email draft</p>
+                      <p className="text-sm text-slate-300">
+                        {selectedLeadForEmailDraft.business_name || 'Selected business'} · template {leadEmailDraft.templateKey}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-ghost px-3 py-1.5 text-xs"
+                      onClick={() => {
+                        const leadNiche = deriveLeadIndustry(selectedLeadForEmailDraft) || selectedUserNiche
+                        const templateKey = resolveLeadTemplateKey(selectedLeadForEmailDraft)
+                        const template = resolveSnipedTemplateForSelection(leadNiche, templateKey)
+                        setLeadEmailDraft({
+                          leadId: Number(selectedLeadForEmailDraft.id || 0),
+                          templateKey,
+                          subject: String(template?.subject || ''),
+                          body: String(template?.body || ''),
+                        })
+                      }}
+                    >
+                      Reset to template
+                    </button>
+                  </div>
+
+                  <div className="mt-3 grid gap-3 xl:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 space-y-3">
+                      <label className="field-label">
+                        <span className="mb-1.5 block">Subject (editable)</span>
+                        <input
+                          className="glass-input"
+                          type="text"
+                          value={leadEmailDraft.subject}
+                          onChange={(e) => setLeadEmailDraft((prev) => ({ ...prev, subject: e.target.value }))}
+                        />
+                      </label>
+                      <label className="field-label">
+                        <span className="mb-1.5 block">Body (editable)</span>
+                        <textarea
+                          className="glass-input min-h-[210px]"
+                          value={leadEmailDraft.body}
+                          onChange={(e) => setLeadEmailDraft((prev) => ({ ...prev, body: e.target.value }))}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="overflow-hidden rounded-2xl border border-white/10 bg-slate-950/70">
+                      <div className="border-b border-white/10 bg-white/[0.03] px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-[0.14em] text-slate-400">Live preview for selected lead</p>
+                      </div>
+                      <div className="space-y-3 px-3 py-3">
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2">
+                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">To</p>
+                          <p className="mt-1 text-sm text-slate-200">
+                            {selectedLeadForEmailDraft.contact_name || 'Business owner'}
+                            {selectedLeadForEmailDraft.email ? ` <${selectedLeadForEmailDraft.email}>` : ''}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2">
+                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</p>
+                          <p className="mt-1 text-sm font-semibold text-white">{resolvedLeadDraftPreview.subject || 'No subject yet'}</p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-slate-950/80 p-3">
+                          <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-6 text-slate-200">{resolvedLeadDraftPreview.body || 'No body yet'}</pre>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn-ghost w-full justify-center py-2 text-xs"
+                          onClick={() => {
+                            const text = `Subject: ${resolvedLeadDraftPreview.subject}\n\n${resolvedLeadDraftPreview.body}`
+                            navigator.clipboard.writeText(text).then(() => toast.success('Lead draft copied'))
+                          }}
+                          disabled={!resolvedLeadDraftPreview.subject && !resolvedLeadDraftPreview.body}
+                        >
+                          <Clipboard className="h-3.5 w-3.5" /> Copy preview
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
                 <aside className={`${leadFilterPanelOpen ? 'block' : 'hidden'} xl:block rounded-[24px] border border-slate-700/50 bg-slate-900/70 p-4 shadow-[0_10px_40px_rgba(2,6,23,0.22)]`}>
                   <div className="mb-4 flex items-center justify-between gap-2">
@@ -9373,111 +9486,6 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
 
-              {/* ── Cold Outreach Generator ── */}
-              <div className="rounded-2xl border border-amber-500/20 bg-amber-950/10 p-5">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold text-white flex items-center gap-2">
-                      <Zap className="h-4 w-4 text-amber-400" /> Cold Outreach Generator
-                    </h3>
-                    <p className="mt-1 text-xs text-slate-400">
-                      AI writes a short, punchy email for a specific business — under 100 words, with a pain point and PDF-CTA.
-                    </p>
-                  </div>
-                  <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-200">Draft AI</span>
-                </div>
-
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <div className="rounded-xl border border-white/10 bg-slate-950/50 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Business context</p>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Business Name *</span>
-                        <input className="glass-input" type="text" placeholder="e.g. Apex Roofing" value={coldOutreachForm.businessName} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, businessName: e.target.value })} required />
-                      </label>
-                      <label className="field-label">
-                        <span className="mb-1.5 block">City *</span>
-                        <input className="glass-input" type="text" placeholder="e.g. London" value={coldOutreachForm.city} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, city: e.target.value })} required />
-                      </label>
-                      <label className="field-label sm:col-span-2">
-                        <span className="mb-1.5 block">Niche</span>
-                        <input className="glass-input" type="text" placeholder="e.g. auto repair, dentist…" value={coldOutreachForm.niche} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, niche: e.target.value })} />
-                      </label>
-                      <label className="field-label sm:col-span-2">
-                        <span className="mb-1.5 block">Competitors (comma-separated)</span>
-                        <input className="glass-input" type="text" placeholder="e.g. Apex Roofing, Summit Builders" value={coldOutreachForm.competitors} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, competitors: e.target.value })} />
-                      </label>
-                      <label className="field-label sm:col-span-2">
-                        <span className="mb-1.5 block">Pain Point (optional — AI turns it into a value statement)</span>
-                        <input className="glass-input" type="text" placeholder="e.g. no website, 2 reviews vs. 150 competitors…" value={coldOutreachForm.painPoint} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, painPoint: e.target.value })} />
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-white/10 bg-slate-950/50 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Recipient & offer</p>
-                    <div className="mt-3 grid gap-3">
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Estimated Monthly Loss</span>
-                        <input className="glass-input" type="text" placeholder="e.g. €3,000" value={coldOutreachForm.monthlyLoss} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, monthlyLoss: e.target.value })} />
-                      </label>
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Recipient Contact Name</span>
-                        <input className="glass-input" type="text" placeholder="e.g. John Smith" value={coldOutreachForm.contactName} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, contactName: e.target.value })} />
-                      </label>
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Recipient Email</span>
-                        <input className="glass-input" type="email" placeholder="e.g. john@example.com" value={coldOutreachForm.contactEmail} onChange={(e) => setColdOutreachForm({ ...coldOutreachForm, contactEmail: e.target.value })} />
-                      </label>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button className="btn-primary" type="button" disabled={coldOutreachLoading} onClick={generateColdOutreach}>
-                    <Sparkles className={`h-4 w-4 ${coldOutreachLoading ? 'animate-spin' : ''}`} />
-                    {coldOutreachLoading ? 'Generating…' : 'Generate Email'}
-                  </button>
-                  {coldOutreachResult.subject && (
-                    <button className="btn-ghost" type="button" onClick={copyColdOutreach}>
-                      <Clipboard className="h-4 w-4" /> Copy
-                    </button>
-                  )}
-                  {coldOutreachResult.subject && (
-                    <button className="btn-ghost" type="button" onClick={() => { setColdOutreachResult({ subject: '', body: '', generatedAt: null }); setColdOutreachError('') }}>
-                      Reset
-                    </button>
-                  )}
-                </div>
-
-                {coldOutreachError && (
-                  <p className="mt-3 rounded-xl bg-rose-950/60 px-3 py-2 text-sm text-rose-300">{coldOutreachError}</p>
-                )}
-
-                {coldOutreachResult.subject && (
-                  <div className="mt-4 overflow-hidden rounded-[20px] border border-white/10 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
-                    <div className="border-b border-white/10 bg-white/[0.03] px-4 py-2.5 flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-rose-400/80" />
-                      <span className="h-2 w-2 rounded-full bg-amber-300/80" />
-                      <span className="h-2 w-2 rounded-full bg-emerald-400/80" />
-                      <p className="ml-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Cold Outreach Draft</p>
-                      {coldOutreachResult.generatedAt && (
-                        <span className="ml-auto text-[10px] text-slate-600">{new Date(coldOutreachResult.generatedAt).toLocaleTimeString()}</span>
-                      )}
-                    </div>
-                    <div className="space-y-3 px-4 py-4">
-                      <div className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500 mb-1">Subject</p>
-                        <p className="text-sm font-semibold text-white">{coldOutreachResult.subject}</p>
-                      </div>
-                      <div className="rounded-xl border border-white/10 bg-slate-950/70 p-4">
-                        <pre className="whitespace-pre-wrap break-words font-sans text-[14px] leading-7 text-slate-200">{coldOutreachResult.body}</pre>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
               <div className="rounded-2xl border border-white/5 bg-white/[0.03] p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                   <div>
@@ -9740,8 +9748,8 @@ function App({ initialTab = 'leads' }) {
                           <div className="flex items-start gap-3">
                             <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">To</span>
                             <div>
-                              <p className="font-medium text-white">{coldOutreachForm.contactName || 'Recipient Name'}</p>
-                              <p className="text-xs text-slate-500">{coldOutreachForm.contactEmail || 'recipient@domain.com'}</p>
+                              <p className="font-medium text-white">Business Owner</p>
+                              <p className="text-xs text-slate-500">owner@business.com</p>
                             </div>
                           </div>
                           <div className="flex items-start gap-3">
