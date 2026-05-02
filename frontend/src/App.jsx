@@ -813,19 +813,6 @@ function resolveSnipedTemplateForSelection(rawNiche, templateKey) {
   return list.find((item) => String(item?.gap || '').trim() === gap) || null
 }
 
-function buildSnipedTemplatePatch(rawNiche) {
-  const niche = resolveTemplateNicheKey(rawNiche)
-  const nicheTemplates = snipedEmailTemplates[niche]
-  const list = Array.isArray(nicheTemplates?.templates) ? nicheTemplates.templates : []
-  return list.reduce((acc, item) => {
-    const keys = SNIPED_GAP_TO_CONFIG_KEYS[String(item?.gap || '').trim()]
-    if (!keys) return acc
-    acc[keys.subjectKey] = String(item?.subject || '')
-    acc[keys.bodyKey] = String(item?.body || '')
-    return acc
-  }, {})
-}
-
 const liveMailTemplateCardMetaByNiche = {
   'Web Design & Dev': {
     ghost: { title: 'No Website', description: 'Used when the business has no website. This is your website-first opener.' },
@@ -868,127 +855,16 @@ function resolveLiveMailTemplateCardsForNiche(rawNiche) {
     ...(nicheMeta[card.key] || {}),
   }))
 }
-const mailTemplatePacks = [
-  {
-    key: 'clean',
-    label: 'Clean',
-    description: 'Short, calm, low-friction outreach.',
-    templates: {
-      ghost_subject_template: 'quick question for {BusinessName}',
-      ghost_body_template: 'Hi,\n\nI was looking for {BusinessName} in {City} and noticed you do not have a website live right now.\n\nThat usually means Google Maps traffic and direct searches are leaking to competitors who look easier to trust online.\n\nI build simple, high-converting service pages that get local businesses live fast and bring in more booked jobs.\n\nOpen to a quick 10-minute call this week?\n\nBest, {YourName}',
-      golden_subject_template: '{BusinessName} and local traffic',
-      golden_body_template: 'Hi,\n\nYour site for {BusinessName} already looks solid, but you are missing visibility in high-intent searches for {Niche} in {City}.\n\nThat means competitors are likely taking the easiest leads before people ever reach you.\n\nI can send over a short 2-minute video with a simple plan to capture more of that traffic with a better landing page and tighter Google Ads setup. Would you be against me sending it?\n\nBest, {YourName}',
-      competitor_subject_template: '{BusinessName} - quick idea',
-      competitor_body_template: 'Hi,\n\nI noticed competitors are showing up above {BusinessName} for {Niche} searches in {City}.\n\nUsually that happens when the site structure, SEO basics, or tracking setup are weaker than they should be.\n\nMy team fixes that end-to-end so local businesses turn more search traffic into booked work. If helpful, I can send over a short 2-minute breakdown.\n\nBest, {YourName}',
-      speed_subject_template: '{BusinessName} site speed',
-      speed_body_template: 'Hi,\n\nI checked {BusinessName} and the site appears slow enough on mobile that it may be hurting both rankings and conversion rate.\n\nFor {Niche} businesses in {City}, that usually means lost calls and form fills.\n\nI can show you how we fix speed, tighten the page, and make the traffic convert better.\n\nWorth a quick 10-minute call?\n\nBest, {YourName}',
-    },
-  },
-  {
-    key: 'local-first',
-    label: 'Local First',
-    description: 'Heavier local context and map visibility angle.',
-    templates: {
-      ghost_subject_template: 'noticed this about {BusinessName} in {City}',
-      ghost_body_template: 'Hi,\n\nI was searching for businesses like {BusinessName} in {City} today and noticed you still do not have a website live.\n\nFor local service companies, that usually means people see the Google listing, but then choose someone else because there is nothing online that builds trust fast.\n\nI build fast local landing pages designed to turn map traffic into calls and booked jobs. If helpful, I can send over a 2-minute video showing what I would build first.\n\nBest, {YourName}',
-      golden_subject_template: '{BusinessName} and missed local demand',
-      golden_body_template: 'Hi,\n\nI was reviewing {BusinessName} and noticed you are not taking enough visible share of high-intent local traffic for {Niche} in {City}.\n\nThat often means the business is strong, but the landing page and ad presence are not doing enough to capture demand already in the market.\n\nI can send over a tight website-plus-ads plan built specifically for local lead flow. Would you be against me sending a short 2-minute breakdown?\n\nBest, {YourName}',
-      competitor_subject_template: '{BusinessName} vs competitors in {City}',
-      competitor_body_template: 'Hi,\n\nI noticed competitors around {City} are occupying more of the visible search space than {BusinessName} right now.\n\nThat usually comes down to a better landing page structure, cleaner SEO signals, and stronger tracking.\n\nWe fix those gaps so local businesses stop leaking easy demand to nearby competitors. If useful, I can send over a short 2-minute walkthrough.\n\nBest, {YourName}',
-      speed_subject_template: '{BusinessName} mobile experience',
-      speed_body_template: 'Hi,\n\nI checked {BusinessName} and the mobile experience looks slow enough that it may be pushing both users and rankings in the wrong direction.\n\nIn local {Niche} searches around {City}, faster pages usually win more clicks and more calls.\n\nI can show you a fast cleanup plan and what it would take to improve it quickly.\n\nOpen to a short call this week?\n\nBest, {YourName}',
-    },
-  },
-  {
-    key: 'aggressive',
-    label: 'Aggressive',
-    description: 'Sharper pain framing and stronger commercial angle.',
-    templates: {
-      ghost_subject_template: '{BusinessName} is likely losing easy leads',
-      ghost_body_template: 'Hi,\n\nI looked up {BusinessName} in {City} and noticed there is still no website live.\n\nThat usually means potential customers are finding you, hesitating, and then booking the competitor that looks more established online.\n\nWe build fast service pages that fix that immediately and give you a proper base for SEO and Google Ads.\n\nDo you have 10 minutes this week to see what that would look like?\n\nBest, {YourName}',
-      golden_subject_template: '{BusinessName} is missing high-intent traffic',
-      golden_body_template: 'Hi,\n\n{BusinessName} looks strong, but you are still leaving valuable search traffic on the table for {Niche} in {City}.\n\nRight now competitors are likely buying or capturing leads that should be coming to you first.\n\nI can send over a short plan showing how to tighten the page, improve conversion, and layer in ads that bring in higher-quality demand.\n\nBest, {YourName}',
-      competitor_subject_template: 'competitors are outranking {BusinessName}',
-      competitor_body_template: 'Hi,\n\nI noticed competitors are beating {BusinessName} in Google for {Niche} around {City}.\n\nThat usually means your current site and tracking setup are not strong enough to convert or signal quality properly.\n\nWe rebuild that stack so the business is easier to find, easier to trust, and easier to contact.\n\nDo you have 10 minutes this week for a quick walkthrough?\n\nBest, {YourName}',
-      speed_subject_template: '{BusinessName} may be getting penalized',
-      speed_body_template: 'Hi,\n\nI ran a quick check on {BusinessName} and the site looks slow enough on mobile to hurt both rankings and lead volume.\n\nFor {Niche} in {City}, that usually means people bounce fast and Google pushes competitors above you.\n\nI can send over a short 2-minute walkthrough showing the fastest way to clean that up and turn the page into something that actually brings in business.\n\nBest, {YourName}',
-    },
-  },
-]
 
-const nicheTemplateBaseByCategory = {
-  'Paid Ads Agency': {
-    ghost_subject_template: '{BusinessName} tracking gap',
-    ghost_body_template: 'Hi,\n\nI reviewed {BusinessName} and noticed your paid tracking setup for {Niche} in {City} appears incomplete.\n\nWhen pixel events are missing, retargeting and optimization get weaker, so budget burns with limited learning.\n\nI can share a short fix plan to restore clean signal quality quickly.\n\nBest, {YourName}',
-    golden_subject_template: '{BusinessName} paid demand opportunity',
-    golden_body_template: 'Hi,\n\nThere is clear paid demand for {Niche} in {City}, but {BusinessName} is not capturing enough of that intent.\n\nThis is usually fixable with better campaign structure, offer match, and event hygiene.\n\nI can send a concise 2-minute action plan tailored to your account.\n\nBest, {YourName}',
-    competitor_subject_template: '{BusinessName} paid competitor gap',
-    competitor_body_template: 'Hi,\n\nCompetitors are taking stronger paid visibility than {BusinessName} for {Niche} around {City}.\n\nThat normally points to better segmentation and cleaner conversion signaling on their side.\n\nIf useful, I can send a short pressure-gap breakdown with exact fixes.\n\nBest, {YourName}',
-    speed_subject_template: '{BusinessName} attribution quality',
-    speed_body_template: 'Hi,\n\nI ran a quick quality check and {BusinessName} appears to have attribution friction that can hurt campaign efficiency.\n\nFor {Niche} in {City}, cleaner event mapping usually lowers CPA and improves lead quality.\n\nI can send a practical cleanup checklist in priority order.\n\nBest, {YourName}',
-  },
-  'SEO & Content': {
-    ghost_subject_template: '{BusinessName} content base gap',
-    ghost_body_template: 'Hi,\n\nI checked {BusinessName} and the current content footprint for {Niche} in {City} looks too thin for stable page-one visibility.\n\nWithout stronger topical coverage, competitors keep winning high-intent clicks.\n\nI can send a short 3-keyword content roadmap that is fast to implement.\n\nBest, {YourName}',
-    golden_subject_template: '{BusinessName} keyword upside',
-    golden_body_template: 'Hi,\n\nThere is keyword opportunity in {City} for {Niche}, but {BusinessName} is not taking enough page-one share yet.\n\nUsually this comes down to missing content depth and weak internal topic structure.\n\nI can send a concise ranking plan for the highest-impact terms first.\n\nBest, {YourName}',
-    competitor_subject_template: '{BusinessName} ranking gap',
-    competitor_body_template: 'Hi,\n\nCompetitors are outranking {BusinessName} for valuable {Niche} searches around {City}.\n\nThis is often a combination of stronger relevance signals and better content architecture.\n\nIf helpful, I can send a brief gap analysis with immediate wins.\n\nBest, {YourName}',
-    speed_subject_template: '{BusinessName} technical SEO drag',
-    speed_body_template: 'Hi,\n\nI ran a quick technical pass and {BusinessName} has performance issues that likely suppress both rankings and conversion quality.\n\nFor {Niche} in {City}, these issues usually create avoidable traffic loss.\n\nI can share a short technical cleanup sequence to fix this fast.\n\nBest, {YourName}',
-  },
-  'Lead Gen Agency': {
-    ghost_subject_template: '{BusinessName} lead capture leak',
-    ghost_body_template: 'Hi,\n\nI reviewed {BusinessName} and your lead capture path for {Niche} in {City} appears weaker than it should be.\n\nWhen CTA flow is unclear, qualified visitors leave without turning into booked conversations.\n\nI can send a short funnel upgrade plan that lifts capture without increasing traffic.\n\nBest, {YourName}',
-    golden_subject_template: '{BusinessName} CTA opportunity',
-    golden_body_template: 'Hi,\n\n{BusinessName} seems to have intent traffic, but conversion handoff for {Niche} in {City} is not tight enough yet.\n\nThis is typically a message and page-flow issue, not a demand issue.\n\nI can share a concise conversion blueprint you can apply immediately.\n\nBest, {YourName}',
-    competitor_subject_template: '{BusinessName} offer positioning gap',
-    competitor_body_template: 'Hi,\n\nCompetitors are likely winning more inbound demand because their offer framing is clearer than {BusinessName}.\n\nIn {City} for {Niche}, this creates a silent but expensive inquiry leak.\n\nIf useful, I can send a short positioning and CTA fix plan.\n\nBest, {YourName}',
-    speed_subject_template: '{BusinessName} funnel friction',
-    speed_body_template: 'Hi,\n\nI ran a quick check and {BusinessName} has avoidable conversion friction that is probably reducing lead volume.\n\nSmall UX and speed adjustments often create outsized gains for {Niche} in {City}.\n\nI can send a practical fix list with priority order.\n\nBest, {YourName}',
-  },
-  'B2B Service Provider': {
-    ghost_subject_template: '{BusinessName} outbound pipeline gap',
-    ghost_body_template: 'Hi,\n\nI looked at {BusinessName} and your outbound pipeline for {Niche} appears under-structured right now.\n\nThat usually leads to inconsistent deal flow even when service quality is strong.\n\nI can send a lightweight system for predictable partner sourcing and first-touch outreach.\n\nBest, {YourName}',
-    golden_subject_template: '{BusinessName} LinkedIn demand opportunity',
-    golden_body_template: 'Hi,\n\n{BusinessName} has strong potential, but LinkedIn demand capture for {Niche} in {City} looks underused.\n\nThis often means high-fit conversations are going to teams with more consistent outbound cadence.\n\nI can send a concise LinkedIn plus email workflow to close that gap.\n\nBest, {YourName}',
-    competitor_subject_template: '{BusinessName} partner outreach gap',
-    competitor_body_template: 'Hi,\n\nCompetitors are frequently growing faster by running more systematic direct outreach than {BusinessName}.\n\nFor B2B services, this compounds into a measurable pipeline gap over time.\n\nIf helpful, I can send a short partner-sourcing playbook tailored to your ICP.\n\nBest, {YourName}',
-    speed_subject_template: '{BusinessName} outreach handoff friction',
-    speed_body_template: 'Hi,\n\nI noticed likely friction between sourcing, first touch, and follow-up in your current workflow.\n\nThose handoff gaps usually slow meeting velocity and reduce conversion quality.\n\nI can share a short automation-first sequence to tighten the full pipeline.\n\nBest, {YourName}',
-  },
-}
-
-function applyPackToneToBody(body, packKey) {
-  if (!body) return body
-  if (packKey === 'local-first') {
-    return body.replace('Hi,\n\n', 'Hi,\n\nI focused on your local market in {City} and found this quick win.\n\n')
+function replaceTemplatePlaceholders(text, vars) {
+  const payload = String(text || '')
+  const map = {
+    '{BusinessName}': String(vars?.BusinessName || ''),
+    '{City}': String(vars?.City || ''),
+    '{Niche}': String(vars?.Niche || ''),
+    '{YourName}': String(vars?.YourName || ''),
   }
-  if (packKey === 'aggressive') {
-    return body.replace('If useful,', 'Directly:').replace('I can', 'I can immediately')
-  }
-  return body
-}
-
-function resolveMailTemplatePacksForNiche(rawNiche) {
-  const niche = resolveTemplateNicheKey(rawNiche)
-  const baseTemplates = nicheTemplateBaseByCategory[niche]
-  if (!baseTemplates) return mailTemplatePacks
-  return mailTemplatePacks.map((pack) => {
-    const tonedTemplates = Object.fromEntries(
-      Object.entries(baseTemplates).map(([key, value]) => {
-        if (!key.endsWith('_body_template')) return [key, value]
-        return [key, applyPackToneToBody(value, pack.key)]
-      }),
-    )
-    return {
-      ...pack,
-      templates: {
-        ...pack.templates,
-        ...tonedTemplates,
-      },
-    }
-  })
+  return Object.entries(map).reduce((acc, [token, value]) => acc.split(token).join(value), payload)
 }
 
 function getIdleTask(taskType) {
@@ -2441,8 +2317,6 @@ function App({ initialTab = 'leads' }) {
   const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
   const [showLeadScoreBreakdown, setShowLeadScoreBreakdown] = useState(false)
   const [taskAiPreviewLead, setTaskAiPreviewLead] = useState(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [activeMailPack, setActiveMailPack] = useState('')
   const [activeLiveMailTemplateKey, setActiveLiveMailTemplateKey] = useState(liveMailTemplateCards[0]?.key || 'ghost')
   const [activeMailEditorTab, setActiveMailEditorTab] = useState('live')
   const [showMailerConfirm, setShowMailerConfirm] = useState(false)
@@ -3997,7 +3871,6 @@ function App({ initialTab = 'leads' }) {
       }
       setConfigForm(nextConfig)
       setSmtpTestResults({})
-      await previewMailTemplate({ silent: true, configOverride: nextConfig })
       setConfigFormLoaded(true)
     } catch { /* silent */ }
   }
@@ -5617,9 +5490,6 @@ function App({ initialTab = 'leads' }) {
       void loadConfigForm()
       if (tabName === 'mail') {
         void fetchMailerCampaignStats({ silent: true })
-        if (configFormLoaded) {
-          void previewMailTemplate({ silent: true })
-        }
       }
     }
 
@@ -5736,84 +5606,6 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setSavingSequence(false)
     }
-  }
-
-  async function previewMailTemplate({ regenerate = false, silent = false, configOverride = null } = {}) {
-    const previewConfig = configOverride || configForm
-    setPreviewLoading(true)
-    try {
-      const data = await fetchJson('/api/mailer/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          regenerate,
-          mail_signature: previewConfig.mail_signature || '',
-          ghost_subject_template: previewConfig.ghost_subject_template || '',
-          ghost_body_template: previewConfig.ghost_body_template || '',
-          golden_subject_template: previewConfig.golden_subject_template || '',
-          golden_body_template: previewConfig.golden_body_template || '',
-          competitor_subject_template: previewConfig.competitor_subject_template || '',
-          competitor_body_template: previewConfig.competitor_body_template || '',
-          speed_subject_template: previewConfig.speed_subject_template || '',
-          speed_body_template: previewConfig.speed_body_template || '',
-        }),
-      })
-
-      setMailPreview({
-        subject: String(data.subject || ''),
-        body: String(data.body || ''),
-        generatedAt: data.generated_at || new Date().toISOString(),
-      })
-
-      const nextBalance = Number(data?.credits_balance)
-      const nextLimit = Number(data?.credits_limit)
-      if (Number.isFinite(nextBalance)) {
-        setUser((prev) => ({
-          ...prev,
-          credits: Math.max(0, nextBalance),
-          creditLimit: Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : prev.creditLimit,
-          credits_balance: Math.max(0, nextBalance),
-          credits_limit: Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : prev.credits_limit,
-        }))
-      }
-
-      if (!silent) {
-        toast.success(regenerate ? 'Preview regenerated' : 'Preview generated')
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Preview generation failed'
-      setLastError(message)
-      if (!silent) {
-        toast.error(message)
-      }
-    } finally {
-      setPreviewLoading(false)
-    }
-  }
-
-  async function applyMailTemplatePack(packKey) {
-    const pack = visibleMailTemplatePacks.find((item) => item.key === packKey)
-    if (!pack) return
-
-    const snipedPatch = buildSnipedTemplatePatch(selectedUserNiche)
-    const activeTemplate = resolveSnipedTemplateForSelection(selectedUserNiche, activeLiveMailTemplateKey)
-
-    const nextConfig = {
-      ...configForm,
-      ...pack.templates,
-      ...snipedPatch,
-    }
-
-    setConfigForm(nextConfig)
-    if (activeTemplate?.followup) {
-      setSequenceForm((prev) => ({
-        ...prev,
-        step2_body: String(activeTemplate.followup || prev.step2_body || ''),
-      }))
-    }
-    setActiveMailPack(pack.key)
-    await previewMailTemplate({ silent: true, configOverride: nextConfig })
-    toast.success(`${pack.label} pack applied`)
   }
 
   async function submitSale(e) {
@@ -6667,10 +6459,6 @@ function App({ initialTab = 'leads' }) {
     () => resolveLiveMailTemplateCardsForNiche(selectedUserNiche),
     [selectedUserNiche],
   )
-  const visibleMailTemplatePacks = useMemo(
-    () => resolveMailTemplatePacksForNiche(selectedUserNiche),
-    [selectedUserNiche],
-  )
 
   const applySnipedTemplateSelection = useCallback((templateKey) => {
     const selectedCard = liveMailTemplateCards.find((card) => card.key === templateKey) || liveMailTemplateCards[0]
@@ -6679,14 +6467,18 @@ function App({ initialTab = 'leads' }) {
     const matched = resolveSnipedTemplateForSelection(selectedUserNiche, selectedCard.key)
     if (!matched) return
 
-    setConfigForm((prev) => ({
-      ...prev,
-      [selectedCard.subjectKey]: String(matched.subject || prev[selectedCard.subjectKey] || ''),
-      [selectedCard.bodyKey]: String(matched.body || prev[selectedCard.bodyKey] || ''),
-    }))
+    setConfigForm((prev) => {
+      const currentSubject = String(prev[selectedCard.subjectKey] || '').trim()
+      const currentBody = String(prev[selectedCard.bodyKey] || '').trim()
+      return {
+        ...prev,
+        [selectedCard.subjectKey]: currentSubject || String(matched.subject || ''),
+        [selectedCard.bodyKey]: currentBody || String(matched.body || ''),
+      }
+    })
     setSequenceForm((prev) => ({
       ...prev,
-      step2_body: String(matched.followup || prev.step2_body || ''),
+      step2_body: String(prev.step2_body || '').trim() || String(matched.followup || ''),
     }))
   }, [selectedUserNiche])
 
@@ -6699,6 +6491,37 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     applySnipedTemplateSelection(activeLiveMailTemplateKey)
   }, [applySnipedTemplateSelection, activeLiveMailTemplateKey, selectedUserNiche])
+
+  useEffect(() => {
+    const activeCard = liveMailTemplateCards.find((card) => card.key === activeLiveMailTemplateKey) || liveMailTemplateCards[0]
+    if (!activeCard) return
+
+    const sampleVars = {
+      BusinessName: coldOutreachForm.businessName || 'GoFast',
+      City: coldOutreachForm.city || 'Ljubljana',
+      Niche: coldOutreachForm.niche || selectedUserNiche || 'Web Design',
+      YourName: currentUserName || 'Your Name',
+    }
+
+    const rawSubject = String(configForm[activeCard.subjectKey] || '')
+    const rawBody = String(configForm[activeCard.bodyKey] || '')
+    const signature = String(configForm.mail_signature || '').trim()
+    const payloadBody = signature ? `${rawBody}\n\n${signature}` : rawBody
+
+    setMailPreview({
+      subject: replaceTemplatePlaceholders(rawSubject, sampleVars),
+      body: replaceTemplatePlaceholders(payloadBody, sampleVars),
+      generatedAt: new Date().toISOString(),
+    })
+  }, [
+    activeLiveMailTemplateKey,
+    coldOutreachForm.businessName,
+    coldOutreachForm.city,
+    coldOutreachForm.niche,
+    configForm,
+    currentUserName,
+    selectedUserNiche,
+  ])
   const visibleMainNavItems = useMemo(
     () => mainNavItems.filter((item) => item.tab !== 'clients' || canClientSuccessDashboard),
     [canClientSuccessDashboard],
@@ -9832,39 +9655,18 @@ function App({ initialTab = 'leads' }) {
                                   <span key={`${activeCard?.key}-${token}`} className="placeholder-pill">{token}</span>
                                 ))}
                               </div>
+                              <div className="pt-2">
+                                <button className="btn-primary" type="submit" disabled={savingConfig}>
+                                  <Save className="h-4 w-4" />
+                                  {savingConfig ? 'Saving…' : 'Save Template'}
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )
                       })()}
                     </>
                   )}
-                </div>
-
-                <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Quick Template Packs</p>
-                      <p className="mt-2 text-sm text-slate-400">Z enim klikom nalozis celoten set template-ov za drugacen ton kampanje.</p>
-                    </div>
-                    <p className="text-xs text-slate-500">Current: <span className="font-semibold text-slate-200">{activeMailPack || 'Custom mix'}</span></p>
-                  </div>
-
-                  <div className="mt-4 grid gap-3 lg:grid-cols-3">
-                    {visibleMailTemplatePacks.map((pack) => (
-                      <button
-                        key={pack.key}
-                        type="button"
-                        className={`rounded-2xl border px-4 py-4 text-left transition ${activeMailPack === pack.key ? 'border-cyan-400/50 bg-cyan-500/10' : 'border-white/10 bg-slate-900/60 hover:border-white/20 hover:bg-slate-900/80'}`}
-                        onClick={() => void applyMailTemplatePack(pack.key)}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-sm font-semibold text-white">{pack.label}</p>
-                          <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">Pack</span>
-                        </div>
-                        <p className="mt-2 text-xs leading-5 text-slate-400">{pack.description}</p>
-                      </button>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -9895,12 +9697,12 @@ function App({ initialTab = 'leads' }) {
                   <div className="rounded-2xl border border-cyan-500/20 bg-slate-900/70 p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300">Preview (sample lead)</p>
                     <p className="mt-2 text-sm leading-6 text-slate-400">
-                      Preview uses the same backend pipeline as real sends. What you see here is what goes out in a campaign.
+                      This preview updates live as you edit the draft and shows how placeholders resolve for a sample lead.
                     </p>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
                       <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
                         <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
-                        <p className="mt-1 text-sm text-slate-300">{mailPreview.generatedAt ? new Date(mailPreview.generatedAt).toLocaleTimeString() : 'Not yet'}</p>
+                        <p className="mt-1 text-sm text-slate-300">Live draft</p>
                       </div>
                       <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2">
                         <p className="text-[11px] uppercase tracking-[0.12em] text-violet-300">Tone of Voice</p>
@@ -9944,22 +9746,12 @@ function App({ initialTab = 'leads' }) {
                           </div>
                           <div className="flex items-start gap-3">
                             <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</span>
-                            {previewLoading ? <span className="preview-skeleton h-5 w-full max-w-[260px]" /> : <p className="font-medium text-white">{mailPreview.subject || 'Generate preview to inspect current template output.'}</p>}
+                            <p className="font-medium text-white">{mailPreview.subject || 'Subject preview will appear here.'}</p>
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-                          {previewLoading ? (
-                            <div className="space-y-2">
-                              <span className="preview-skeleton h-4 w-[88%]" />
-                              <span className="preview-skeleton h-4 w-[80%]" />
-                              <span className="preview-skeleton h-4 w-[92%]" />
-                              <span className="preview-skeleton h-4 w-[72%]" />
-                              <span className="preview-skeleton h-4 w-[86%]" />
-                            </div>
-                          ) : (
-                            <pre className="min-h-[260px] whitespace-pre-wrap break-words font-sans text-[14px] leading-7 text-slate-200">{mailPreview.body || 'Preview body will appear here.'}</pre>
-                          )}
+                          <pre className="min-h-[260px] whitespace-pre-wrap break-words font-sans text-[14px] leading-7 text-slate-200">{mailPreview.body || 'Preview body will appear here.'}</pre>
                         </div>
                       </div>
                     </div>
@@ -9970,14 +9762,6 @@ function App({ initialTab = 'leads' }) {
                   <button className="btn-primary" type="submit" disabled={savingConfig}>
                     <Save className="h-4 w-4" />
                     {savingConfig ? 'Saving…' : 'Save Mail Settings'}
-                  </button>
-                  <button className="btn-ghost" type="button" disabled={previewLoading} onClick={() => void previewMailTemplate()}>
-                    <Eye className="h-4 w-4" />
-                    {previewLoading ? 'Generating…' : 'Generate Preview'}
-                  </button>
-                  <button className="btn-ghost" type="button" disabled={previewLoading} onClick={() => void previewMailTemplate({ regenerate: true })}>
-                    <RefreshCw className={`h-4 w-4 ${previewLoading ? 'animate-spin' : ''}`} />
-                    Regenerate Preview
                   </button>
                   <p className="text-xs text-slate-500">Saved templates apply to both preview and real sends.</p>
                 </div>
