@@ -783,17 +783,39 @@ const SNIPED_GAP_TO_CONFIG_KEYS = {
   'Site Speed': { subjectKey: 'speed_subject_template', bodyKey: 'speed_body_template' },
 }
 
+const TEMPLATE_NICHE_ALIAS_RULES = [
+  { key: 'Paid Ads Agency', terms: ['paid ads', 'ads agency', 'google ads', 'meta ads', 'ppc'] },
+  { key: 'Web Design & Dev', terms: ['web design', 'web dev', 'website', 'design', 'developer', 'dev agency'] },
+  { key: 'SEO & Content', terms: ['seo', 'content', 'organic', 'ranking'] },
+  { key: 'Lead Gen Agency', terms: ['lead gen', 'lead generation', 'outbound', 'prospecting'] },
+  { key: 'B2B Service Provider', terms: ['b2b', 'service provider', 'consulting', 'agency services'] },
+]
+
+function resolveTemplateNicheKey(rawNiche) {
+  const raw = String(rawNiche || '').trim()
+  const normalized = raw.toLowerCase()
+  if (!normalized) return 'Web Design & Dev'
+
+  const direct = Object.keys(snipedEmailTemplates).find((key) => key.toLowerCase() === normalized)
+  if (direct) return direct
+
+  const viaTerms = TEMPLATE_NICHE_ALIAS_RULES.find((rule) => rule.terms.some((term) => normalized.includes(term)))
+  if (viaTerms) return viaTerms.key
+
+  return 'Web Design & Dev'
+}
+
 function resolveSnipedTemplateForSelection(rawNiche, templateKey) {
-  const niche = String(rawNiche || '').trim()
+  const niche = resolveTemplateNicheKey(rawNiche)
   const gap = SNIPED_TEMPLATE_KEY_TO_GAP[String(templateKey || '').trim()] || 'No Website'
-  const nicheTemplates = snipedEmailTemplates[niche] || snipedEmailTemplates['Web Design & Dev']
+  const nicheTemplates = snipedEmailTemplates[niche]
   const list = Array.isArray(nicheTemplates?.templates) ? nicheTemplates.templates : []
   return list.find((item) => String(item?.gap || '').trim() === gap) || null
 }
 
 function buildSnipedTemplatePatch(rawNiche) {
-  const niche = String(rawNiche || '').trim()
-  const nicheTemplates = snipedEmailTemplates[niche] || snipedEmailTemplates['Web Design & Dev']
+  const niche = resolveTemplateNicheKey(rawNiche)
+  const nicheTemplates = snipedEmailTemplates[niche]
   const list = Array.isArray(nicheTemplates?.templates) ? nicheTemplates.templates : []
   return list.reduce((acc, item) => {
     const keys = SNIPED_GAP_TO_CONFIG_KEYS[String(item?.gap || '').trim()]
@@ -838,7 +860,7 @@ const liveMailTemplateCardMetaByNiche = {
 }
 
 function resolveLiveMailTemplateCardsForNiche(rawNiche) {
-  const niche = String(rawNiche || '').trim()
+  const niche = resolveTemplateNicheKey(rawNiche)
   const nicheMeta = liveMailTemplateCardMetaByNiche[niche]
   if (!nicheMeta) return liveMailTemplateCards
   return liveMailTemplateCards.map((card) => ({
@@ -949,7 +971,7 @@ function applyPackToneToBody(body, packKey) {
 }
 
 function resolveMailTemplatePacksForNiche(rawNiche) {
-  const niche = String(rawNiche || '').trim()
+  const niche = resolveTemplateNicheKey(rawNiche)
   const baseTemplates = nicheTemplateBaseByCategory[niche]
   if (!baseTemplates) return mailTemplatePacks
   return mailTemplatePacks.map((pack) => {
