@@ -6500,17 +6500,16 @@ function App({ initialTab = 'leads' }) {
     if (!matched) return
 
     setConfigForm((prev) => {
-      const currentSubject = String(prev[selectedCard.subjectKey] || '').trim()
-      const currentBody = String(prev[selectedCard.bodyKey] || '').trim()
       return {
         ...prev,
-        [selectedCard.subjectKey]: currentSubject || String(matched.subject || ''),
-        [selectedCard.bodyKey]: currentBody || String(matched.body || ''),
+        [selectedCard.subjectKey]: String(matched.subject || ''),
+        [selectedCard.bodyKey]: String(matched.body || ''),
       }
     })
     setSequenceForm((prev) => ({
       ...prev,
-      step2_body: String(prev.step2_body || '').trim() || String(matched.followup || ''),
+      step2_body: String(matched.followup || ''),
+      step2_subject: String(prev.step2_subject || '').trim() || `Following up with {BusinessName}`,
     }))
   }, [selectedUserNiche])
 
@@ -6528,15 +6527,35 @@ function App({ initialTab = 'leads' }) {
     const activeCard = liveMailTemplateCards.find((card) => card.key === activeLiveMailTemplateKey) || liveMailTemplateCards[0]
     if (!activeCard) return
 
+    const matched = resolveSnipedTemplateForSelection(selectedUserNiche, activeCard.key)
+
     const sampleVars = {
-      BusinessName: 'GoFast',
-      City: 'Ljubljana',
-      Niche: selectedUserNiche || 'Web Design',
-      YourName: currentUserName || 'Your Name',
+      BusinessName: 'Apex Roofing',
+      City: 'London',
+      Niche: 'Roofing',
+      YourName: 'Nejc',
     }
 
-    const rawSubject = String(configForm[activeCard.subjectKey] || '')
-    const rawBody = String(configForm[activeCard.bodyKey] || '')
+    const followupStep = Number(sequenceForm.activeStep || 2)
+    const followupSubjectByStep = {
+      1: String(sequenceForm.step1_subject || sequenceForm.ab_subject_a || ''),
+      2: String(sequenceForm.step2_subject || ''),
+      3: String(sequenceForm.step3_subject || ''),
+    }
+    const followupBodyByStep = {
+      1: String(sequenceForm.step1_body || ''),
+      2: String(sequenceForm.step2_body || ''),
+      3: String(sequenceForm.step3_body || ''),
+    }
+
+    const rawSubject = activeMailEditorTab === 'followup'
+      ? (followupSubjectByStep[followupStep] || String(matched?.subject || ''))
+      : String(configForm[activeCard.subjectKey] || String(matched?.subject || ''))
+
+    const rawBody = activeMailEditorTab === 'followup'
+      ? (followupBodyByStep[followupStep] || (followupStep === 2 ? String(matched?.followup || '') : ''))
+      : String(configForm[activeCard.bodyKey] || String(matched?.body || ''))
+
     const signature = String(configForm.mail_signature || '').trim()
     const payloadBody = signature ? `${rawBody}\n\n${signature}` : rawBody
 
@@ -6547,8 +6566,16 @@ function App({ initialTab = 'leads' }) {
     })
   }, [
     activeLiveMailTemplateKey,
+    activeMailEditorTab,
     configForm,
-    currentUserName,
+    sequenceForm.activeStep,
+    sequenceForm.step1_body,
+    sequenceForm.step1_subject,
+    sequenceForm.step2_body,
+    sequenceForm.step2_subject,
+    sequenceForm.step3_body,
+    sequenceForm.step3_subject,
+    sequenceForm.ab_subject_a,
     selectedUserNiche,
   ])
   const visibleMainNavItems = useMemo(
