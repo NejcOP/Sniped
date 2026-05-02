@@ -3243,6 +3243,8 @@ function App({ initialTab = 'leads' }) {
     }
   }, [leadQuickCountSource])
 
+  const selectedUserNiche = String(user?.niche || qualifierData?.data?.selected_niche || getStoredValue('lf_niche') || '').trim()
+
   const getEligibleEnrichmentLeadIds = useCallback((limitValue) => {
     const requested = Number(limitValue)
     const normalizedBatchSize = Math.max(1, Math.min(Number.isFinite(requested) ? Math.floor(requested) : 50, 200))
@@ -6485,7 +6487,6 @@ function App({ initialTab = 'leads' }) {
   const topupLabel = topupCreditsBalance > 0
     ? `${topupCreditsBalance.toLocaleString('en-US')} purchased top-up credits included`
     : ''
-  const selectedUserNiche = String(user?.niche || qualifierData?.data?.selected_niche || getStoredValue('lf_niche') || '').trim()
   const visibleLiveMailTemplateCards = useMemo(
     () => resolveLiveMailTemplateCardsForNiche(selectedUserNiche),
     [selectedUserNiche],
