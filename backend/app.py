@@ -15914,6 +15914,9 @@ def create_app() -> FastAPI:
         session_token = require_authenticated_session(request)
         user_id = require_current_user_id(request)
         selected_niche = resolve_user_niche_from_session_token(session_token)
+        requested_niche = str(request.query_params.get("niche") or "").strip()
+        if requested_niche in NICHES:
+            selected_niche = requested_niche
 
         excluded_statuses = {
             "blacklisted", "closed", "low_priority", "paid",
@@ -15998,173 +16001,171 @@ def create_app() -> FastAPI:
         except Exception:
             logging.debug("Could not persist qualifier benchmark snapshot for user %s", user_id)
 
-        ghost: list[dict] = []
-        invisible_giant: list[dict] = []
-        tech_debt: list[dict] = []
-
-        seen_ids: set[int] = set()
+        no_website: list[dict] = []
+        traffic_opportunity: list[dict] = []
+        competitor_gap: list[dict] = []
+        site_speed: list[dict] = []
 
         for lead in leads_raw:
-            lead_id = int(lead["id"])
-            website = str(lead.get("website_url") or "").strip().lower()
-            has_website = bool(website and website not in ("none", ""))
-            rating = lead.get("rating")
-            review_count = int(lead.get("review_count") or 0)
-            city = _qualifier_extract_city(lead.get("address", ""))
-            city_max = max(city_reviews.get(city, [0]))
-            insecure = bool(lead.get("insecure_site"))
-            ai_score = _qualifier_to_float(lead.get("ai_score"), default=0.0)
-            metrics = _qualifier_extract_metrics(lead)
+            try:
+                lead_id = _qualifier_to_int(lead.get("id"), default=0)
+                if lead_id <= 0:
+                    continue
 
-            under_optimized = bool(niche_avg_score > 0 and ai_score < (niche_avg_score * 0.5))
-            tech_laggard = bool(metrics["tech_stack_score"] < 4)
-            authority_gap = bool(metrics["competitor_avg"] > 0 and metrics["authority"] < metrics["competitor_avg"])
+                website = str(lead.get("website_url") or "").strip().lower()
+                has_website = bool(website and website not in ("none", ""))
+                rating = lead.get("rating")
+                review_count = _qualifier_to_int(lead.get("review_count"), default=0)
+                city = _qualifier_extract_city(lead.get("address", ""))
+                city_max = max(city_reviews.get(city, [0]))
+                insecure = bool(lead.get("insecure_site"))
+                ai_score = _qualifier_to_float(lead.get("ai_score"), default=0.0)
+                metrics = _qualifier_extract_metrics(lead)
 
-            # Niche-specific "Ghost" conditions
-            ghost_by_paid_ads = (
-                selected_niche == "Paid Ads Agency"
-                and has_website
-                and (not metrics["has_meta_pixel"] or not metrics["has_google_pixel"])
-            )
-            ghost_by_seo = (
-                selected_niche == "SEO & Content"
-                and has_website
-                and (metrics["backlink_count"] < 5 or metrics["organic_traffic"] <= 0)
-            )
-            ghost_fallback = bool(under_optimized and not has_website)
-            is_ghost = ghost_by_paid_ads or ghost_by_seo or ghost_fallback
+                raw_enrichment = lead.get("enrichment_data")
+                enrichment_obj = _qualifier_parse_enrichment(raw_enrichment)
+                competitive_hook = str(enrichment_obj.get("competitive_hook", "") or "")
 
-            # Niche-specific "Invisible Giant"
-            invisible_giant_b2b = (
-                selected_niche == "B2B Service Provider"
-                and metrics["employee_count"] > 20
-                and metrics["social_activity_score"] < 3
-            )
-            invisible_giant_generic = bool(metrics["employee_count"] >= 50 and metrics["social_activity_score"] < 3)
-            is_invisible_giant = invisible_giant_b2b or invisible_giant_generic
-
-            # "Tech Debt"
-            is_http = insecure or website.startswith("http://")
-            is_tech_debt = bool(is_http or metrics["pagespeed_score"] < 40 or ai_score >= 6.0 or tech_laggard)
-
-            # Determine enrichment competitive_hook if stored
-            competitive_hook = ""
-            raw_enrichment = lead.get("enrichment_data")
-            if raw_enrichment:
-                try:
-                    enrichment_obj = json.loads(raw_enrichment)
-                    competitive_hook = str(enrichment_obj.get("competitive_hook", "") or "")
-                except Exception:
-                    pass
-
-            pain_point = _qualifier_pain_point(
-                business_name=str(lead.get("business_name") or ""),
-                has_website=has_website,
-                rating=rating,
-                review_count=review_count,
-                city=city,
-                city_max_reviews=city_max,
-                keyword=str(lead.get("search_keyword") or ""),
-                insecure=insecure,
-                main_shortcoming=str(lead.get("main_shortcoming") or ""),
-                ai_description=str(lead.get("ai_description") or ""),
-                competitive_hook=competitive_hook,
-            )
-
-            out = {
-                "id": lead_id,
-                "business_name": lead.get("business_name"),
-                "website_url": lead.get("website_url"),
-                "rating": rating,
-                "review_count": review_count,
-                "address": lead.get("address"),
-                "city": city,
-                "search_keyword": lead.get("search_keyword"),
-                "phone_number": lead.get("phone_number"),
-                "ai_score": lead.get("ai_score"),
-                "client_tier": lead.get("client_tier"),
-                "status": lead.get("status"),
-                "pain_point": pain_point,
-                "suggested_hook": _qualifier_suggested_hook(
-                    selected_niche=selected_niche,
-                    business_name=str(lead.get("business_name") or ""),
-                    keyword=str(lead.get("search_keyword") or ""),
-                    city=city,
-                    metrics=metrics,
-                ),
-                "benchmark": {
-                    "selected_niche": selected_niche,
-                    "niche_avg_score": round(niche_avg_score, 2),
-                    "city_max_reviews": city_max,
-                    "under_optimized": under_optimized,
-                    "tech_laggard": tech_laggard,
-                    "authority_gap": authority_gap,
-                },
-                "signals": {
-                    "has_meta_pixel": metrics["has_meta_pixel"],
-                    "has_google_pixel": metrics["has_google_pixel"],
-                    "backlink_count": metrics["backlink_count"],
-                    "organic_traffic": metrics["organic_traffic"],
-                    "employee_count": metrics["employee_count"],
-                    "social_activity_score": metrics["social_activity_score"],
-                    "pagespeed_score": metrics["pagespeed_score"],
-                    "tech_stack_score": metrics["tech_stack_score"],
-                    "authority": metrics["authority"],
-                    "competitor_avg": metrics["competitor_avg"],
-                },
-            }
-
-            # Bucket #1 â€” The Ghost
-            if is_ghost and lead_id not in seen_ids:
-                out["pain_point"] = _qualifier_dynamic_pain_point(
-                    bucket_name="ghost",
-                    business_name=str(lead.get("business_name") or ""),
-                    selected_niche=selected_niche,
-                    city=city,
-                    keyword=str(lead.get("search_keyword") or ""),
-                    metrics=metrics,
-                    ai_score=ai_score,
-                    niche_avg_score=niche_avg_score,
+                # Gap signals aligned with sniped-email-templates categories.
+                pagespeed_score = _qualifier_to_float(
+                    lead.get("performance_score"),
+                    default=_qualifier_to_float(metrics.get("pagespeed_score"), default=100.0),
                 )
-                ghost.append(out)
-                seen_ids.add(lead_id)
+                seo_score = _qualifier_to_float(
+                    lead.get("seo_score"),
+                    default=max(0.0, min(100.0, (metrics.get("authority", 0.0) * 2.0) + (metrics.get("organic_traffic", 0.0) / 25.0))),
+                )
+                best_signal = _lead_compute_best_score(lead, enrichment_obj)
+                high_potential = bool(ai_score >= 6.0 or best_signal >= 60.0 or review_count >= 15)
+
+                missing_website_gap = not has_website
+                site_speed_gap = pagespeed_score < 50.0
+
+                authority = _qualifier_to_float(metrics.get("authority"), default=0.0)
+                competitor_avg = _qualifier_to_float(metrics.get("competitor_avg"), default=0.0)
+                competitor_text = " ".join(
+                    [
+                        str(lead.get("main_shortcoming") or ""),
+                        str(lead.get("ai_description") or ""),
+                        competitive_hook,
+                    ]
+                ).lower()
+                competitor_gap_flag = bool(
+                    (competitor_avg > 0 and authority < competitor_avg)
+                    or any(term in competitor_text for term in ["outrank", "competitor", "behind competitors", "ranking gap"])
+                )
+
+                low_seo_or_perf = bool(
+                    seo_score < 55.0
+                    or pagespeed_score < 65.0
+                    or _qualifier_to_int(metrics.get("backlink_count"), default=0) < 20
+                    or _qualifier_to_float(metrics.get("organic_traffic"), default=0.0) < 120.0
+                )
+                traffic_opportunity_gap = bool(has_website and high_potential and low_seo_or_perf)
+
+                gap_scores: list[tuple[str, float]] = []
+                if missing_website_gap:
+                    gap_scores.append(("no_website", 100.0))
+                if site_speed_gap:
+                    gap_scores.append(("site_speed", 75.0 + max(0.0, (50.0 - pagespeed_score) * 0.4)))
+                if competitor_gap_flag:
+                    gap_scores.append(("competitor_gap", 72.0 + max(0.0, (competitor_avg - authority) * 0.8)))
+                if traffic_opportunity_gap:
+                    gap_scores.append(("traffic_opportunity", 70.0 + max(0.0, (60.0 - seo_score) * 0.35)))
+
+                if not gap_scores:
+                    continue
+
+                top_gap, top_gap_score = sorted(gap_scores, key=lambda item: item[1], reverse=True)[0]
+
+                if top_gap == "no_website":
+                    opportunity_pitch = f"This lead is a prime candidate for a {selected_niche} pitch because they lack a website."
+                elif top_gap == "traffic_opportunity":
+                    opportunity_pitch = f"This lead is a prime candidate for a {selected_niche} pitch due to high potential with weak SEO/performance coverage."
+                elif top_gap == "competitor_gap":
+                    opportunity_pitch = f"This lead is a prime candidate for a {selected_niche} pitch because competitors are outranking them."
+                else:
+                    opportunity_pitch = f"This lead is a prime candidate for a {selected_niche} pitch because their site speed is below 50%."
+
+                pain_point = _qualifier_pain_point(
+                    business_name=str(lead.get("business_name") or ""),
+                    has_website=has_website,
+                    rating=rating,
+                    review_count=review_count,
+                    city=city,
+                    city_max_reviews=city_max,
+                    keyword=str(lead.get("search_keyword") or ""),
+                    insecure=insecure,
+                    main_shortcoming=str(lead.get("main_shortcoming") or ""),
+                    ai_description=str(lead.get("ai_description") or ""),
+                    competitive_hook=competitive_hook,
+                )
+
+                out = {
+                    "id": lead_id,
+                    "business_name": lead.get("business_name"),
+                    "website_url": lead.get("website_url"),
+                    "rating": rating,
+                    "review_count": review_count,
+                    "address": lead.get("address"),
+                    "city": city,
+                    "search_keyword": lead.get("search_keyword"),
+                    "phone_number": lead.get("phone_number"),
+                    "ai_score": lead.get("ai_score"),
+                    "client_tier": lead.get("client_tier"),
+                    "status": lead.get("status"),
+                    "pain_point": pain_point,
+                    "opportunity_pitch": opportunity_pitch,
+                    "gold_mine_gap": top_gap,
+                    "gold_mine_score": round(top_gap_score, 1),
+                    "suggested_hook": _qualifier_suggested_hook(
+                        selected_niche=selected_niche,
+                        business_name=str(lead.get("business_name") or ""),
+                        keyword=str(lead.get("search_keyword") or ""),
+                        city=city,
+                        metrics=metrics,
+                    ),
+                    "benchmark": {
+                        "selected_niche": selected_niche,
+                        "niche_avg_score": round(niche_avg_score, 2),
+                        "city_max_reviews": city_max,
+                    },
+                    "signals": {
+                        "seo_score": round(seo_score, 1),
+                        "performance_score": round(pagespeed_score, 1),
+                        "has_meta_pixel": metrics["has_meta_pixel"],
+                        "has_google_pixel": metrics["has_google_pixel"],
+                        "backlink_count": metrics["backlink_count"],
+                        "organic_traffic": metrics["organic_traffic"],
+                        "employee_count": metrics["employee_count"],
+                        "social_activity_score": metrics["social_activity_score"],
+                        "pagespeed_score": metrics["pagespeed_score"],
+                        "tech_stack_score": metrics["tech_stack_score"],
+                        "authority": metrics["authority"],
+                        "competitor_avg": metrics["competitor_avg"],
+                    },
+                }
+
+                if top_gap == "no_website":
+                    no_website.append(out)
+                elif top_gap == "traffic_opportunity":
+                    traffic_opportunity.append(out)
+                elif top_gap == "competitor_gap":
+                    competitor_gap.append(out)
+                elif top_gap == "site_speed":
+                    site_speed.append(out)
+            except Exception as lead_exc:
+                logging.debug("Qualifier skipped lead due to malformed data: %s", lead_exc)
                 continue
 
-            # Bucket #2 â€” The Invisible Giant
-            if is_invisible_giant and lead_id not in seen_ids:
-                out["pain_point"] = _qualifier_dynamic_pain_point(
-                    bucket_name="invisible_giant",
-                    business_name=str(lead.get("business_name") or ""),
-                    selected_niche=selected_niche,
-                    city=city,
-                    keyword=str(lead.get("search_keyword") or ""),
-                    metrics=metrics,
-                    ai_score=ai_score,
-                    niche_avg_score=niche_avg_score,
-                )
-                invisible_giant.append({**out, "city_max_reviews": city_max})
-                seen_ids.add(lead_id)
-                continue
+        # Backward compatibility keys for older clients.
+        ghost = no_website
+        invisible_local = traffic_opportunity
+        invisible_giant = competitor_gap
+        tech_debt = site_speed
+        low_authority = site_speed
 
-            # Bucket #3 â€” Tech Debt
-            if is_tech_debt and lead_id not in seen_ids:
-                out["pain_point"] = _qualifier_dynamic_pain_point(
-                    bucket_name="tech_debt",
-                    business_name=str(lead.get("business_name") or ""),
-                    selected_niche=selected_niche,
-                    city=city,
-                    keyword=str(lead.get("search_keyword") or ""),
-                    metrics=metrics,
-                    ai_score=ai_score,
-                    niche_avg_score=niche_avg_score,
-                )
-                tech_debt.append(out)
-                seen_ids.add(lead_id)
-
-        # Backward compatibility for existing frontend keys.
-        no_website = ghost
-        invisible_local = invisible_giant
-        low_authority = tech_debt
+        total_count = len(no_website) + len(traffic_opportunity) + len(competitor_gap) + len(site_speed)
 
         return {
             "selected_niche": selected_niche,
@@ -16173,19 +16174,31 @@ def create_app() -> FastAPI:
                 "niche_avg_score": round(niche_avg_score, 2),
                 "city_reviews": city_reviews,
             },
+            "gap_buckets": {
+                "no_website": no_website,
+                "traffic_opportunity": traffic_opportunity,
+                "competitor_gap": competitor_gap,
+                "site_speed": site_speed,
+            },
+            "no_website": no_website,
+            "traffic_opportunity": traffic_opportunity,
+            "competitor_gap": competitor_gap,
+            "site_speed": site_speed,
             "ghost": ghost,
+            "invisible_local": invisible_local,
             "invisible_giant": invisible_giant,
             "tech_debt": tech_debt,
-            "no_website": no_website,
-            "invisible_local": invisible_local,
             "low_authority": low_authority,
-            "total": len(ghost) + len(invisible_giant) + len(tech_debt),
+            "total": total_count,
             "counts": {
+                "no_website": len(no_website),
+                "traffic_opportunity": len(traffic_opportunity),
+                "competitor_gap": len(competitor_gap),
+                "site_speed": len(site_speed),
                 "ghost": len(ghost),
+                "invisible_local": len(invisible_local),
                 "invisible_giant": len(invisible_giant),
                 "tech_debt": len(tech_debt),
-                "no_website": len(no_website),
-                "invisible_local": len(invisible_local),
                 "low_authority": len(low_authority),
             },
         }

@@ -92,23 +92,30 @@ const QUALIFIER_LOSS_MULTIPLIER_RULES = [
 
 const QUALIFIER_FINDING_MODELS = [
   {
-    key: 'ghost',
-    countKeys: ['ghost', 'no_website'],
-    listKeys: ['ghost', 'no_website'],
+    key: 'no_website',
+    countKeys: ['no_website', 'ghost'],
+    listKeys: ['no_website', 'ghost'],
     finding: 'missing website foundation',
     perLeadLoss: 900,
   },
   {
-    key: 'invisible',
-    countKeys: ['invisible_giant', 'invisible_local'],
-    listKeys: ['invisible_giant', 'invisible_local'],
-    finding: 'weak local discoverability',
+    key: 'traffic_opportunity',
+    countKeys: ['traffic_opportunity', 'invisible_local'],
+    listKeys: ['traffic_opportunity', 'invisible_local'],
+    finding: 'untapped traffic opportunity',
     perLeadLoss: 700,
   },
   {
-    key: 'tech_debt',
-    countKeys: ['tech_debt', 'low_authority'],
-    listKeys: ['tech_debt', 'low_authority'],
+    key: 'competitor_gap',
+    countKeys: ['competitor_gap', 'invisible_giant'],
+    listKeys: ['competitor_gap', 'invisible_giant'],
+    finding: 'competitor ranking pressure',
+    perLeadLoss: 650,
+  },
+  {
+    key: 'site_speed',
+    countKeys: ['site_speed', 'tech_debt', 'low_authority'],
+    listKeys: ['site_speed', 'tech_debt', 'low_authority'],
     finding: 'conversion-killing tech debt',
     perLeadLoss: 600,
   },
@@ -913,6 +920,7 @@ function getAbortGroupForRequest(pathname, method, explicitAbortKey) {
   if (explicitAbortKey) return String(explicitAbortKey)
   if (String(method || '').toUpperCase() !== 'GET') return ''
   const normalized = String(pathname || '').toLowerCase()
+  if (normalized.startsWith('/api/leads/qualify')) return 'qualifier-refresh'
   if (normalized.startsWith('/api/leads')) return 'leads-list'
   if (normalized.startsWith('/api/workers')) return 'workers-list'
   if (normalized.startsWith('/api/config')) return 'config-load'
@@ -963,10 +971,12 @@ async function fetchJson(path, options) {
   const method = String(options?.method || 'GET').toUpperCase()
   const abortKey = String(options?.abortKey || '').trim()
   const bypassCache = Boolean(options?.bypassCache)
+  const timeoutMs = Math.max(0, Number(options?.timeoutMs || 0))
   const externalSignal = options?.signal
   const requestOptions = { ...(options || {}) }
   delete requestOptions.abortKey
   delete requestOptions.bypassCache
+  delete requestOptions.timeoutMs
   const isDynamicPollingEndpoint =
     method === 'GET' && (
       normalizedPath === '/api/tasks'
@@ -999,6 +1009,12 @@ async function fetchJson(path, options) {
       externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
     }
   }
+  let timeoutHandle = null
+  if (timeoutMs > 0) {
+    timeoutHandle = window.setTimeout(() => {
+      controller.abort()
+    }, timeoutMs)
+  }
 
   try {
     const response = await fetch(requestUrl, {
@@ -1027,6 +1043,7 @@ async function fetchJson(path, options) {
     }
     return data
   } finally {
+    if (timeoutHandle) window.clearTimeout(timeoutHandle)
     if (abortGroup && REQUEST_ABORT_REGISTRY.get(abortGroup) === controller) {
       REQUEST_ABORT_REGISTRY.delete(abortGroup)
     }
@@ -1725,6 +1742,12 @@ function QualifierLeadCard({ lead, accentClass, badgeClass }) {
           )}
         </div>
       </div>
+      {lead.opportunity_pitch && (
+        <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-amber-300/90 mb-1">Gold Mine Opportunity</p>
+          <p className="text-sm text-amber-100 leading-relaxed">{lead.opportunity_pitch}</p>
+        </div>
+      )}
       {lead.pain_point && (
         <div className="mt-3 rounded-xl bg-black/20 px-3 py-2.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Pain Point</p>
@@ -5404,12 +5427,37 @@ function App({ initialTab = 'leads' }) {
 
     try {
       setQualifierData((prev) => ({ ...prev, loading: true, error: '' }))
-      const data = await fetchJson('/api/leads/qualify')
+      const niche = String(selectedUserNiche || '').trim()
+      const endpoint = niche
+        ? `/api/leads/qualify?niche=${encodeURIComponent(niche)}`
+        : '/api/leads/qualify'
+      let data = null
+      let lastError = null
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          data = await fetchJson(endpoint, {
+            abortKey: 'qualifier-refresh',
+            bypassCache: true,
+            timeoutMs: 45000,
+          })
+          break
+        } catch (attemptError) {
+          lastError = attemptError
+          if (attempt < 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 450))
+            continue
+          }
+        }
+      }
+      if (!data) throw lastError || new Error('Could not load qualifier data')
       setQualifierData({ loading: false, data, error: '' })
       if (!silent) toast.success('Lead Qualifier refreshed')
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not load qualifier data'
-      setQualifierData({ loading: false, data: null, error: msg })
+      const rawMsg = err instanceof Error ? err.message : 'Could not load qualifier data'
+      const msg = String(rawMsg || '').toLowerCase().includes('aborted')
+        ? 'Analysis request timed out. Retried automatically; showing latest available qualification results.'
+        : rawMsg
+      setQualifierData((prev) => ({ loading: false, data: prev.data || null, error: msg }))
       if (!silent) toast.error(msg)
     }
   }
@@ -10151,8 +10199,12 @@ function App({ initialTab = 'leads' }) {
               </div>
 
               {qualifierData.error ? (
-                <p className="rounded-xl bg-rose-950/60 p-3 text-sm text-rose-300">{qualifierData.error}</p>
-              ) : !qualifierData.data && !qualifierData.loading ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+                  {qualifierData.error}
+                </div>
+              ) : null}
+
+              {!qualifierData.data && !qualifierData.loading ? (
                 <div className="rounded-2xl border border-white/5 bg-white/[0.03] p-10 text-center">
                   <Zap className="mx-auto h-8 w-8 text-slate-600 mb-3" />
                   <p className="text-slate-400 text-sm">{canLeadScoring ? 'Click Refresh to qualify your leads.' : 'Upgrade to The Hustler to unlock AI lead scoring and Gold Mine buckets.'}</p>
@@ -10165,15 +10217,15 @@ function App({ initialTab = 'leads' }) {
               ) : (
                 <>
                   {/* Summary pills */}
-                  <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <div className="glass-card rounded-2xl p-4 flex items-center gap-3">
                       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-500/15">
                         <Target className="h-5 w-5 text-rose-400" />
                       </div>
                       <div>
-                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.ghost ?? qualifierData.data?.counts?.no_website ?? 0}</p>
-                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">The Ghost</p>
-                        <p className="text-[10px] text-rose-400 mt-0.5">Priority #1</p>
+                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.no_website ?? qualifierData.data?.counts?.ghost ?? 0}</p>
+                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">No Website</p>
+                        <p className="text-[10px] text-rose-400 mt-0.5">Website-first pitch</p>
                       </div>
                     </div>
                     <div className="glass-card rounded-2xl p-4 flex items-center gap-3">
@@ -10181,9 +10233,19 @@ function App({ initialTab = 'leads' }) {
                         <Search className="h-5 w-5 text-amber-400" />
                       </div>
                       <div>
-                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.invisible_giant ?? qualifierData.data?.counts?.invisible_local ?? 0}</p>
-                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">Invisible Giant</p>
-                        <p className="text-[10px] text-amber-400 mt-0.5">Big offline, tiny online</p>
+                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.traffic_opportunity ?? qualifierData.data?.counts?.invisible_local ?? 0}</p>
+                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">Traffic Opportunity</p>
+                        <p className="text-[10px] text-amber-400 mt-0.5">Low SEO/perf, high upside</p>
+                      </div>
+                    </div>
+                    <div className="glass-card rounded-2xl p-4 flex items-center gap-3">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-500/15">
+                        <Users className="h-5 w-5 text-violet-300" />
+                      </div>
+                      <div>
+                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.competitor_gap ?? qualifierData.data?.counts?.invisible_giant ?? 0}</p>
+                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">Competitor Gap</p>
+                        <p className="text-[10px] text-violet-300 mt-0.5">Outranked by competitors</p>
                       </div>
                     </div>
                     <div className="glass-card rounded-2xl p-4 flex items-center gap-3">
@@ -10191,61 +10253,79 @@ function App({ initialTab = 'leads' }) {
                         <TrendingUp className="h-5 w-5 text-teal-400" />
                       </div>
                       <div>
-                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.tech_debt ?? qualifierData.data?.counts?.low_authority ?? 0}</p>
-                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">Tech Debt</p>
-                        <p className="text-[10px] text-teal-400 mt-0.5">Stack and UX drag</p>
+                        <p className="text-2xl font-bold text-white">{qualifierData.data?.counts?.site_speed ?? qualifierData.data?.counts?.tech_debt ?? 0}</p>
+                        <p className="text-xs text-slate-400 font-semibold uppercase tracking-wide">Site Speed</p>
+                        <p className="text-[10px] text-teal-400 mt-0.5">Performance below 50%</p>
                       </div>
                     </div>
                   </div>
 
                   {/* No Website bucket */}
-                  {((qualifierData.data?.ghost?.length ?? qualifierData.data?.no_website?.length) ?? 0) > 0 && (
+                  {((qualifierData.data?.no_website?.length ?? qualifierData.data?.ghost?.length) ?? 0) > 0 && (
                     <div>
                       <div className="mb-3 flex items-center gap-2">
                         <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-rose-500/20 text-xs font-bold text-rose-400">1</span>
-                        <h3 className="font-semibold text-white text-sm">The Ghost — Gold Mine #1</h3>
+                        <h3 className="font-semibold text-white text-sm">No Website — Gold Mine Opportunity</h3>
                         <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-xs font-bold text-rose-400">
-                          {(qualifierData.data?.ghost ?? qualifierData.data?.no_website ?? []).length} leads
+                          {(qualifierData.data?.no_website ?? qualifierData.data?.ghost ?? []).length} leads
                         </span>
                       </div>
                       <div className="space-y-3">
-                        {(qualifierData.data?.ghost ?? qualifierData.data?.no_website ?? []).map((lead) => (
+                        {(qualifierData.data?.no_website ?? qualifierData.data?.ghost ?? []).map((lead) => (
                           <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-rose-500/20 bg-rose-950/10" badgeClass="bg-rose-500/15 text-rose-400" />
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* Invisible Local bucket */}
-                  {((qualifierData.data?.invisible_giant?.length ?? qualifierData.data?.invisible_local?.length) ?? 0) > 0 && (
+                  {/* Traffic Opportunity bucket */}
+                  {((qualifierData.data?.traffic_opportunity?.length ?? qualifierData.data?.invisible_local?.length) ?? 0) > 0 && (
                     <div>
                       <div className="mb-3 flex items-center gap-2">
                         <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-500/20 text-xs font-bold text-amber-400">2</span>
-                        <h3 className="font-semibold text-white text-sm">The Invisible Giant</h3>
+                        <h3 className="font-semibold text-white text-sm">Traffic Opportunity</h3>
                         <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-bold text-amber-400">
-                          {(qualifierData.data?.invisible_giant ?? qualifierData.data?.invisible_local ?? []).length} leads
+                          {(qualifierData.data?.traffic_opportunity ?? qualifierData.data?.invisible_local ?? []).length} leads
                         </span>
                       </div>
                       <div className="space-y-3">
-                        {(qualifierData.data?.invisible_giant ?? qualifierData.data?.invisible_local ?? []).map((lead) => (
+                        {(qualifierData.data?.traffic_opportunity ?? qualifierData.data?.invisible_local ?? []).map((lead) => (
                           <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-amber-500/20 bg-amber-950/10" badgeClass="bg-amber-500/15 text-amber-400" />
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* Low Authority bucket */}
-                  {((qualifierData.data?.tech_debt?.length ?? qualifierData.data?.low_authority?.length) ?? 0) > 0 && (
+                  {/* Competitor Gap bucket */}
+                  {((qualifierData.data?.competitor_gap?.length ?? qualifierData.data?.invisible_giant?.length) ?? 0) > 0 && (
                     <div>
                       <div className="mb-3 flex items-center gap-2">
-                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-teal-500/20 text-xs font-bold text-teal-400">3</span>
-                        <h3 className="font-semibold text-white text-sm">Tech Debt</h3>
-                        <span className="rounded-full bg-teal-500/15 px-2 py-0.5 text-xs font-bold text-teal-400">
-                          {(qualifierData.data?.tech_debt ?? qualifierData.data?.low_authority ?? []).length} leads
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-violet-500/20 text-xs font-bold text-violet-300">3</span>
+                        <h3 className="font-semibold text-white text-sm">Competitor Gap</h3>
+                        <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs font-bold text-violet-300">
+                          {(qualifierData.data?.competitor_gap ?? qualifierData.data?.invisible_giant ?? []).length} leads
                         </span>
                       </div>
                       <div className="space-y-3">
-                        {(qualifierData.data?.tech_debt ?? qualifierData.data?.low_authority ?? []).map((lead) => (
+                        {(qualifierData.data?.competitor_gap ?? qualifierData.data?.invisible_giant ?? []).map((lead) => (
+                          <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-violet-500/20 bg-violet-950/10" badgeClass="bg-violet-500/15 text-violet-300" />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Site Speed bucket */}
+                  {((qualifierData.data?.site_speed?.length ?? qualifierData.data?.tech_debt?.length) ?? 0) > 0 && (
+                    <div>
+                      <div className="mb-3 flex items-center gap-2">
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-teal-500/20 text-xs font-bold text-teal-400">4</span>
+                        <h3 className="font-semibold text-white text-sm">Site Speed</h3>
+                        <span className="rounded-full bg-teal-500/15 px-2 py-0.5 text-xs font-bold text-teal-400">
+                          {(qualifierData.data?.site_speed ?? qualifierData.data?.tech_debt ?? []).length} leads
+                        </span>
+                      </div>
+                      <div className="space-y-3">
+                        {(qualifierData.data?.site_speed ?? qualifierData.data?.tech_debt ?? []).map((lead) => (
                           <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-teal-500/20 bg-teal-950/10" badgeClass="bg-teal-500/15 text-teal-400" />
                         ))}
                       </div>
