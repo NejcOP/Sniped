@@ -16087,6 +16087,77 @@ def create_app() -> FastAPI:
                 else:
                     opportunity_pitch = f"This lead is a prime candidate for a {selected_niche} pitch because their site speed is below 50%."
 
+                latest_review_rating = _qualifier_to_float(
+                    enrichment_obj.get("latest_review_rating", enrichment_obj.get("last_review_rating", rating)),
+                    default=_qualifier_to_float(rating, default=0.0),
+                )
+                latest_review_days_ago = _qualifier_to_int(
+                    enrichment_obj.get("latest_review_days_ago", enrichment_obj.get("last_review_days_ago", 999)),
+                    default=999,
+                )
+                competitor_recent_launch = _qualifier_to_bool(
+                    enrichment_obj.get("competitor_recent_launch", enrichment_obj.get("competitor_new_website", False))
+                )
+                social_inactive_days = _qualifier_to_int(
+                    enrichment_obj.get("social_inactive_days", enrichment_obj.get("last_social_post_days", 0)),
+                    default=0,
+                )
+
+                score_breakdown: list[dict[str, Any]] = []
+                if missing_website_gap:
+                    score_breakdown.append({"signal": "No mobile-friendly website", "points": 3})
+                if traffic_opportunity_gap:
+                    score_breakdown.append({"signal": "High potential traffic being missed", "points": 2})
+                if competitor_gap_flag:
+                    score_breakdown.append({"signal": "Competitors are outranking this lead", "points": 2})
+                if site_speed_gap:
+                    score_breakdown.append({"signal": "Site performance below 50%", "points": 3})
+                if latest_review_rating > 0 and latest_review_rating <= 3.0:
+                    score_breakdown.append({"signal": "Recent low review sentiment", "points": 1})
+                if social_inactive_days >= 30:
+                    score_breakdown.append({"signal": f"Social media inactive for {social_inactive_days} days", "points": 1})
+
+                raw_total_score = sum(_qualifier_to_int(entry.get("points"), default=0) for entry in score_breakdown)
+                qualifier_score = max(2, min(10, raw_total_score))
+
+                if qualifier_score >= 8:
+                    tier_code = "bleeding"
+                    tier_label = "Contact Today"
+                elif qualifier_score >= 5:
+                    tier_code = "warm"
+                    tier_label = "Contact This Week"
+                else:
+                    tier_code = "nurture"
+                    tier_label = "Follow up in 30 days"
+
+                if latest_review_rating > 0 and latest_review_rating <= 2.5 and latest_review_days_ago <= 14:
+                    urgency_signal = f"Last Google review was {latest_review_rating:.1f} star, unanswered — {latest_review_days_ago} days ago."
+                elif competitor_recent_launch:
+                    urgency_signal = "Competitor just launched a new website and is likely taking search demand right now."
+                elif social_inactive_days >= 30:
+                    urgency_signal = f"Social media inactive for {social_inactive_days} days, signaling stale acquisition channels."
+                elif top_gap == "site_speed":
+                    urgency_signal = f"Performance score is {round(pagespeed_score, 1)}/100; visitors are dropping before conversion."
+                elif top_gap == "no_website":
+                    urgency_signal = "No website presence means this lead is losing buyer intent daily."
+                else:
+                    urgency_signal = "Strong commercial gap identified — delaying outreach increases competitor advantage."
+
+                pitch_components: list[str] = []
+                if top_gap == "no_website":
+                    pitch_components.append("missing website foundation")
+                elif top_gap == "traffic_opportunity":
+                    pitch_components.append("traffic opportunity from weak SEO/performance")
+                elif top_gap == "competitor_gap":
+                    pitch_components.append("competitor ranking pressure")
+                else:
+                    pitch_components.append("site speed drag")
+                if competitor_gap_flag and top_gap != "competitor_gap":
+                    pitch_components.append("competitor outranking")
+                if site_speed_gap and top_gap != "site_speed":
+                    pitch_components.append("mobile performance issues")
+                pitch_angle = f"Pitch angle: Lead with {' + '.join(pitch_components[:2])}."
+
                 pain_point = _qualifier_pain_point(
                     business_name=str(lead.get("business_name") or ""),
                     has_website=has_website,
@@ -16116,6 +16187,12 @@ def create_app() -> FastAPI:
                     "status": lead.get("status"),
                     "pain_point": pain_point,
                     "opportunity_pitch": opportunity_pitch,
+                    "tier_code": tier_code,
+                    "tier_label": tier_label,
+                    "qualifier_score": qualifier_score,
+                    "urgency_signal": urgency_signal,
+                    "score_breakdown": score_breakdown,
+                    "pitch_angle": pitch_angle,
                     "gold_mine_gap": top_gap,
                     "gold_mine_score": round(top_gap_score, 1),
                     "suggested_hook": _qualifier_suggested_hook(
@@ -16164,6 +16241,11 @@ def create_app() -> FastAPI:
         invisible_giant = competitor_gap
         tech_debt = site_speed
         low_authority = site_speed
+
+        no_website.sort(key=lambda item: -_qualifier_to_float(item.get("qualifier_score"), default=0.0))
+        traffic_opportunity.sort(key=lambda item: -_qualifier_to_float(item.get("qualifier_score"), default=0.0))
+        competitor_gap.sort(key=lambda item: -_qualifier_to_float(item.get("qualifier_score"), default=0.0))
+        site_speed.sort(key=lambda item: -_qualifier_to_float(item.get("qualifier_score"), default=0.0))
 
         total_count = len(no_website) + len(traffic_opportunity) + len(competitor_gap) + len(site_speed)
 

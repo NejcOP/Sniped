@@ -790,6 +790,15 @@ const SNIPED_GAP_TO_CONFIG_KEYS = {
   'Site Speed': { subjectKey: 'speed_subject_template', bodyKey: 'speed_body_template' },
 }
 
+function mapQualifierGapToTemplateKey(gap) {
+  const normalized = String(gap || '').trim().toLowerCase()
+  if (normalized === 'no_website') return 'ghost'
+  if (normalized === 'traffic_opportunity') return 'golden'
+  if (normalized === 'competitor_gap') return 'competitor'
+  if (normalized === 'site_speed') return 'speed'
+  return 'ghost'
+}
+
 const TEMPLATE_NICHE_ALIAS_RULES = [
   { key: 'Paid Ads Agency', terms: ['paid ads', 'ads agency', 'google ads', 'meta ads', 'ppc'] },
   { key: 'Web Design & Dev', terms: ['web design', 'web dev', 'website', 'design', 'developer', 'dev agency'] },
@@ -1704,9 +1713,22 @@ function mapDeliveryTaskType(taskType) {
   return { label: 'AI Enrichment', action: 'view' }
 }
 
-function QualifierLeadCard({ lead, accentClass, badgeClass }) {
+function QualifierLeadCard({ lead, accentClass, badgeClass, onGenerateEmail, onAddToPipeline, onSkip }) {
   const stars = typeof lead.rating === 'number' ? `${lead.rating.toFixed(1)}★` : '—'
   const [hookCopied, setHookCopied] = useState(false)
+  const scoreBreakdown = Array.isArray(lead?.score_breakdown) ? lead.score_breakdown : []
+  const qualifierScore = Number(lead?.qualifier_score || 0)
+  const tierCode = String(lead?.tier_code || '').toLowerCase()
+  const tierLabel = String(lead?.tier_label || '').trim() || 'Follow up in 30 days'
+  const isBleeding = tierCode === 'bleeding'
+  const tierBadgeClass = isBleeding
+    ? 'border-rose-400/45 bg-rose-500/20 text-rose-100'
+    : tierCode === 'warm'
+      ? 'border-amber-400/40 bg-amber-500/20 text-amber-100'
+      : 'border-emerald-400/40 bg-emerald-500/20 text-emerald-100'
+  const cardClass = isBleeding
+    ? `${accentClass} animate-pulse shadow-[0_0_0_1px_rgba(244,63,94,0.35),0_0_36px_rgba(244,63,94,0.2)]`
+    : accentClass
 
   async function copySuggestedHook() {
     const hook = String(lead?.suggested_hook || '').trim()
@@ -1723,13 +1745,16 @@ function QualifierLeadCard({ lead, accentClass, badgeClass }) {
   }
 
   return (
-    <div className={`rounded-2xl border p-4 ${accentClass}`}>
+    <div className={`rounded-2xl border p-4 ${cardClass}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <p className="font-semibold text-white text-sm truncate">{lead.business_name}</p>
           <p className="text-xs text-slate-400 mt-0.5 truncate">{lead.city || lead.address || '—'}</p>
         </div>
         <div className="flex flex-shrink-0 flex-wrap gap-1.5">
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${tierBadgeClass}`}>
+            {isBleeding ? '🔴 BLEEDING' : tierCode === 'warm' ? '🟡 WARM' : '🟢 NURTURE'}
+          </span>
           <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badgeClass}`}>{stars}</span>
           <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] font-semibold text-slate-400">
             {lead.review_count ?? 0} reviews
@@ -1742,6 +1767,42 @@ function QualifierLeadCard({ lead, accentClass, badgeClass }) {
           )}
         </div>
       </div>
+      <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <p className="font-semibold uppercase tracking-wide text-slate-400">Tier Action</p>
+          <p className="font-semibold text-white">{tierLabel}</p>
+        </div>
+        <p className="mt-1 text-sm text-slate-300">Total score: <strong className="text-white">{qualifierScore}/10</strong></p>
+      </div>
+      {lead.urgency_signal && (
+        <div className="mt-3 rounded-xl border border-rose-400/25 bg-rose-500/10 px-3 py-2.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-rose-300 mb-1">Why Contact NOW</p>
+          <p className="text-sm text-rose-100 leading-relaxed">{lead.urgency_signal}</p>
+        </div>
+      )}
+      {scoreBreakdown.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-xl border border-white/10 bg-slate-950/70">
+          <div className="border-b border-white/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Score Breakdown</div>
+          <div className="divide-y divide-white/5">
+            {scoreBreakdown.map((entry, index) => (
+              <div key={`${lead.id}-score-${index}`} className="grid grid-cols-[1fr_auto] items-center gap-3 px-3 py-2 text-sm">
+                <span className="text-slate-300">{entry.signal}</span>
+                <span className="font-semibold text-cyan-200">+{entry.points}</span>
+              </div>
+            ))}
+            <div className="grid grid-cols-[1fr_auto] items-center gap-3 px-3 py-2 text-sm font-semibold">
+              <span className="text-white">Total</span>
+              <span className="text-white">{qualifierScore}/10</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {lead.pitch_angle && (
+        <div className="mt-3 rounded-xl border border-cyan-400/20 bg-cyan-900/10 px-3 py-2.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-cyan-300/80 mb-1">AI Pitch Angle</p>
+          <p className="text-sm text-slate-200 leading-relaxed">{lead.pitch_angle}</p>
+        </div>
+      )}
       {lead.opportunity_pitch && (
         <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-amber-300/90 mb-1">Gold Mine Opportunity</p>
@@ -1772,6 +1833,17 @@ function QualifierLeadCard({ lead, accentClass, badgeClass }) {
           <p className="text-sm text-slate-200 leading-relaxed">{lead.suggested_hook}</p>
         </div>
       )}
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <button type="button" className="btn-primary justify-center" onClick={() => onGenerateEmail?.(lead)}>
+          📧 Generate Email
+        </button>
+        <button type="button" className="btn-secondary justify-center" onClick={() => onAddToPipeline?.(lead)}>
+          ➕ Add to Pipeline
+        </button>
+        <button type="button" className="btn-ghost justify-center" onClick={() => onSkip?.(lead)}>
+          ⏭ Skip
+        </button>
+      </div>
     </div>
   )
 }
@@ -6348,6 +6420,48 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
+  function generateQualifierLeadEmail(lead) {
+    if (!lead) return
+    const templateKey = mapQualifierGapToTemplateKey(lead.gold_mine_gap)
+    const template = resolveSnipedTemplateForSelection(selectedUserNiche, templateKey)
+    if (!template) {
+      toast.error('No matching template found for this lead.')
+      return
+    }
+
+    const vars = {
+      BusinessName: lead.business_name || 'Business Name',
+      City: lead.city || resolveLeadCityValue(lead),
+      Niche: deriveLeadIndustry(lead) || selectedUserNiche || 'Local Business',
+      YourName: currentUserName || 'Nejc',
+    }
+
+    const subject = replaceTemplatePlaceholders(String(template.subject || ''), vars)
+    const body = replaceTemplatePlaceholders(String(template.body || ''), vars)
+
+    setActiveTab('mail')
+    setActiveMailEditorTab('live')
+    setActiveLiveMailTemplateKey(templateKey)
+    setEmailPreviewLead({
+      businessName: lead.business_name || 'Lead',
+      subject,
+      body,
+    })
+    toast.success('Email draft generated from highest-gap template')
+  }
+
+  async function addQualifierLeadToPipeline(lead) {
+    if (!lead?.id) return
+    const ok = await updateLeadStatus(lead.id, 'queued_mail')
+    if (ok) toast.success('Lead added to pipeline')
+  }
+
+  async function skipQualifierLead(lead) {
+    if (!lead?.id) return
+    const ok = await updateLeadStatus(lead.id, 'low_priority')
+    if (ok) toast.success('Lead skipped for now')
+  }
+
   function openEmailPreviewModal(lead) {
     setEmailPreviewLead({
       businessName: lead.business_name || 'Lead',
@@ -10272,7 +10386,15 @@ function App({ initialTab = 'leads' }) {
                       </div>
                       <div className="space-y-3">
                         {(qualifierData.data?.no_website ?? qualifierData.data?.ghost ?? []).map((lead) => (
-                          <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-rose-500/20 bg-rose-950/10" badgeClass="bg-rose-500/15 text-rose-400" />
+                          <QualifierLeadCard
+                            key={lead.id}
+                            lead={lead}
+                            accentClass="border-rose-500/20 bg-rose-950/10"
+                            badgeClass="bg-rose-500/15 text-rose-400"
+                            onGenerateEmail={generateQualifierLeadEmail}
+                            onAddToPipeline={addQualifierLeadToPipeline}
+                            onSkip={skipQualifierLead}
+                          />
                         ))}
                       </div>
                     </div>
@@ -10290,7 +10412,15 @@ function App({ initialTab = 'leads' }) {
                       </div>
                       <div className="space-y-3">
                         {(qualifierData.data?.traffic_opportunity ?? qualifierData.data?.invisible_local ?? []).map((lead) => (
-                          <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-amber-500/20 bg-amber-950/10" badgeClass="bg-amber-500/15 text-amber-400" />
+                          <QualifierLeadCard
+                            key={lead.id}
+                            lead={lead}
+                            accentClass="border-amber-500/20 bg-amber-950/10"
+                            badgeClass="bg-amber-500/15 text-amber-400"
+                            onGenerateEmail={generateQualifierLeadEmail}
+                            onAddToPipeline={addQualifierLeadToPipeline}
+                            onSkip={skipQualifierLead}
+                          />
                         ))}
                       </div>
                     </div>
@@ -10308,7 +10438,15 @@ function App({ initialTab = 'leads' }) {
                       </div>
                       <div className="space-y-3">
                         {(qualifierData.data?.competitor_gap ?? qualifierData.data?.invisible_giant ?? []).map((lead) => (
-                          <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-violet-500/20 bg-violet-950/10" badgeClass="bg-violet-500/15 text-violet-300" />
+                          <QualifierLeadCard
+                            key={lead.id}
+                            lead={lead}
+                            accentClass="border-violet-500/20 bg-violet-950/10"
+                            badgeClass="bg-violet-500/15 text-violet-300"
+                            onGenerateEmail={generateQualifierLeadEmail}
+                            onAddToPipeline={addQualifierLeadToPipeline}
+                            onSkip={skipQualifierLead}
+                          />
                         ))}
                       </div>
                     </div>
@@ -10326,7 +10464,15 @@ function App({ initialTab = 'leads' }) {
                       </div>
                       <div className="space-y-3">
                         {(qualifierData.data?.site_speed ?? qualifierData.data?.tech_debt ?? []).map((lead) => (
-                          <QualifierLeadCard key={lead.id} lead={lead} accentClass="border-teal-500/20 bg-teal-950/10" badgeClass="bg-teal-500/15 text-teal-400" />
+                          <QualifierLeadCard
+                            key={lead.id}
+                            lead={lead}
+                            accentClass="border-teal-500/20 bg-teal-950/10"
+                            badgeClass="bg-teal-500/15 text-teal-400"
+                            onGenerateEmail={generateQualifierLeadEmail}
+                            onAddToPipeline={addQualifierLeadToPipeline}
+                            onSkip={skipQualifierLead}
+                          />
                         ))}
                       </div>
                     </div>
