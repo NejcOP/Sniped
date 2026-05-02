@@ -2396,6 +2396,7 @@ function App({ initialTab = 'leads' }) {
   const workflowRef = useRef(null)
   const mainPanelRef = useRef(null)
   const pendingDeletesRef = useRef({})
+  const checkoutRedirectHandledRef = useRef('')
 
   useEffect(() => {
     if (hasSessionToken) return
@@ -4219,7 +4220,22 @@ function App({ initialTab = 'leads' }) {
     const resolvedCheckoutStatus = checkoutStatus || (inferredCheckoutSuccess ? 'success' : '')
     const resolvedTopupStatus = topupStatus || (inferredTopupSuccess ? 'success' : '')
 
-    if (!resolvedCheckoutStatus && !resolvedTopupStatus && !paymentStatus) return
+    if (!resolvedCheckoutStatus && !resolvedTopupStatus && !paymentStatus) {
+      checkoutRedirectHandledRef.current = ''
+      return
+    }
+
+    const redirectSignature = [
+      resolvedCheckoutStatus,
+      resolvedTopupStatus,
+      paymentStatus,
+      checkoutPlanKey,
+      String(topupCreditsParam),
+    ].join('|')
+    if (checkoutRedirectHandledRef.current === redirectSignature) {
+      return
+    }
+    checkoutRedirectHandledRef.current = redirectSignature
 
     let cancelled = false
     const finalizeCheckoutRedirect = () => {
@@ -4273,8 +4289,8 @@ function App({ initialTab = 'leads' }) {
         }
         toast.success('Top-up payment received')
         const optimisticTopupDelta = Number.isFinite(topupCreditsParam) ? Math.max(0, topupCreditsParam) : 0
-        const currentBalance = Number(user?.credits_balance ?? user?.credits ?? 0)
-        const currentTopup = Number(user?.topup_credits_balance ?? 0)
+        const currentBalance = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
+        const currentTopup = Number(getStoredValue('lf_topup_credits_balance') || 0)
         await syncBillingStateAfterCheckout('', {
           preserveCreditsBalance: currentBalance + optimisticTopupDelta,
           preserveTopupBalance: currentTopup + optimisticTopupDelta,
@@ -4293,7 +4309,12 @@ function App({ initialTab = 'leads' }) {
       finalizeCheckoutRedirect()
     }
 
-    void runCheckoutRedirectSync()
+    void runCheckoutRedirectSync().catch((error) => {
+      checkoutRedirectHandledRef.current = ''
+      const message = error instanceof Error ? error.message : 'Could not finalize checkout state'
+      setLastError(message)
+      toast.error(message)
+    })
     return () => {
       cancelled = true
     }
@@ -4302,9 +4323,7 @@ function App({ initialTab = 'leads' }) {
     searchParams,
     setSearchParams,
     syncBillingStateAfterCheckout,
-    user?.credits,
-    user?.credits_balance,
-    user?.topup_credits_balance,
+    setLastError,
   ])
 
   const requestTopUpCheckoutUrl = useCallback(async (rawPackageId, { markPreparing = false } = {}) => {
