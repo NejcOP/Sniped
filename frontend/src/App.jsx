@@ -62,7 +62,7 @@ import { invalidateLeadsCache } from './hooks/useLeadsCache'
 import { LeadCardSkeletonList, StatCardSkeletonList } from './components/SkeletonLoaders'
 import { ScrapeProgressBar, ScrapeProgressBadge } from './components/ScrapeProgressBar'
 import OnboardingWizard from './components/OnboardingWizard'
-import TemplateStudioPanel from './components/TemplateStudioPanel'
+import { snipedEmailTemplates } from './sniped-email-templates'
 
 const MRR_GOAL_EUR = 16000
 const SETUP_MILESTONE_EUR = 6500
@@ -406,6 +406,13 @@ const mainNavItems = [
   { tab: 'mail', label: 'Mail', icon: Mail },
   { tab: 'clients', label: 'Clients', icon: LayoutDashboard },
 ]
+const templateCardIcons = {
+  ghost: Search,
+  golden: TrendingUp,
+  competitor: Users,
+  speed: Activity,
+}
+const templatePlaceholderTokens = ['{BusinessName}', '{City}', '{Niche}', '{YourName}']
 const TOP_UP_PACKAGES = [
   { id: 'credits_1000', credits: 1000, priceUsd: 29.99, badge: '' },
   { id: 'credits_2500', credits: 2500, priceUsd: 59.00, badge: '' },
@@ -706,6 +713,21 @@ const TopUpCreditsModal = memo(function TopUpCreditsModal({
 const defaultScrape = { keyword: '', results: 25, country: 'US', headless: true, exportTargets: true, speedMode: false }
 const defaultEnrich = { limit: 50, headless: true, skipExport: false }
 const defaultMailer = { limit: 10, delayMin: 7, delayMax: 15 }
+const defaultCampaignSequenceForm = {
+  name: 'Main 3-Step Sequence',
+  activeStep: 1,
+  step1_subject: 'Quick idea for {BusinessName}',
+  step1_body: 'Hi {BusinessName},\n\nSpotted a quick win in {City} that could help you pull in more local leads.',
+  step2_delay_days: 3,
+  step2_subject: 'Following up on {BusinessName}',
+  step2_body: 'Just floating this back to the top in case improving local conversion is still on your radar.',
+  step3_delay_days: 7,
+  step3_subject: 'Last note for {BusinessName}',
+  step3_body: 'Happy to send a short 2-minute breakdown if it would be useful.',
+  ab_subject_a: 'Quick idea for {BusinessName}',
+  ab_subject_b: '{BusinessName} — local traffic idea',
+  active: true,
+}
 const defaultManualLead = { contactName: '', email: '', businessName: '' }
 const defaultWorkerForm = { workerName: '', role: 'DEV', monthlyCost: '', status: 'Active', commsLink: '' }
 const createEmptySmtpAccount = () => ({
@@ -746,6 +768,41 @@ const liveMailTemplateCards = [
     bodyKey: 'speed_body_template',
   },
 ]
+
+const SNIPED_TEMPLATE_KEY_TO_GAP = {
+  ghost: 'No Website',
+  golden: 'Traffic Opportunity',
+  competitor: 'Competitor Gap',
+  speed: 'Site Speed',
+}
+
+const SNIPED_GAP_TO_CONFIG_KEYS = {
+  'No Website': { subjectKey: 'ghost_subject_template', bodyKey: 'ghost_body_template' },
+  'Traffic Opportunity': { subjectKey: 'golden_subject_template', bodyKey: 'golden_body_template' },
+  'Competitor Gap': { subjectKey: 'competitor_subject_template', bodyKey: 'competitor_body_template' },
+  'Site Speed': { subjectKey: 'speed_subject_template', bodyKey: 'speed_body_template' },
+}
+
+function resolveSnipedTemplateForSelection(rawNiche, templateKey) {
+  const niche = String(rawNiche || '').trim()
+  const gap = SNIPED_TEMPLATE_KEY_TO_GAP[String(templateKey || '').trim()] || 'No Website'
+  const nicheTemplates = snipedEmailTemplates[niche] || snipedEmailTemplates['Web Design & Dev']
+  const list = Array.isArray(nicheTemplates?.templates) ? nicheTemplates.templates : []
+  return list.find((item) => String(item?.gap || '').trim() === gap) || null
+}
+
+function buildSnipedTemplatePatch(rawNiche) {
+  const niche = String(rawNiche || '').trim()
+  const nicheTemplates = snipedEmailTemplates[niche] || snipedEmailTemplates['Web Design & Dev']
+  const list = Array.isArray(nicheTemplates?.templates) ? nicheTemplates.templates : []
+  return list.reduce((acc, item) => {
+    const keys = SNIPED_GAP_TO_CONFIG_KEYS[String(item?.gap || '').trim()]
+    if (!keys) return acc
+    acc[keys.subjectKey] = String(item?.subject || '')
+    acc[keys.bodyKey] = String(item?.body || '')
+    return acc
+  }, {})
+}
 
 const liveMailTemplateCardMetaByNiche = {
   'Web Design & Dev': {
@@ -788,6 +845,128 @@ function resolveLiveMailTemplateCardsForNiche(rawNiche) {
     ...card,
     ...(nicheMeta[card.key] || {}),
   }))
+}
+const mailTemplatePacks = [
+  {
+    key: 'clean',
+    label: 'Clean',
+    description: 'Short, calm, low-friction outreach.',
+    templates: {
+      ghost_subject_template: 'quick question for {BusinessName}',
+      ghost_body_template: 'Hi,\n\nI was looking for {BusinessName} in {City} and noticed you do not have a website live right now.\n\nThat usually means Google Maps traffic and direct searches are leaking to competitors who look easier to trust online.\n\nI build simple, high-converting service pages that get local businesses live fast and bring in more booked jobs.\n\nOpen to a quick 10-minute call this week?\n\nBest, {YourName}',
+      golden_subject_template: '{BusinessName} and local traffic',
+      golden_body_template: 'Hi,\n\nYour site for {BusinessName} already looks solid, but you are missing visibility in high-intent searches for {Niche} in {City}.\n\nThat means competitors are likely taking the easiest leads before people ever reach you.\n\nI can send over a short 2-minute video with a simple plan to capture more of that traffic with a better landing page and tighter Google Ads setup. Would you be against me sending it?\n\nBest, {YourName}',
+      competitor_subject_template: '{BusinessName} - quick idea',
+      competitor_body_template: 'Hi,\n\nI noticed competitors are showing up above {BusinessName} for {Niche} searches in {City}.\n\nUsually that happens when the site structure, SEO basics, or tracking setup are weaker than they should be.\n\nMy team fixes that end-to-end so local businesses turn more search traffic into booked work. If helpful, I can send over a short 2-minute breakdown.\n\nBest, {YourName}',
+      speed_subject_template: '{BusinessName} site speed',
+      speed_body_template: 'Hi,\n\nI checked {BusinessName} and the site appears slow enough on mobile that it may be hurting both rankings and conversion rate.\n\nFor {Niche} businesses in {City}, that usually means lost calls and form fills.\n\nI can show you how we fix speed, tighten the page, and make the traffic convert better.\n\nWorth a quick 10-minute call?\n\nBest, {YourName}',
+    },
+  },
+  {
+    key: 'local-first',
+    label: 'Local First',
+    description: 'Heavier local context and map visibility angle.',
+    templates: {
+      ghost_subject_template: 'noticed this about {BusinessName} in {City}',
+      ghost_body_template: 'Hi,\n\nI was searching for businesses like {BusinessName} in {City} today and noticed you still do not have a website live.\n\nFor local service companies, that usually means people see the Google listing, but then choose someone else because there is nothing online that builds trust fast.\n\nI build fast local landing pages designed to turn map traffic into calls and booked jobs. If helpful, I can send over a 2-minute video showing what I would build first.\n\nBest, {YourName}',
+      golden_subject_template: '{BusinessName} and missed local demand',
+      golden_body_template: 'Hi,\n\nI was reviewing {BusinessName} and noticed you are not taking enough visible share of high-intent local traffic for {Niche} in {City}.\n\nThat often means the business is strong, but the landing page and ad presence are not doing enough to capture demand already in the market.\n\nI can send over a tight website-plus-ads plan built specifically for local lead flow. Would you be against me sending a short 2-minute breakdown?\n\nBest, {YourName}',
+      competitor_subject_template: '{BusinessName} vs competitors in {City}',
+      competitor_body_template: 'Hi,\n\nI noticed competitors around {City} are occupying more of the visible search space than {BusinessName} right now.\n\nThat usually comes down to a better landing page structure, cleaner SEO signals, and stronger tracking.\n\nWe fix those gaps so local businesses stop leaking easy demand to nearby competitors. If useful, I can send over a short 2-minute walkthrough.\n\nBest, {YourName}',
+      speed_subject_template: '{BusinessName} mobile experience',
+      speed_body_template: 'Hi,\n\nI checked {BusinessName} and the mobile experience looks slow enough that it may be pushing both users and rankings in the wrong direction.\n\nIn local {Niche} searches around {City}, faster pages usually win more clicks and more calls.\n\nI can show you a fast cleanup plan and what it would take to improve it quickly.\n\nOpen to a short call this week?\n\nBest, {YourName}',
+    },
+  },
+  {
+    key: 'aggressive',
+    label: 'Aggressive',
+    description: 'Sharper pain framing and stronger commercial angle.',
+    templates: {
+      ghost_subject_template: '{BusinessName} is likely losing easy leads',
+      ghost_body_template: 'Hi,\n\nI looked up {BusinessName} in {City} and noticed there is still no website live.\n\nThat usually means potential customers are finding you, hesitating, and then booking the competitor that looks more established online.\n\nWe build fast service pages that fix that immediately and give you a proper base for SEO and Google Ads.\n\nDo you have 10 minutes this week to see what that would look like?\n\nBest, {YourName}',
+      golden_subject_template: '{BusinessName} is missing high-intent traffic',
+      golden_body_template: 'Hi,\n\n{BusinessName} looks strong, but you are still leaving valuable search traffic on the table for {Niche} in {City}.\n\nRight now competitors are likely buying or capturing leads that should be coming to you first.\n\nI can send over a short plan showing how to tighten the page, improve conversion, and layer in ads that bring in higher-quality demand.\n\nBest, {YourName}',
+      competitor_subject_template: 'competitors are outranking {BusinessName}',
+      competitor_body_template: 'Hi,\n\nI noticed competitors are beating {BusinessName} in Google for {Niche} around {City}.\n\nThat usually means your current site and tracking setup are not strong enough to convert or signal quality properly.\n\nWe rebuild that stack so the business is easier to find, easier to trust, and easier to contact.\n\nDo you have 10 minutes this week for a quick walkthrough?\n\nBest, {YourName}',
+      speed_subject_template: '{BusinessName} may be getting penalized',
+      speed_body_template: 'Hi,\n\nI ran a quick check on {BusinessName} and the site looks slow enough on mobile to hurt both rankings and lead volume.\n\nFor {Niche} in {City}, that usually means people bounce fast and Google pushes competitors above you.\n\nI can send over a short 2-minute walkthrough showing the fastest way to clean that up and turn the page into something that actually brings in business.\n\nBest, {YourName}',
+    },
+  },
+]
+
+const nicheTemplateBaseByCategory = {
+  'Paid Ads Agency': {
+    ghost_subject_template: '{BusinessName} tracking gap',
+    ghost_body_template: 'Hi,\n\nI reviewed {BusinessName} and noticed your paid tracking setup for {Niche} in {City} appears incomplete.\n\nWhen pixel events are missing, retargeting and optimization get weaker, so budget burns with limited learning.\n\nI can share a short fix plan to restore clean signal quality quickly.\n\nBest, {YourName}',
+    golden_subject_template: '{BusinessName} paid demand opportunity',
+    golden_body_template: 'Hi,\n\nThere is clear paid demand for {Niche} in {City}, but {BusinessName} is not capturing enough of that intent.\n\nThis is usually fixable with better campaign structure, offer match, and event hygiene.\n\nI can send a concise 2-minute action plan tailored to your account.\n\nBest, {YourName}',
+    competitor_subject_template: '{BusinessName} paid competitor gap',
+    competitor_body_template: 'Hi,\n\nCompetitors are taking stronger paid visibility than {BusinessName} for {Niche} around {City}.\n\nThat normally points to better segmentation and cleaner conversion signaling on their side.\n\nIf useful, I can send a short pressure-gap breakdown with exact fixes.\n\nBest, {YourName}',
+    speed_subject_template: '{BusinessName} attribution quality',
+    speed_body_template: 'Hi,\n\nI ran a quick quality check and {BusinessName} appears to have attribution friction that can hurt campaign efficiency.\n\nFor {Niche} in {City}, cleaner event mapping usually lowers CPA and improves lead quality.\n\nI can send a practical cleanup checklist in priority order.\n\nBest, {YourName}',
+  },
+  'SEO & Content': {
+    ghost_subject_template: '{BusinessName} content base gap',
+    ghost_body_template: 'Hi,\n\nI checked {BusinessName} and the current content footprint for {Niche} in {City} looks too thin for stable page-one visibility.\n\nWithout stronger topical coverage, competitors keep winning high-intent clicks.\n\nI can send a short 3-keyword content roadmap that is fast to implement.\n\nBest, {YourName}',
+    golden_subject_template: '{BusinessName} keyword upside',
+    golden_body_template: 'Hi,\n\nThere is keyword opportunity in {City} for {Niche}, but {BusinessName} is not taking enough page-one share yet.\n\nUsually this comes down to missing content depth and weak internal topic structure.\n\nI can send a concise ranking plan for the highest-impact terms first.\n\nBest, {YourName}',
+    competitor_subject_template: '{BusinessName} ranking gap',
+    competitor_body_template: 'Hi,\n\nCompetitors are outranking {BusinessName} for valuable {Niche} searches around {City}.\n\nThis is often a combination of stronger relevance signals and better content architecture.\n\nIf helpful, I can send a brief gap analysis with immediate wins.\n\nBest, {YourName}',
+    speed_subject_template: '{BusinessName} technical SEO drag',
+    speed_body_template: 'Hi,\n\nI ran a quick technical pass and {BusinessName} has performance issues that likely suppress both rankings and conversion quality.\n\nFor {Niche} in {City}, these issues usually create avoidable traffic loss.\n\nI can share a short technical cleanup sequence to fix this fast.\n\nBest, {YourName}',
+  },
+  'Lead Gen Agency': {
+    ghost_subject_template: '{BusinessName} lead capture leak',
+    ghost_body_template: 'Hi,\n\nI reviewed {BusinessName} and your lead capture path for {Niche} in {City} appears weaker than it should be.\n\nWhen CTA flow is unclear, qualified visitors leave without turning into booked conversations.\n\nI can send a short funnel upgrade plan that lifts capture without increasing traffic.\n\nBest, {YourName}',
+    golden_subject_template: '{BusinessName} CTA opportunity',
+    golden_body_template: 'Hi,\n\n{BusinessName} seems to have intent traffic, but conversion handoff for {Niche} in {City} is not tight enough yet.\n\nThis is typically a message and page-flow issue, not a demand issue.\n\nI can share a concise conversion blueprint you can apply immediately.\n\nBest, {YourName}',
+    competitor_subject_template: '{BusinessName} offer positioning gap',
+    competitor_body_template: 'Hi,\n\nCompetitors are likely winning more inbound demand because their offer framing is clearer than {BusinessName}.\n\nIn {City} for {Niche}, this creates a silent but expensive inquiry leak.\n\nIf useful, I can send a short positioning and CTA fix plan.\n\nBest, {YourName}',
+    speed_subject_template: '{BusinessName} funnel friction',
+    speed_body_template: 'Hi,\n\nI ran a quick check and {BusinessName} has avoidable conversion friction that is probably reducing lead volume.\n\nSmall UX and speed adjustments often create outsized gains for {Niche} in {City}.\n\nI can send a practical fix list with priority order.\n\nBest, {YourName}',
+  },
+  'B2B Service Provider': {
+    ghost_subject_template: '{BusinessName} outbound pipeline gap',
+    ghost_body_template: 'Hi,\n\nI looked at {BusinessName} and your outbound pipeline for {Niche} appears under-structured right now.\n\nThat usually leads to inconsistent deal flow even when service quality is strong.\n\nI can send a lightweight system for predictable partner sourcing and first-touch outreach.\n\nBest, {YourName}',
+    golden_subject_template: '{BusinessName} LinkedIn demand opportunity',
+    golden_body_template: 'Hi,\n\n{BusinessName} has strong potential, but LinkedIn demand capture for {Niche} in {City} looks underused.\n\nThis often means high-fit conversations are going to teams with more consistent outbound cadence.\n\nI can send a concise LinkedIn plus email workflow to close that gap.\n\nBest, {YourName}',
+    competitor_subject_template: '{BusinessName} partner outreach gap',
+    competitor_body_template: 'Hi,\n\nCompetitors are frequently growing faster by running more systematic direct outreach than {BusinessName}.\n\nFor B2B services, this compounds into a measurable pipeline gap over time.\n\nIf helpful, I can send a short partner-sourcing playbook tailored to your ICP.\n\nBest, {YourName}',
+    speed_subject_template: '{BusinessName} outreach handoff friction',
+    speed_body_template: 'Hi,\n\nI noticed likely friction between sourcing, first touch, and follow-up in your current workflow.\n\nThose handoff gaps usually slow meeting velocity and reduce conversion quality.\n\nI can share a short automation-first sequence to tighten the full pipeline.\n\nBest, {YourName}',
+  },
+}
+
+function applyPackToneToBody(body, packKey) {
+  if (!body) return body
+  if (packKey === 'local-first') {
+    return body.replace('Hi,\n\n', 'Hi,\n\nI focused on your local market in {City} and found this quick win.\n\n')
+  }
+  if (packKey === 'aggressive') {
+    return body.replace('If useful,', 'Directly:').replace('I can', 'I can immediately')
+  }
+  return body
+}
+
+function resolveMailTemplatePacksForNiche(rawNiche) {
+  const niche = String(rawNiche || '').trim()
+  const baseTemplates = nicheTemplateBaseByCategory[niche]
+  if (!baseTemplates) return mailTemplatePacks
+  return mailTemplatePacks.map((pack) => {
+    const tonedTemplates = Object.fromEntries(
+      Object.entries(baseTemplates).map(([key, value]) => {
+        if (!key.endsWith('_body_template')) return [key, value]
+        return [key, applyPackToneToBody(value, pack.key)]
+      }),
+    )
+    return {
+      ...pack,
+      templates: {
+        ...pack.templates,
+        ...tonedTemplates,
+      },
+    }
+  })
 }
 
 function getIdleTask(taskType) {
@@ -1025,6 +1204,26 @@ function formatFeedTime(raw) {
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return '--:--'
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function deriveToneProfile(subject, body) {
+  const text = `${subject || ''} ${body || ''}`.toLowerCase()
+  const urgentHits = ['urgent', 'immediately', 'losing', 'penalized', 'quick question'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+  const helpfulHits = ['help', 'show', 'walkthrough', 'plan', 'open to', 'no pressure'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+  const professionalHits = ['strategy', 'business', 'local', 'conversion', 'google'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+
+  const scores = {
+    Professional: Math.min(100, 30 + professionalHits * 14),
+    Urgent: Math.min(100, 20 + urgentHits * 18),
+    Helpful: Math.min(100, 25 + helpfulHits * 15),
+  }
+
+  const dominant = Object.entries(scores).sort((a, b) => b[1] - a[1])[0] || ['Professional', 0]
+  return {
+    dominantLabel: dominant[0],
+    dominantScore: dominant[1],
+    scores,
+  }
 }
 
 function buildSparkPoints(values, width = 160, height = 44) {
@@ -1786,6 +1985,7 @@ function App({ initialTab = 'leads' }) {
   const hasSessionToken = Boolean(sessionToken)
   const displayName = getStoredValue('lf_display_name') || getStoredValue('lf_email') || 'there'
   const currentUserEmail = getStoredValue('lf_email') || ''
+  const currentUserName = getStoredValue('lf_display_name') || getStoredValue('lf_contact_name') || ''
   const [user, setUser] = useState(() => ({
     credits: Number(getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
     credits_balance: Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
@@ -1858,7 +2058,9 @@ function App({ initialTab = 'leads' }) {
     saved_templates: [],
     recent_events: [],
   })
+  const [sequenceForm, setSequenceForm] = useState(defaultCampaignSequenceForm)
   const [campaignLoading, setCampaignLoading] = useState(false)
+  const [savingSequence, setSavingSequence] = useState(false)
   const [manualLeadForm, setManualLeadForm] = useState(defaultManualLead)
   const [pendingRequest, setPendingRequest] = useState('')
   const [pendingStatusLeadId, setPendingStatusLeadId] = useState(null)
@@ -2206,7 +2408,7 @@ function App({ initialTab = 'leads' }) {
   const [qualifierData, setQualifierData] = useState({ loading: false, data: null, error: '' })
   const [refreshingDashboard, setRefreshingDashboard] = useState(false)
   const [lastManualRefreshAt, setLastManualRefreshAt] = useState(null)
-  const [, setMailPreview] = useState({ subject: '', body: '', generatedAt: null })
+  const [mailPreview, setMailPreview] = useState({ subject: '', body: '', generatedAt: null })
   const defaultColdOutreachForm = { businessName: '', city: '', niche: '', painPoint: '', competitors: '', monthlyLoss: '', contactName: '', contactEmail: '' }
   const [coldOutreachForm, setColdOutreachForm] = useState(defaultColdOutreachForm)
   const [coldOutreachResult, setColdOutreachResult] = useState({ subject: '', body: '', generatedAt: null })
@@ -2217,8 +2419,10 @@ function App({ initialTab = 'leads' }) {
   const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
   const [showLeadScoreBreakdown, setShowLeadScoreBreakdown] = useState(false)
   const [taskAiPreviewLead, setTaskAiPreviewLead] = useState(null)
-  const [, setPreviewLoading] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [activeMailPack, setActiveMailPack] = useState('')
   const [activeLiveMailTemplateKey, setActiveLiveMailTemplateKey] = useState(liveMailTemplateCards[0]?.key || 'ghost')
+  const [activeMailEditorTab, setActiveMailEditorTab] = useState('live')
   const [showMailerConfirm, setShowMailerConfirm] = useState(false)
   const [mailerScheduledHour, setMailerScheduledHour] = useState('now')
   const [mailerHourOpen, setMailerHourOpen] = useState(false)
@@ -5488,6 +5692,30 @@ function App({ initialTab = 'leads' }) {
     })()
   }
 
+  async function saveCampaignSequence() {
+    setSavingSequence(true)
+    try {
+      await fetchJson('/api/mailer/sequences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...sequenceForm,
+          step2_delay_days: Number(sequenceForm.step2_delay_days || 3),
+          step3_delay_days: Number(sequenceForm.step3_delay_days || 7),
+          active: Boolean(sequenceForm.active),
+        }),
+      })
+      toast.success('Sequence saved')
+      await fetchMailerCampaignStats({ silent: true })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save campaign sequence'
+      setLastError(message)
+      toast.error(message)
+    } finally {
+      setSavingSequence(false)
+    }
+  }
+
   async function previewMailTemplate({ regenerate = false, silent = false, configOverride = null } = {}) {
     const previewConfig = configOverride || configForm
     setPreviewLoading(true)
@@ -5539,6 +5767,31 @@ function App({ initialTab = 'leads' }) {
     } finally {
       setPreviewLoading(false)
     }
+  }
+
+  async function applyMailTemplatePack(packKey) {
+    const pack = visibleMailTemplatePacks.find((item) => item.key === packKey)
+    if (!pack) return
+
+    const snipedPatch = buildSnipedTemplatePatch(selectedUserNiche)
+    const activeTemplate = resolveSnipedTemplateForSelection(selectedUserNiche, activeLiveMailTemplateKey)
+
+    const nextConfig = {
+      ...configForm,
+      ...pack.templates,
+      ...snipedPatch,
+    }
+
+    setConfigForm(nextConfig)
+    if (activeTemplate?.followup) {
+      setSequenceForm((prev) => ({
+        ...prev,
+        step2_body: String(activeTemplate.followup || prev.step2_body || ''),
+      }))
+    }
+    setActiveMailPack(pack.key)
+    await previewMailTemplate({ silent: true, configOverride: nextConfig })
+    toast.success(`${pack.label} pack applied`)
   }
 
   async function submitSale(e) {
@@ -6345,6 +6598,12 @@ function App({ initialTab = 'leads' }) {
     if (revenueProgress >= 25) return '\u26A1 Gaining momentum'
     return '\uD83C\uDF31 Getting started'
   }, [revenueProgress])
+  const toneProfile = useMemo(
+    () => deriveToneProfile(mailPreview.subject, mailPreview.body),
+    [mailPreview.subject, mailPreview.body],
+  )
+  const previewSenderName = currentUserName || configForm.smtp_accounts?.[0]?.from_name || currentUserEmail || 'Your sender name'
+  const previewSenderEmail = currentUserEmail || configForm.smtp_accounts?.[0]?.email || 'sender@domain.com'
   const userInitial = String(displayName || currentUserEmail || 'U').trim().charAt(0).toUpperCase() || 'U'
   const normalizedSubscriptionStatus = String(user?.subscriptionStatus || '').toLowerCase().trim()
   const lifecycleSubscriptionStatus = String(user?.subscription_status || '').toLowerCase().trim()
@@ -6386,11 +6645,38 @@ function App({ initialTab = 'leads' }) {
     () => resolveLiveMailTemplateCardsForNiche(selectedUserNiche),
     [selectedUserNiche],
   )
+  const visibleMailTemplatePacks = useMemo(
+    () => resolveMailTemplatePacksForNiche(selectedUserNiche),
+    [selectedUserNiche],
+  )
+
+  const applySnipedTemplateSelection = useCallback((templateKey) => {
+    const selectedCard = liveMailTemplateCards.find((card) => card.key === templateKey) || liveMailTemplateCards[0]
+    if (!selectedCard) return
+
+    const matched = resolveSnipedTemplateForSelection(selectedUserNiche, selectedCard.key)
+    if (!matched) return
+
+    setConfigForm((prev) => ({
+      ...prev,
+      [selectedCard.subjectKey]: String(matched.subject || prev[selectedCard.subjectKey] || ''),
+      [selectedCard.bodyKey]: String(matched.body || prev[selectedCard.bodyKey] || ''),
+    }))
+    setSequenceForm((prev) => ({
+      ...prev,
+      step2_body: String(matched.followup || prev.step2_body || ''),
+    }))
+  }, [selectedUserNiche])
+
   useEffect(() => {
     if (!visibleLiveMailTemplateCards.some((card) => card.key === activeLiveMailTemplateKey)) {
       setActiveLiveMailTemplateKey(visibleLiveMailTemplateCards[0]?.key || 'ghost')
     }
   }, [visibleLiveMailTemplateCards, activeLiveMailTemplateKey])
+
+  useEffect(() => {
+    applySnipedTemplateSelection(activeLiveMailTemplateKey)
+  }, [applySnipedTemplateSelection, activeLiveMailTemplateKey, selectedUserNiche])
   const visibleMainNavItems = useMemo(
     () => mainNavItems.filter((item) => item.tab !== 'clients' || canClientSuccessDashboard),
     [canClientSuccessDashboard],
@@ -9347,7 +9633,333 @@ function App({ initialTab = 'leads' }) {
                 )}
               </div>
 
-              <TemplateStudioPanel />
+              <div className="rounded-2xl border border-white/5 bg-white/[0.03] p-5">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                      <Mail className="h-4 w-4 text-cyan-400" /> Template Studio
+                    </h3>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+                      Edit both live templates and follow-up templates here in one single place.
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-xs text-slate-300">
+                    <p className="font-semibold uppercase tracking-[0.14em] text-cyan-300">Supported placeholders</p>
+                    <p className="mt-2">{'{BusinessName}'} {'{City}'} {'{Niche}'} {'{YourName}'}</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 space-y-4">
+                  {selectedUserNiche && (
+                    <div className="inline-flex items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100">
+                      <span className="font-semibold uppercase tracking-[0.14em] text-cyan-300">Active Category</span>
+                      <span className="text-slate-200">{selectedUserNiche}</span>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${activeMailEditorTab === 'live' ? 'border-cyan-400/50 bg-cyan-500/10 text-cyan-100' : 'border-white/10 bg-slate-900/60 text-slate-300 hover:border-white/20 hover:bg-slate-900/80'}`}
+                      onClick={() => setActiveMailEditorTab('live')}
+                    >
+                      Live Templates
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${activeMailEditorTab === 'followup' ? 'border-violet-400/50 bg-violet-500/10 text-violet-100' : 'border-white/10 bg-slate-900/60 text-slate-300 hover:border-white/20 hover:bg-slate-900/80'}`}
+                      onClick={() => setActiveMailEditorTab('followup')}
+                    >
+                      Follow-up Templates
+                    </button>
+                  </div>
+
+                  {activeMailEditorTab === 'followup' ? (
+                    <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                      <div className="flex items-start justify-between gap-3 mb-4">
+                        <div>
+                          <p className="text-sm font-semibold text-white">Follow-up Sequence</p>
+                          <p className="mt-1 text-xs leading-5 text-slate-400">Edit subject and body for each follow-up step.</p>
+                        </div>
+                        <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-violet-200">3 steps</span>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 mb-4">
+                        {[1, 2, 3].map((step) => (
+                          <button
+                            key={`followup-step-${step}`}
+                            type="button"
+                            className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${sequenceForm[`activeStep`] === step ? 'border-violet-400/50 bg-violet-500/10 text-violet-100' : 'border-white/10 bg-slate-950/60 text-slate-300 hover:border-white/20'}`}
+                            onClick={() => setSequenceForm({ ...sequenceForm, activeStep: step })}
+                          >
+                            Step {step}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="grid gap-3">
+                        {sequenceForm.activeStep === 1 && (
+                          <>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Subject</span>
+                              <input className="glass-input" type="text" placeholder="Follow-up subject line" value={sequenceForm.step1_subject || sequenceForm.ab_subject_a || ''} onChange={(e) => setSequenceForm({ ...sequenceForm, ab_subject_a: e.target.value })} />
+                            </label>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Body</span>
+                              <textarea className="glass-input min-h-[180px]" placeholder="Follow-up email body" value={sequenceForm.step1_body} onChange={(e) => setSequenceForm({ ...sequenceForm, step1_body: e.target.value })} />
+                            </label>
+                          </>
+                        )}
+
+                        {sequenceForm.activeStep === 2 && (
+                          <>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Subject</span>
+                              <input className="glass-input" type="text" placeholder="Follow-up subject line" value={sequenceForm.step2_subject} onChange={(e) => setSequenceForm({ ...sequenceForm, step2_subject: e.target.value })} />
+                            </label>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Body</span>
+                              <textarea className="glass-input min-h-[180px]" placeholder="Follow-up email body" value={sequenceForm.step2_body} onChange={(e) => setSequenceForm({ ...sequenceForm, step2_body: e.target.value })} />
+                            </label>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Delay after first email (days)</span>
+                              <input className="glass-input" type="number" min="1" max="30" value={sequenceForm.step2_delay_days} onChange={(e) => setSequenceForm({ ...sequenceForm, step2_delay_days: e.target.value })} />
+                            </label>
+                          </>
+                        )}
+
+                        {sequenceForm.activeStep === 3 && (
+                          <>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Subject</span>
+                              <input className="glass-input" type="text" placeholder="Follow-up subject line" value={sequenceForm.step3_subject} onChange={(e) => setSequenceForm({ ...sequenceForm, step3_subject: e.target.value })} />
+                            </label>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Body</span>
+                              <textarea className="glass-input min-h-[180px]" placeholder="Follow-up email body" value={sequenceForm.step3_body} onChange={(e) => setSequenceForm({ ...sequenceForm, step3_body: e.target.value })} />
+                            </label>
+                            <label className="field-label">
+                              <span className="mb-1.5 block">Delay after first email (days)</span>
+                              <input className="glass-input" type="number" min="1" max="60" value={sequenceForm.step3_delay_days} onChange={(e) => setSequenceForm({ ...sequenceForm, step3_delay_days: e.target.value })} />
+                            </label>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <button className="btn-primary" type="button" disabled={savingSequence} onClick={() => void saveCampaignSequence()}>
+                          <Save className="h-4 w-4" />
+                          {savingSequence ? 'Saving…' : 'Save Sequence'}
+                        </button>
+                        <p className="text-xs text-slate-500">Applied automatically when mailer sends follow-ups.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap gap-2">
+                        {visibleLiveMailTemplateCards.map((card) => {
+                          const Icon = templateCardIcons[card.key] || Mail
+                          const isActive = activeLiveMailTemplateKey === card.key
+                          return (
+                            <button
+                              key={card.key}
+                              type="button"
+                              className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition ${isActive ? 'border-cyan-400/50 bg-cyan-500/10 text-cyan-100' : 'border-white/10 bg-slate-900/60 text-slate-300 hover:border-white/20 hover:bg-slate-900/80'}`}
+                              onClick={() => setActiveLiveMailTemplateKey(card.key)}
+                            >
+                              <Icon className="h-4 w-4" />
+                              {card.title}
+                            </button>
+                          )
+                        })}
+                      </div>
+
+                      {(() => {
+                        const activeCard = visibleLiveMailTemplateCards.find((card) => card.key === activeLiveMailTemplateKey) || visibleLiveMailTemplateCards[0]
+                        const ActiveIcon = templateCardIcons[activeCard?.key] || Mail
+                        return (
+                          <div className="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-semibold text-white">{activeCard?.title || 'Mail Template'}</p>
+                                <p className="mt-1 text-xs leading-5 text-slate-400">{activeCard?.description || 'Edit the selected mail template here.'}</p>
+                              </div>
+                              <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-violet-400/30 bg-gradient-to-br from-indigo-600/30 to-violet-600/30 text-indigo-200">
+                                <ActiveIcon className="h-4 w-4" />
+                              </span>
+                            </div>
+                            <div className="mt-4 grid gap-3">
+                              <label className="field-label">
+                                <span className="mb-1.5 block">Subject</span>
+                                <input
+                                  className="glass-input focus-input font-mono"
+                                  type="text"
+                                  value={configForm[activeCard?.subjectKey] || ''}
+                                  onChange={(e) => setConfigForm({ ...configForm, [activeCard.subjectKey]: e.target.value })}
+                                />
+                              </label>
+                              <label className="field-label">
+                                <span className="mb-1.5 block">Body</span>
+                                <textarea
+                                  className="glass-input focus-input min-h-[220px]"
+                                  value={configForm[activeCard?.bodyKey] || ''}
+                                  onChange={(e) => setConfigForm({ ...configForm, [activeCard.bodyKey]: e.target.value })}
+                                />
+                              </label>
+                              <div className="placeholder-pills">
+                                {templatePlaceholderTokens.map((token) => (
+                                  <span key={`${activeCard?.key}-${token}`} className="placeholder-pill">{token}</span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })()}
+                    </>
+                  )}
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Quick Template Packs</p>
+                      <p className="mt-2 text-sm text-slate-400">Z enim klikom nalozis celoten set template-ov za drugacen ton kampanje.</p>
+                    </div>
+                    <p className="text-xs text-slate-500">Current: <span className="font-semibold text-slate-200">{activeMailPack || 'Custom mix'}</span></p>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                    {visibleMailTemplatePacks.map((pack) => (
+                      <button
+                        key={pack.key}
+                        type="button"
+                        className={`rounded-2xl border px-4 py-4 text-left transition ${activeMailPack === pack.key ? 'border-cyan-400/50 bg-cyan-500/10' : 'border-white/10 bg-slate-900/60 hover:border-white/20 hover:bg-slate-900/80'}`}
+                        onClick={() => void applyMailTemplatePack(pack.key)}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-semibold text-white">{pack.label}</p>
+                          <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">Pack</span>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-slate-400">{pack.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                  <div className="space-y-4">
+                    <label className="field-label">
+                      <span className="mb-1.5 block">Optional Mail Footer</span>
+                      <textarea
+                        className="glass-input min-h-[120px]"
+                        placeholder={'Example:\nGoFast\nwww.gofast.si'}
+                        value={configForm.mail_signature}
+                        onChange={(e) => setConfigForm({ ...configForm, mail_signature: e.target.value })}
+                      />
+                      <span className="mt-1 block text-[11px] text-slate-500">Phone numbers are stripped automatically. Leave empty if the template already ends with your name.</span>
+                    </label>
+
+                    <div className="rounded-xl border border-white/10 bg-slate-900/60 p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Routing Logic</p>
+                      <div className="mt-3 space-y-2 text-sm text-slate-300">
+                        {visibleLiveMailTemplateCards.map((card) => (
+                          <p key={`routing-${card.key}`}>
+                            <span className="font-semibold text-white">{card.title}</span> — {card.description}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-cyan-500/20 bg-slate-900/70 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300">Preview (sample lead)</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-400">
+                      Preview uses the same backend pipeline as real sends. What you see here is what goes out in a campaign.
+                    </p>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
+                        <p className="mt-1 text-sm text-slate-300">{mailPreview.generatedAt ? new Date(mailPreview.generatedAt).toLocaleTimeString() : 'Not yet'}</p>
+                      </div>
+                      <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-[0.12em] text-violet-300">Tone of Voice</p>
+                        <p className="mt-1 text-sm font-semibold text-white">{toneProfile.dominantLabel} · {toneProfile.dominantScore}%</p>
+                        <div className="mail-tone-bars mt-2">
+                          {Object.entries(toneProfile.scores).map(([label, score]) => (
+                            <div key={label} className="tone-row">
+                              <span>{label}</span>
+                              <div className="tone-track"><div className="tone-fill" style={{ width: `${score}%` }} /></div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 overflow-hidden rounded-[24px] border border-white/10 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 shadow-[0_24px_80px_rgba(8,15,32,0.45)]">
+                      <div className="border-b border-white/10 bg-white/[0.03] px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full bg-rose-400/80" />
+                          <span className="h-2.5 w-2.5 rounded-full bg-amber-300/80" />
+                          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/80" />
+                          <p className="ml-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Outgoing Draft</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-4 px-4 py-4">
+                        <div className="grid gap-2 rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-sm text-slate-300">
+                          <div className="flex items-start gap-3">
+                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">From</span>
+                            <div>
+                              <p className="font-medium text-white">{previewSenderName}</p>
+                              <p className="text-xs text-slate-500">{previewSenderEmail}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">To</span>
+                            <div>
+                              <p className="font-medium text-white">{coldOutreachForm.contactName || 'Recipient Name'}</p>
+                              <p className="text-xs text-slate-500">{coldOutreachForm.contactEmail || 'recipient@domain.com'}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3">
+                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</span>
+                            {previewLoading ? <span className="preview-skeleton h-5 w-full max-w-[260px]" /> : <p className="font-medium text-white">{mailPreview.subject || 'Generate preview to inspect current template output.'}</p>}
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
+                          {previewLoading ? (
+                            <div className="space-y-2">
+                              <span className="preview-skeleton h-4 w-[88%]" />
+                              <span className="preview-skeleton h-4 w-[80%]" />
+                              <span className="preview-skeleton h-4 w-[92%]" />
+                              <span className="preview-skeleton h-4 w-[72%]" />
+                              <span className="preview-skeleton h-4 w-[86%]" />
+                            </div>
+                          ) : (
+                            <pre className="min-h-[260px] whitespace-pre-wrap break-words font-sans text-[14px] leading-7 text-slate-200">{mailPreview.body || 'Preview body will appear here.'}</pre>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <button className="btn-primary" type="submit" disabled={savingConfig}>
+                    <Save className="h-4 w-4" />
+                    {savingConfig ? 'Saving…' : 'Save Mail Settings'}
+                  </button>
+                  <button className="btn-ghost" type="button" disabled={previewLoading} onClick={() => void previewMailTemplate()}>
+                    <Eye className="h-4 w-4" />
+                    {previewLoading ? 'Generating…' : 'Generate Preview'}
+                  </button>
+                  <button className="btn-ghost" type="button" disabled={previewLoading} onClick={() => void previewMailTemplate({ regenerate: true })}>
+                    <RefreshCw className={`h-4 w-4 ${previewLoading ? 'animate-spin' : ''}`} />
+                    Regenerate Preview
+                  </button>
+                  <p className="text-xs text-slate-500">Saved templates apply to both preview and real sends.</p>
+                </div>
+              </div>
             </form>
           ) : activeTab === 'config' ? (
             <form className="max-w-2xl space-y-6" onSubmit={saveConfig}>
