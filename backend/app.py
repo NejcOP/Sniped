@@ -44,6 +44,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
 try:
+    stripe = importlib.import_module("stripe")
+except Exception:
+    stripe = None  # type: ignore
+
+try:
     _supabase_module = importlib.import_module("supabase")
     create_supabase_client = getattr(_supabase_module, "create_client")
     _HAS_SUPABASE = True
@@ -15105,6 +15110,191 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail="Stripe portal did not return a URL.")
         return portal_url
 
+    def _require_stripe_sdk_client() -> Any:
+        if stripe is None:
+            raise HTTPException(status_code=503, detail="Stripe SDK is not installed on the backend.")
+        secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
+        if not secret_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured. Add `stripe.secret_key` in `environment settings` or set `STRIPE_SECRET_KEY`.")
+        stripe.api_key = secret_key
+        return stripe
+
+    def _stripe_field(value: Any, key: str, default: Any = None) -> Any:
+        if isinstance(value, dict):
+            return value.get(key, default)
+        try:
+            return value.get(key, default)
+        except Exception:
+            return getattr(value, key, default)
+
+    def _int_or_zero(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def _pick_manageable_subscription(subscription_rows: list[Any]) -> Optional[Any]:
+        if not subscription_rows:
+            return None
+
+        def _rank(item: Any) -> tuple[int, int]:
+            status = str(_stripe_field(item, "status", "") or "").strip().lower()
+            rank = {
+                "active": 0,
+                "trialing": 1,
+                "past_due": 2,
+                "unpaid": 3,
+                "incomplete": 4,
+                "canceled": 5,
+                "incomplete_expired": 6,
+            }.get(status, 9)
+            period_end = _int_or_zero(_stripe_field(item, "current_period_end", 0))
+            return (rank, -period_end)
+
+        ranked = sorted(subscription_rows, key=_rank)
+        for candidate in ranked:
+            status = str(_stripe_field(candidate, "status", "") or "").strip().lower()
+            if status not in {"canceled", "incomplete_expired"}:
+                return candidate
+        return ranked[0]
+
+    def _set_subscription_cancel_at_period_end(customer_id: str, *, cancel_at_period_end: bool) -> dict[str, Any]:
+        stripe_client = _require_stripe_sdk_client()
+        try:
+            subscriptions = stripe_client.Subscription.list(customer=customer_id, status="all", limit=10)
+            rows = list(getattr(subscriptions, "data", None) or [])
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logging.exception("Stripe subscription listing failed for customer=%s", customer_id)
+            raise HTTPException(status_code=502, detail=f"Could not load Stripe subscription: {exc}")
+
+        selected = _pick_manageable_subscription(rows)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="No Stripe subscription found for this customer.")
+
+        subscription_id = str(_stripe_field(selected, "id", "") or "").strip()
+        if not subscription_id:
+            raise HTTPException(status_code=502, detail="Stripe subscription is missing an id.")
+
+        already_flag = bool(_stripe_field(selected, "cancel_at_period_end", False))
+        try:
+            updated = (
+                selected
+                if already_flag == bool(cancel_at_period_end)
+                else stripe_client.Subscription.modify(subscription_id, cancel_at_period_end=bool(cancel_at_period_end))
+            )
+        except Exception as exc:
+            logging.exception("Stripe subscription update failed for subscription=%s", subscription_id)
+            raise HTTPException(status_code=502, detail=f"Could not update Stripe subscription: {exc}")
+
+        effective_cancel_at_period_end = bool(_stripe_field(updated, "cancel_at_period_end", cancel_at_period_end))
+        current_period_end = _int_or_zero(_stripe_field(updated, "current_period_end", 0))
+        cancel_at = _int_or_zero(_stripe_field(updated, "cancel_at", 0))
+        cancel_ts = cancel_at or current_period_end
+        cancel_iso: Optional[str] = None
+        if effective_cancel_at_period_end and cancel_ts > 0:
+            try:
+                cancel_iso = datetime.fromtimestamp(cancel_ts, tz=timezone.utc).isoformat()
+            except Exception:
+                cancel_iso = None
+
+        return {
+            "subscription_id": subscription_id,
+            "subscription_status": str(_stripe_field(updated, "status", "") or "").strip().lower() or "active",
+            "subscription_cancel_at": cancel_iso,
+            "subscription_cancel_at_period_end": effective_cancel_at_period_end,
+        }
+
+    def _persist_manual_subscription_state(
+        billing: dict[str, Any],
+        *,
+        subscription_status: str,
+        subscription_cancel_at: Optional[str],
+        subscription_cancel_at_period_end: bool,
+        stripe_customer_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        user_id = str(billing.get("id") or "").strip()
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+
+        user_email = str(billing.get("email") or "").strip().lower()
+        plan_key = _normalize_plan_key(billing.get("plan_key"), fallback="pro")
+        if plan_key == "free":
+            plan_key = "pro"
+
+        now_iso = utc_now_iso()
+        payload = {
+            "subscription_active": True,
+            "subscription_status": str(subscription_status or "active").strip().lower(),
+            "subscription_cancel_at": subscription_cancel_at if subscription_cancel_at_period_end else None,
+            "subscription_cancel_at_period_end": bool(subscription_cancel_at_period_end),
+            "plan_key": plan_key,
+            "updated_at": now_iso,
+        }
+        normalized_customer_id = str(stripe_customer_id or billing.get("stripe_customer_id") or "").strip()
+        if normalized_customer_id:
+            payload["stripe_customer_id"] = normalized_customer_id
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            if sb_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            execute_supabase_update_with_retry(
+                sb_client,
+                "users",
+                payload,
+                eq_filters={"id": user_id},
+                operation_name="manual_subscription_state_update",
+            )
+        else:
+            ensure_users_table(DEFAULT_DB_PATH)
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET subscription_active = 1,
+                        subscription_status = ?,
+                        subscription_cancel_at = ?,
+                        subscription_cancel_at_period_end = ?,
+                        plan_key = ?,
+                        stripe_customer_id = COALESCE(NULLIF(?, ''), stripe_customer_id),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload["subscription_status"],
+                        payload["subscription_cancel_at"],
+                        int(payload["subscription_cancel_at_period_end"]),
+                        plan_key,
+                        normalized_customer_id,
+                        now_iso,
+                        user_id,
+                    ),
+                )
+                conn.commit()
+
+        snapshot = {
+            "id": user_id,
+            "email": user_email,
+            "credits_balance": max(0, _safe_int(billing.get("credits_balance"), 0)),
+            "credits_limit": max(1, _safe_int(billing.get("credits_limit") or billing.get("monthly_limit") or billing.get("monthly_quota"), DEFAULT_MONTHLY_CREDIT_LIMIT)),
+            "monthly_limit": max(1, _safe_int(billing.get("monthly_limit") or billing.get("monthly_quota") or billing.get("credits_limit"), DEFAULT_MONTHLY_CREDIT_LIMIT)),
+            "monthly_quota": max(1, _safe_int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit"), DEFAULT_MONTHLY_CREDIT_LIMIT)),
+            "topup_credits_balance": max(0, _safe_int(billing.get("topup_credits_balance"), 0)),
+            "subscription_start_date": str(billing.get("subscription_start_date") or "").strip() or now_iso,
+            "subscription_active": True,
+            "subscription_status": payload["subscription_status"],
+            "subscription_cancel_at": payload["subscription_cancel_at"],
+            "subscription_cancel_at_period_end": bool(payload["subscription_cancel_at_period_end"]),
+            "plan_key": plan_key,
+            "stripe_customer_id": normalized_customer_id,
+            "updated_at": now_iso,
+        }
+        store_runtime_billing_snapshot(user_id, user_email, snapshot)
+        return snapshot
+
     def create_stripe_subscription_checkout_session(
         user_id: str,
         user_email: str,
@@ -16751,6 +16941,71 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "url": portal_url,
+        }
+
+    @app.post("/api/stripe/cancel-subscription")
+    def stripe_cancel_subscription(request: Request) -> dict:
+        session_token = require_authenticated_session(request)
+        billing = load_user_billing_context(session_token)
+
+        if not bool(billing.get("subscription_active")):
+            raise HTTPException(status_code=400, detail="No active subscription to cancel.")
+
+        stripe_customer_id = str(billing.get("stripe_customer_id") or "").strip()
+        if not stripe_customer_id:
+            raise HTTPException(status_code=400, detail="Stripe customer id is missing for this account.")
+
+        stripe_state = _set_subscription_cancel_at_period_end(stripe_customer_id, cancel_at_period_end=True)
+        persisted = _persist_manual_subscription_state(
+            billing,
+            subscription_status="cancelled_pending",
+            subscription_cancel_at=stripe_state.get("subscription_cancel_at"),
+            subscription_cancel_at_period_end=True,
+            stripe_customer_id=stripe_customer_id,
+        )
+
+        return {
+            "ok": True,
+            "subscription_active": True,
+            "isSubscribed": True,
+            "subscription_status": str(persisted.get("subscription_status") or "cancelled_pending").strip().lower(),
+            "subscription_cancel_at": persisted.get("subscription_cancel_at"),
+            "subscription_cancel_at_period_end": bool(persisted.get("subscription_cancel_at_period_end")),
+            "plan_key": str(persisted.get("plan_key") or "pro").strip().lower(),
+            "currentPlanName": str(PLAN_DISPLAY_NAMES.get(str(persisted.get("plan_key") or "pro").strip().lower(), "Pro Plan")),
+        }
+
+    @app.post("/api/stripe/reactivate-subscription")
+    def stripe_reactivate_subscription(request: Request) -> dict:
+        session_token = require_authenticated_session(request)
+        billing = load_user_billing_context(session_token)
+
+        if not bool(billing.get("subscription_active")):
+            raise HTTPException(status_code=400, detail="No active subscription to reactivate.")
+
+        stripe_customer_id = str(billing.get("stripe_customer_id") or "").strip()
+        if not stripe_customer_id:
+            raise HTTPException(status_code=400, detail="Stripe customer id is missing for this account.")
+
+        stripe_state = _set_subscription_cancel_at_period_end(stripe_customer_id, cancel_at_period_end=False)
+        next_status = str(stripe_state.get("subscription_status") or "active").strip().lower() or "active"
+        persisted = _persist_manual_subscription_state(
+            billing,
+            subscription_status=next_status,
+            subscription_cancel_at=None,
+            subscription_cancel_at_period_end=False,
+            stripe_customer_id=stripe_customer_id,
+        )
+
+        return {
+            "ok": True,
+            "subscription_active": True,
+            "isSubscribed": True,
+            "subscription_status": str(persisted.get("subscription_status") or "active").strip().lower(),
+            "subscription_cancel_at": None,
+            "subscription_cancel_at_period_end": False,
+            "plan_key": str(persisted.get("plan_key") or "pro").strip().lower(),
+            "currentPlanName": str(PLAN_DISPLAY_NAMES.get(str(persisted.get("plan_key") or "pro").strip().lower(), "Pro Plan")),
         }
 
     @app.post("/api/stripe/create-subscription-session")

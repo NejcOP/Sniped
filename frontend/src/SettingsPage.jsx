@@ -492,8 +492,9 @@ function BillingTab({
   subscriptionCancelAt,
   subscriptionCancelAtPeriodEnd,
   onManagePlans,
-  onOpenPortal,
-  openingPortal,
+  onOpenCancelModal,
+  onReactivateSubscription,
+  actionLoading,
 }) {
   const usagePct = Math.max(0, Math.min(100, Math.round((Number(credits || 0) / Math.max(1, Number(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT))) * 100)))
   const normalizedStatus = String(subscriptionStatus || '').toLowerCase().trim()
@@ -501,9 +502,10 @@ function BillingTab({
   const cancelDateLabel = cancelDate && !Number.isNaN(cancelDate.getTime()) ? cancelDate.toLocaleDateString() : String(subscriptionCancelAt || '').trim()
   const cancellationScheduled = Boolean(subscriptionCancelAtPeriodEnd)
   const showCancelButton = Boolean(isSubscribed) && !cancellationScheduled
-  const showSubscribeButton = !Boolean(isSubscribed) || cancellationScheduled
+  const showReactivateButton = Boolean(isSubscribed) && cancellationScheduled
+  const showSubscribeButton = !isSubscribed
   const statusLabel = subscriptionCancelAtPeriodEnd
-    ? `Cancellation scheduled${cancelDateLabel ? ` — access until ${cancelDateLabel}` : ''}`
+    ? `Canceled${cancelDateLabel ? ` (Ends on ${cancelDateLabel})` : ''}`
     : isSubscribed
       ? ['trialing', 'paid'].includes(normalizedStatus) ? normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1) : 'Active'
       : 'Free tier'
@@ -562,12 +564,23 @@ function BillingTab({
         {showCancelButton ? (
           <button
             type="button"
-            onClick={onOpenPortal}
-            disabled={openingPortal}
+            onClick={onOpenCancelModal}
+            disabled={actionLoading}
             className="inline-flex items-center gap-2 rounded-xl border border-rose-500/70 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-200 transition-all duration-200 hover:bg-rose-500/15 disabled:opacity-60"
           >
             <AlertTriangle className="h-4 w-4" />
-            {openingPortal ? 'Opening...' : 'Cancel Subscription'}
+            {actionLoading ? 'Canceling...' : 'Cancel Subscription'}
+          </button>
+        ) : null}
+        {showReactivateButton ? (
+          <button
+            type="button"
+            onClick={onReactivateSubscription}
+            disabled={actionLoading}
+            className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/70 bg-emerald-500/10 px-4 py-2.5 text-sm font-semibold text-emerald-200 transition-all duration-200 hover:bg-emerald-500/15 disabled:opacity-60"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {actionLoading ? 'Reactivating...' : 'Reactivate'}
           </button>
         ) : null}
         <button
@@ -580,15 +593,52 @@ function BillingTab({
       </div>
       {showCancelButton ? (
         <p className="mt-3 text-xs text-slate-400">
-          Cancel opens the secure Stripe billing portal where the user can stop renewal safely.
+          Cancel keeps your subscription active until the end of this billing period.
         </p>
       ) : null}
-      {cancellationScheduled && cancelDateLabel ? (
+      {showReactivateButton && cancelDateLabel ? (
         <p className="mt-3 text-xs text-slate-400">
           Current subscription remains active until {cancelDateLabel}.
         </p>
       ) : null}
     </section>
+  )
+}
+
+function CancelSubscriptionModal({ open, loading, onClose, onConfirm }) {
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-xl border border-rose-500/30 bg-[#0D1117] p-6 shadow-[0_32px_90px_rgba(0,0,0,0.5)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h3 className="text-lg font-bold text-white">Cancel Subscription</h3>
+        <p className="mt-2 text-sm text-slate-300">
+          Are you sure you want to cancel? You will keep your remaining credits until the end of the period.
+        </p>
+
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => void onConfirm()}
+            className="rounded-xl border border-rose-400/40 bg-rose-500/15 px-4 py-2.5 text-sm font-semibold text-rose-200 transition-all duration-200 hover:bg-rose-500/25 disabled:opacity-45"
+          >
+            {loading ? 'Canceling...' : 'Yes, Cancel'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={loading}
+            className="rounded-xl border border-slate-700 bg-[#111827] px-4 py-2.5 text-sm font-semibold text-slate-200 transition-all duration-200 hover:border-slate-600 hover:text-white"
+          >
+            Keep Subscription
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -646,8 +696,9 @@ export default function SettingsPage() {
   const [configLoading, setConfigLoading] = useState(true)
   const [profileSaving, setProfileSaving] = useState(false)
   const [smtpSaving, setSmtpSaving] = useState(false)
-  const [billingPortalLoading, setBillingPortalLoading] = useState(false)
+  const [billingActionLoading, setBillingActionLoading] = useState(false)
   const [deleteLoading, setDeleteLoading] = useState(false)
+  const [showCancelSubscriptionModal, setShowCancelSubscriptionModal] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false)
@@ -959,32 +1010,56 @@ export default function SettingsPage() {
     window.location.assign('/pricing')
   }, [])
 
-  const openBillingPortal = useCallback(async () => {
-    setBillingPortalLoading(true)
+  const applyBillingApiSnapshot = useCallback((data) => {
+    if (!data || typeof data !== 'object') return
+    const nextStatus = String(data.subscription_status || '').trim().toLowerCase()
+    const nextPlanName = String(data.currentPlanName || '').trim()
+    const nextIsSubscribed = Boolean(data.isSubscribed ?? data.subscription_active)
+    setBillingSnapshot((prev) => ({
+      ...prev,
+      isSubscribed: nextIsSubscribed,
+      planName: nextPlanName || prev.planName,
+      subscriptionStatus: nextStatus || prev.subscriptionStatus,
+      subscriptionCancelAt: data.subscription_cancel_at || null,
+      subscriptionCancelAtPeriodEnd: Boolean(data.subscription_cancel_at_period_end),
+    }))
+  }, [])
+
+  const closeCancelSubscriptionModal = useCallback(() => {
+    if (billingActionLoading) return
+    setShowCancelSubscriptionModal(false)
+  }, [billingActionLoading])
+
+  const cancelSubscription = useCallback(async () => {
+    setBillingActionLoading(true)
     try {
-      const data = await fetchJson('/api/stripe/create-portal-session', {
+      const data = await fetchJson('/api/stripe/cancel-subscription', {
         method: 'POST',
       })
-
-      const portalUrl = String(data?.url || '').trim()
-      const fallbackUrl = String(data?.redirect_url || '').trim()
-
-      if (portalUrl) {
-        window.location.assign(portalUrl)
-        return
-      }
-      if (fallbackUrl) {
-        window.location.assign(fallbackUrl)
-        return
-      }
-
-      toast.error('Billing portal is currently unavailable.')
+      applyBillingApiSnapshot(data)
+      setShowCancelSubscriptionModal(false)
+      toast.success('Subscription canceled. Access remains until period end.')
     } catch (error) {
-      toast.error(error.message || 'Could not open billing portal.')
+      toast.error(error.message || 'Could not cancel subscription.')
     } finally {
-      setBillingPortalLoading(false)
+      setBillingActionLoading(false)
     }
-  }, [])
+  }, [applyBillingApiSnapshot])
+
+  const reactivateSubscription = useCallback(async () => {
+    setBillingActionLoading(true)
+    try {
+      const data = await fetchJson('/api/stripe/reactivate-subscription', {
+        method: 'POST',
+      })
+      applyBillingApiSnapshot(data)
+      toast.success('Subscription reactivated.')
+    } catch (error) {
+      toast.error(error.message || 'Could not reactivate subscription.')
+    } finally {
+      setBillingActionLoading(false)
+    }
+  }, [applyBillingApiSnapshot])
 
   const closeDeleteModal = useCallback(() => {
     if (deleteLoading) return
@@ -1143,8 +1218,9 @@ export default function SettingsPage() {
                     subscriptionCancelAt={billingSnapshot.subscriptionCancelAt}
                     subscriptionCancelAtPeriodEnd={billingSnapshot.subscriptionCancelAtPeriodEnd}
                     onManagePlans={goToPricing}
-                    onOpenPortal={openBillingPortal}
-                    openingPortal={billingPortalLoading}
+                    onOpenCancelModal={() => setShowCancelSubscriptionModal(true)}
+                    onReactivateSubscription={reactivateSubscription}
+                    actionLoading={billingActionLoading}
                   />
                 ) : null}
               </main>
@@ -1166,6 +1242,13 @@ export default function SettingsPage() {
         onPasswordChange={(value) => updateProfileField('delete_password', value)}
         onClose={closeDeleteModal}
         onDelete={deleteAccount}
+      />
+
+      <CancelSubscriptionModal
+        open={showCancelSubscriptionModal}
+        loading={billingActionLoading}
+        onClose={closeCancelSubscriptionModal}
+        onConfirm={cancelSubscription}
       />
 
       <OnboardingWizard
