@@ -6,7 +6,16 @@ import { clearUserSession, getStoredValue, setAuthSession } from './authStorage'
 import { NICHE_HINTS } from './constants'
 import { appToasterProps } from './toastTheme'
 
-const API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
+const RAW_API_BASE = String(import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
+const currentHostname = typeof window !== 'undefined' ? String(window.location.hostname || '').trim().toLowerCase() : ''
+const forceSameOriginProxy = /(^|\.)sniped\.io$/.test(currentHostname)
+const API_BASE = forceSameOriginProxy ? '' : RAW_API_BASE
+
+function buildApiUrl(path) {
+  const cleanPath = String(path || '').trim()
+  if (!cleanPath) return API_BASE
+  return API_BASE ? `${API_BASE}${cleanPath}` : cleanPath
+}
 
 function getFriendlyAiError(status, detail) {
   const normalized = String(detail || '').toLowerCase()
@@ -102,7 +111,7 @@ export default function ColdEmailOpenerPage() {
 
       if (isOnboarding) {
         // Step 1: register account
-        const regRes = await fetch(`${API_BASE}/api/auth/register`, {
+        const regRes = await fetch(buildApiUrl('/api/auth/register'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -149,9 +158,12 @@ export default function ColdEmailOpenerPage() {
         localStorage.removeItem('lf_pending_signup')
 
         // Step 3: generate opener with new token
-        const openerRes = await fetch(`${API_BASE}/api/cold-email-opener`, {
+        const openerRes = await fetch(buildApiUrl('/api/cold-email-opener'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${regData.token}`,
+          },
           body: JSON.stringify({
             token: regData.token,
             prospect_data: prospectData.trim(),
@@ -167,9 +179,12 @@ export default function ColdEmailOpenerPage() {
       }
 
       // Logged-in flow
-      const res = await fetch(`${API_BASE}/api/cold-email-opener`, {
+      const res = await fetch(buildApiUrl('/api/cold-email-opener'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           token,
           prospect_data: prospectData.trim(),

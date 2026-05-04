@@ -10,6 +10,22 @@ const HOP_BY_HOP_HEADERS = new Set([
   'host',
 ])
 
+const STATIC_ALLOWED_ORIGINS = new Set([
+  'https://www.sniped.io',
+  'https://sniped.io',
+  'https://sniped-one.vercel.app',
+  'https://sniped-production.up.railway.app',
+])
+
+function isAllowedOrigin(origin) {
+  const normalized = String(origin || '').trim().replace(/\/$/, '')
+  if (!normalized) return false
+  if (STATIC_ALLOWED_ORIGINS.has(normalized)) return true
+  if (/^https:\/\/[a-zA-Z0-9-]+\.vercel\.app$/.test(normalized)) return true
+  if (/^http:\/\/localhost(:\d+)?$/.test(normalized)) return true
+  return false
+}
+
 function isCorsHeader(key) {
   return String(key || '').toLowerCase().startsWith('access-control-')
 }
@@ -26,8 +42,14 @@ function normalizeBaseUrl(value) {
 }
 
 function setCorsHeaders(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+  const requestOrigin = String(req?.headers?.origin || '').trim().replace(/\/$/, '')
+  const resolvedOrigin = isAllowedOrigin(requestOrigin)
+    ? requestOrigin
+    : 'https://www.sniped.io'
+  res.setHeader('Access-Control-Allow-Origin', resolvedOrigin)
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Credentials', 'true')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
 
