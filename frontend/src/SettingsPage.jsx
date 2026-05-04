@@ -499,6 +499,9 @@ function BillingTab({
   const normalizedStatus = String(subscriptionStatus || '').toLowerCase().trim()
   const cancelDate = subscriptionCancelAt ? new Date(subscriptionCancelAt) : null
   const cancelDateLabel = cancelDate && !Number.isNaN(cancelDate.getTime()) ? cancelDate.toLocaleDateString() : String(subscriptionCancelAt || '').trim()
+  const cancellationScheduled = Boolean(subscriptionCancelAtPeriodEnd)
+  const showCancelButton = Boolean(isSubscribed) && !cancellationScheduled
+  const showSubscribeButton = !Boolean(isSubscribed) || cancellationScheduled
   const statusLabel = subscriptionCancelAtPeriodEnd
     ? `Cancellation scheduled${cancelDateLabel ? ` — access until ${cancelDateLabel}` : ''}`
     : isSubscribed
@@ -537,15 +540,26 @@ function BillingTab({
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={onManagePlans}
-          className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-4 py-2.5 text-sm font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
-        >
-          <CreditCard className="h-4 w-4" />
-          Change Plans
-        </button>
-        {isSubscribed ? (
+        {showSubscribeButton ? (
+          <button
+            type="button"
+            onClick={onManagePlans}
+            className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-4 py-2.5 text-sm font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
+          >
+            <CreditCard className="h-4 w-4" />
+            Subscribe
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onManagePlans}
+            className="inline-flex items-center gap-2 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-4 py-2.5 text-sm font-bold text-[#0D1117] transition-all duration-200 hover:brightness-105"
+          >
+            <CreditCard className="h-4 w-4" />
+            Change Plans
+          </button>
+        )}
+        {showCancelButton ? (
           <button
             type="button"
             onClick={onOpenPortal}
@@ -564,9 +578,14 @@ function BillingTab({
           <Zap className="h-4 w-4" /> Go to Dashboard Top Up
         </button>
       </div>
-      {isSubscribed ? (
+      {showCancelButton ? (
         <p className="mt-3 text-xs text-slate-400">
           Cancel opens the secure Stripe billing portal where the user can stop renewal safely.
+        </p>
+      ) : null}
+      {cancellationScheduled && cancelDateLabel ? (
+        <p className="mt-3 text-xs text-slate-400">
+          Current subscription remains active until {cancelDateLabel}.
         </p>
       ) : null}
     </section>
