@@ -100,6 +100,12 @@ LEAD_TREND_POINTS_LIMIT = 8
 
 def get_allowed_cors_origins() -> list[str]:
     configured = str(os.environ.get("CORS_ALLOWED_ORIGINS", "") or "").strip()
+    frontend_origin = str(
+        os.environ.get("FRONTEND_URL")
+        or os.environ.get("SNIPED_DASHBOARD_URL")
+        or os.environ.get("LEADFLOW_DASHBOARD_URL")
+        or ""
+    ).strip().rstrip("/")
     if configured:
         origins = [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
         if "https://sniped-one.vercel.app" not in origins:
@@ -110,8 +116,10 @@ def get_allowed_cors_origins() -> list[str]:
             origins.append("https://www.sniped.io")
         if "https://sniped.io" not in origins:
             origins.append("https://sniped.io")
+        if frontend_origin and frontend_origin not in origins:
+            origins.append(frontend_origin)
         return origins
-    return [
+    defaults = [
         "https://sniped-one.vercel.app",
         "https://sniped-production.up.railway.app",
         "https://www.sniped.io",
@@ -120,6 +128,9 @@ def get_allowed_cors_origins() -> list[str]:
         "http://localhost:3000",
         "http://localhost:8000",
     ]
+    if frontend_origin and frontend_origin not in defaults:
+        defaults.append(frontend_origin)
+    return defaults
 
 
 def _extract_db_host_port(raw_url: str) -> tuple[str, Optional[int]]:
@@ -4139,7 +4150,7 @@ def get_stripe_checkout_app_base_url(config_path: Path = DEFAULT_CONFIG_PATH, re
         if host in {"localhost", "127.0.0.1"} and port == 8000:
             return f"{scheme}://{host}:5173"
 
-    return "https://sniped-one.vercel.app"
+    return "https://www.sniped.io"
 
 
 def build_checkout_app_redirect_url(
@@ -10873,7 +10884,7 @@ def create_app() -> FastAPI:
         allow_origin_regex=(
             r".*"
             if allow_all_cors
-            else r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^https:\/\/sniped-production\.up\.railway\.app$|^http:\/\/localhost(:\d+)?$"
+            else r"^https:\/\/([a-zA-Z0-9-]+\.)?vercel\.app$|^https:\/\/(www\.)?sniped\.io$|^https:\/\/sniped-production\.up\.railway\.app$|^http:\/\/localhost(:\d+)?$"
         ),
         allow_credentials=not allow_all_cors,
         # Explicitly include the critical cross-origin flow used by Vercel and localhost.
