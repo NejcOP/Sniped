@@ -101,10 +101,16 @@ def get_allowed_cors_origins() -> list[str]:
             origins.append("https://sniped-one.vercel.app")
         if "https://sniped-production.up.railway.app" not in origins:
             origins.append("https://sniped-production.up.railway.app")
+        if "https://www.sniped.io" not in origins:
+            origins.append("https://www.sniped.io")
+        if "https://sniped.io" not in origins:
+            origins.append("https://sniped.io")
         return origins
     return [
         "https://sniped-one.vercel.app",
         "https://sniped-production.up.railway.app",
+        "https://www.sniped.io",
+        "https://sniped.io",
         "http://localhost:5173",
         "http://localhost:3000",
         "http://localhost:8000",
