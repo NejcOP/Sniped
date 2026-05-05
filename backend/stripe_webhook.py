@@ -8,6 +8,7 @@ def extract_payment_refresh_payload(event: dict[str, Any]) -> dict[str, Any]:
         "invoice.payment_succeeded",
         "invoice.paid",
         "invoice.payment_failed",
+        "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
     }:

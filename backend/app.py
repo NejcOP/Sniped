@@ -7299,7 +7299,7 @@ def list_saved_segments(db_path: Path, user_id: str) -> list[dict[str, Any]]:
             SELECT id, user_id, name, filters_json, created_at, updated_at
             FROM saved_segments
             WHERE user_id = ?
-            ORDER BY datetime(updated_at) DESC, id DESC
+            ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
             """,
             (user_id,),
         ).fetchall()
@@ -17773,8 +17773,14 @@ def create_app() -> FastAPI:
         is_subscription_cycle_event = (
             (event_type in {"invoice.payment_succeeded", "invoice.paid"} and billing_reason in {"subscription_create", "subscription_update"})
             or (event_type == "checkout.session.completed" and checkout_mode == "subscription")
+            or event_type == "customer.subscription.created"
         )
-        is_subscription_state_event = event_type in {"customer.subscription.updated", "customer.subscription.deleted", "invoice.payment_failed"}
+        is_subscription_state_event = event_type in {
+            "customer.subscription.created",
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+            "invoice.payment_failed",
+        }
 
         def _unix_to_iso(value: int) -> Optional[str]:
             if int(value or 0) <= 0:
