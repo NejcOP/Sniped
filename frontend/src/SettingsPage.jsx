@@ -486,6 +486,7 @@ function BillingTab({
   accountType,
   planName,
   isSubscribed,
+  subscriptionActive,
   credits,
   creditsLimit,
   subscriptionStatus,
@@ -499,16 +500,23 @@ function BillingTab({
   const usagePct = Math.max(0, Math.min(100, Math.round((Number(credits || 0) / Math.max(1, Number(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT))) * 100)))
   const normalizedStatus = String(subscriptionStatus || '').toLowerCase().trim()
   const cancelDate = subscriptionCancelAt ? new Date(subscriptionCancelAt) : null
-  const cancelDateLabel = cancelDate && !Number.isNaN(cancelDate.getTime()) ? cancelDate.toLocaleDateString() : String(subscriptionCancelAt || '').trim()
-  const cancellationScheduled = Boolean(subscriptionCancelAtPeriodEnd)
-  const showCancelButton = Boolean(isSubscribed) && !cancellationScheduled
-  const showReactivateButton = Boolean(isSubscribed) && cancellationScheduled
-  const showSubscribeButton = !isSubscribed
-  const statusLabel = subscriptionCancelAtPeriodEnd
-    ? `Canceled${cancelDateLabel ? ` (Ends on ${cancelDateLabel})` : ''}`
-    : isSubscribed
-      ? ['trialing', 'paid'].includes(normalizedStatus) ? normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1) : 'Active'
-      : 'Free tier'
+  const cancelDateValid = Boolean(cancelDate && !Number.isNaN(cancelDate.getTime()))
+  const cancelDateFuture = Boolean(cancelDateValid && cancelDate > new Date())
+  const cancelDateLabel = cancelDateValid ? cancelDate.toLocaleDateString() : String(subscriptionCancelAt || '').trim()
+  const hasPaidSubscription = Boolean(subscriptionActive)
+    || Boolean(isSubscribed)
+    || ['active', 'paid', 'trialing'].includes(normalizedStatus)
+  const cancellationScheduled = Boolean(subscriptionCancelAtPeriodEnd) && (cancelDateFuture || !cancelDateValid)
+  const showCancelButton = hasPaidSubscription && !cancellationScheduled
+  const showReactivateButton = hasPaidSubscription && cancellationScheduled
+  const showSubscribeButton = !hasPaidSubscription
+  const statusLabel = showSubscribeButton
+    ? 'Free tier'
+    : cancellationScheduled
+      ? `Active${cancelDateLabel ? ` (Ends on ${cancelDateLabel})` : ''}`
+      : ['trialing', 'paid'].includes(normalizedStatus)
+        ? normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1)
+        : 'Active'
 
   return (
     <section className="rounded-xl border border-slate-800 bg-[#0D1117] p-5">
@@ -718,6 +726,7 @@ export default function SettingsPage() {
   const [smtpAccounts, setSmtpAccounts] = useState([createDefaultSmtp()])
   const [billingSnapshot, setBillingSnapshot] = useState({
     isSubscribed: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
+    subscriptionActive: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     planName: String(getStoredValue('lf_plan_name') || 'Free Plan').trim() || 'Free Plan',
     credits: Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
     creditsLimit: Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT),
@@ -751,19 +760,30 @@ export default function SettingsPage() {
       delete_password: '',
     }))
 
-    const normalizedSubscriptionStatus = String(profileData.subscriptionStatus || '').toLowerCase().trim()
+    const normalizedSubscriptionStatus = String(profileData.subscription_status || profileData.subscriptionStatus || '').toLowerCase().trim()
     const storedIsSubscribed = String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true'
     const storedPlanName = String(getStoredValue('lf_plan_name') || '').trim()
     const storedCredits = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
     const storedCreditsLimit = Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT)
-    const isSubscribed = Boolean(profileData.isSubscribed)
-      || (normalizedSubscriptionStatus
-        ? ['active', 'paid', 'trialing'].includes(normalizedSubscriptionStatus)
-        : Boolean(profileData.subscription_active))
-      || storedIsSubscribed
+    const hasApiSubscriptionFields = (
+      Object.prototype.hasOwnProperty.call(profileData, 'isSubscribed')
+      || Object.prototype.hasOwnProperty.call(profileData, 'subscription_active')
+      || Object.prototype.hasOwnProperty.call(profileData, 'subscription_status')
+      || Object.prototype.hasOwnProperty.call(profileData, 'subscription_cancel_at_period_end')
+      || Object.prototype.hasOwnProperty.call(profileData, 'subscription_cancel_at')
+    )
+    const subscriptionActive = Boolean(profileData.subscription_active ?? profileData.isSubscribed)
+    const isSubscribed = hasApiSubscriptionFields
+      ? (
+        subscriptionActive
+        || ['active', 'paid', 'trialing'].includes(normalizedSubscriptionStatus)
+        || (Boolean(profileData.subscription_cancel_at_period_end) && Boolean(profileData.subscription_cancel_at))
+      )
+      : storedIsSubscribed
 
     setBillingSnapshot({
       isSubscribed,
+      subscriptionActive,
       planName: String(profileData.currentPlanName || storedPlanName || (isSubscribed ? 'Pro Plan' : 'Free Plan')).trim(),
       credits: Number(profileData.credits ?? profileData.credits_balance ?? storedCredits ?? 0),
       creditsLimit: Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? storedCreditsLimit ?? DEFAULT_FREE_CREDIT_LIMIT),
@@ -1014,10 +1034,13 @@ export default function SettingsPage() {
     if (!data || typeof data !== 'object') return
     const nextStatus = String(data.subscription_status || '').trim().toLowerCase()
     const nextPlanName = String(data.currentPlanName || '').trim()
-    const nextIsSubscribed = Boolean(data.isSubscribed ?? data.subscription_active)
+    const nextSubscriptionActive = Boolean(data.subscription_active ?? data.isSubscribed)
+    const nextIsSubscribed = nextSubscriptionActive || ['active', 'paid', 'trialing'].includes(nextStatus)
+      || (Boolean(data.subscription_cancel_at_period_end) && Boolean(data.subscription_cancel_at))
     setBillingSnapshot((prev) => ({
       ...prev,
       isSubscribed: nextIsSubscribed,
+      subscriptionActive: nextSubscriptionActive,
       planName: nextPlanName || prev.planName,
       subscriptionStatus: nextStatus || prev.subscriptionStatus,
       subscriptionCancelAt: data.subscription_cancel_at || null,
@@ -1212,6 +1235,7 @@ export default function SettingsPage() {
                     accountType={profileAccountTypeLabel}
                     planName={billingSnapshot.planName}
                     isSubscribed={billingSnapshot.isSubscribed}
+                    subscriptionActive={billingSnapshot.subscriptionActive}
                     credits={billingSnapshot.credits}
                     creditsLimit={billingSnapshot.creditsLimit}
                     subscriptionStatus={billingSnapshot.subscriptionStatus}
