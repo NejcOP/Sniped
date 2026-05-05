@@ -145,7 +145,7 @@ class LeadEnricher:
         self.max_google_links = max_google_links
         self.config_path = config_path
         self.user_niche = user_niche
-        self.user_id = str(user_id or "").strip() or None
+        self.user_id = str(user_id or "").strip() or "legacy"
         self.model_name_override = str(model_name_override or "").strip() or None
         # Speed mode: skip social metrics (slower) and parallelize website scans.
         self.speed_mode = bool(speed_mode)
@@ -731,6 +731,7 @@ class LeadEnricher:
             self._execute(text(statement))
 
     def _fetch_leads_for_enrichment(self, limit: Optional[int] = None, lead_ids: Optional[list[int]] = None) -> List[dict[str, Any]]:
+        scoped_user_id = str(self.user_id or "").strip() or "legacy"
         normalized_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
         params: dict[str, Any] = {}
 
@@ -755,12 +756,9 @@ class LeadEnricher:
                     phone_number
                 FROM leads
                 WHERE 1=1
+                AND user_id = :user_id
             """
-            scoped_by_user = False
-            if self.user_id:
-                query += " AND user_id = :user_id"
-                params["user_id"] = self.user_id
-                scoped_by_user = True
+            params["user_id"] = scoped_user_id
 
             id_params: list[str] = []
             for idx, lead_id in enumerate(normalized_ids[:500]):
@@ -776,13 +774,6 @@ class LeadEnricher:
                 params["limit"] = int(limit)
 
             rows = self._fetchall(text(query), params)
-            if scoped_by_user and not rows:
-                # Emergency fallback for legacy rows still carrying hardcoded/old user ids.
-                fallback_query = query.replace(" AND user_id = :user_id", "")
-                rows = self._fetchall(text(fallback_query), {k: v for k, v in params.items() if k != "user_id"})
-                if rows:
-                    logging.warning(
-                        "Targeted lead_ids matched only without user_id scope. Possible legacy user_id mismatch in DB.")
             logging.info(
                 "Lead-id targeted enrichment query matched %s/%s rows",
                 len(rows),
@@ -818,11 +809,9 @@ class LeadEnricher:
                         )
                     )
                     AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
+                    AND user_id = :user_id
             """
-
-        if self.user_id:
-            query += " AND user_id = :user_id"
-            params["user_id"] = self.user_id
+        params["user_id"] = scoped_user_id
 
         query += " ORDER BY id ASC"
 
@@ -841,10 +830,10 @@ class LeadEnricher:
                     enrichment_status = 'processing',
                     status = 'processing',
                     status_updated_at = CURRENT_TIMESTAMP::text
-                WHERE id = :lead_id
+                WHERE id = :lead_id AND user_id = :user_id
                 """
             ),
-            {"lead_id": int(lead_id)},
+            {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
         )
 
     def _mark_lead_failed(self, lead_id: int) -> None:
@@ -856,10 +845,10 @@ class LeadEnricher:
                     enrichment_status = 'failed',
                     status = 'failed',
                     status_updated_at = CURRENT_TIMESTAMP::text
-                WHERE id = :lead_id
+                WHERE id = :lead_id AND user_id = :user_id
                 """
             ),
-            {"lead_id": int(lead_id)},
+            {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
         )
 
     def _mark_lead_failed_no_url(self, lead_id: int) -> None:
@@ -871,10 +860,10 @@ class LeadEnricher:
                     enrichment_status = 'failed_no_url',
                     status = 'failed enrichment',
                     status_updated_at = CURRENT_TIMESTAMP::text
-                WHERE id = :lead_id
+                WHERE id = :lead_id AND user_id = :user_id
                 """
             ),
-            {"lead_id": int(lead_id)},
+            {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
         )
 
     def _update_lead_website_url(self, lead_id: int, website_url: str) -> None:
@@ -886,12 +875,13 @@ class LeadEnricher:
                 """
                 UPDATE leads
                 SET website_url = :website_url
-                WHERE id = :lead_id
+                WHERE id = :lead_id AND user_id = :user_id
                 """
             ),
             {
                 "lead_id": int(lead_id),
                 "website_url": cleaned,
+                "user_id": str(self.user_id or "legacy"),
             },
         )
 
@@ -946,6 +936,7 @@ class LeadEnricher:
             "phone_formatted": phone_formatted,
             "phone_type": phone_type,
             "lead_id": int(lead_id),
+            "user_id": str(self.user_id or "legacy"),
         }
         with get_engine().begin() as conn:
             result = conn.execute(
@@ -975,7 +966,7 @@ class LeadEnricher:
                         facebook = COALESCE(:facebook_url, facebook),
                         phone_formatted = COALESCE(:phone_formatted, phone_formatted),
                         phone_type = COALESCE(:phone_type, phone_type)
-                    WHERE id = :lead_id
+                    WHERE id = :lead_id AND user_id = :user_id
                     """
                 ),
                 params,
@@ -1005,9 +996,8 @@ class LeadEnricher:
             """
         params: dict[str, Any] = {}
 
-        if self.user_id:
-            query += " AND user_id = :user_id"
-            params["user_id"] = self.user_id
+        query += " AND user_id = :user_id"
+        params["user_id"] = str(self.user_id or "legacy")
 
         query += " ORDER BY business_name ASC"
         return self._fetchall(text(query), params)
