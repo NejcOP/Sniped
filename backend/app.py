@@ -7484,10 +7484,37 @@ def _build_simple_pdf(title: str, lines: list[str]) -> bytes:
 
 
 def _load_user_email_for_reports(db_path: Path, user_id: str) -> str:
-    ensure_users_table(db_path)
-    with pgdb.connect(db_path) as conn:
-        row = conn.execute("SELECT email FROM users WHERE id = ? LIMIT 1", (user_id,)).fetchone()
-    return str(row[0] or "").strip() if row else ""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return ""
+
+    # Try Supabase first (both primary-mode and auth-enabled deployments).
+    if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+        sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if sb_client is not None:
+            try:
+                query = sb_client.table("users").select("email")
+                try:
+                    query = query.eq("id", int(uid))
+                except (ValueError, TypeError):
+                    query = query.eq("id", uid)
+                rows = list(getattr(query.limit(1).execute(), "data", None) or [])
+                if rows:
+                    email = str(rows[0].get("email") or "").strip()
+                    if email:
+                        return email
+            except Exception as exc:
+                logging.warning("_load_user_email_for_reports Supabase lookup failed: %s", exc)
+
+    # Fall back to local SQLite store.
+    try:
+        ensure_users_table(db_path)
+        with pgdb.connect(db_path) as conn:
+            row = conn.execute("SELECT email FROM users WHERE id = ? LIMIT 1", (uid,)).fetchone()
+        return str(row[0] or "").strip() if row else ""
+    except Exception as exc:
+        logging.warning("_load_user_email_for_reports SQLite fallback failed: %s", exc)
+        return ""
 
 
 def _build_report_pdf(title: str, summary: dict[str, Any], *, period_key: str) -> bytes:

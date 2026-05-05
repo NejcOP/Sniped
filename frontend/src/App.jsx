@@ -4898,9 +4898,9 @@ function App({ initialTab = 'leads' }) {
       const result = await fetchJson('/api/export/webhook', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ destination }),
+        body: JSON.stringify({ target: destination, kind: 'target' }),
       })
-      const exportedCount = Number(result?.exported_count || 0)
+      const exportedCount = Number(result?.exported ?? result?.exported_count ?? 0)
       toast.success(`${destination === 'hubspot' ? 'HubSpot' : 'Google Sheets'} export sent (${exportedCount})`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Webhook export failed'
