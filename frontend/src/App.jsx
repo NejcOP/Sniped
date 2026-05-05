@@ -4109,14 +4109,6 @@ function App({ initialTab = 'leads' }) {
     }
   }, [scrapeForm.country])
 
-  const refreshSignalLayer = useCallback(async ({ forceRefresh = true, silentNiche = false } = {}) => {
-    await Promise.allSettled([
-      refreshCreditsBalance({ timeoutMs: 2500 }),
-      fetchMailerCampaignStats({ silent: true }),
-      fetchNicheAdvice({ silent: silentNiche, forceRefresh }),
-    ])
-  }, [refreshCreditsBalance, fetchMailerCampaignStats, fetchNicheAdvice])
-
   useEffect(() => {
     if (activeTab !== 'leads') return undefined
     void fetchNicheAdvice({ silent: true, countryCode: scrapeForm.country })
@@ -5405,6 +5397,14 @@ function App({ initialTab = 'leads' }) {
       return null
     }
   }, [hasSessionToken])
+
+  const refreshSignalLayer = useCallback(async ({ forceRefresh = true, silentNiche = false } = {}) => {
+    await Promise.allSettled([
+      refreshCreditsBalance({ timeoutMs: 2500 }),
+      fetchMailerCampaignStats({ silent: true }),
+      fetchNicheAdvice({ silent: silentNiche, forceRefresh }),
+    ])
+  }, [refreshCreditsBalance, fetchMailerCampaignStats, fetchNicheAdvice])
 
   const fetchTaskState = useCallback(async (force = false) => {
     // Exponential backoff — skip if we are in a cooldown period
