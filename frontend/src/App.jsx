@@ -516,14 +516,32 @@ const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const SidebarBillingCard = memo(function SidebarBillingCard({
   isPaid,
   planName,
+  isLoading = false,
   cancelPending = false,
   cancelUntilLabel = '',
   onUpgrade,
   onChangeSubscription,
 }) {
   const resolvedPlanName = String(planName || 'Free Plan').trim() || 'Free Plan'
-  const statusText = cancelPending ? 'Canceled subscription' : (isPaid ? 'Subscription active' : 'You are currently on the free tier')
-  const actionLabel = cancelPending ? 'Upgrade Plan' : (isPaid ? 'Change Plans' : 'Upgrade Plan')
+  const statusText = isPaid ? 'Subscription active' : 'You are currently on the free tier'
+  const actionLabel = isPaid ? 'Change Plans' : 'Upgrade Plan'
+
+  if (isLoading) {
+    return (
+      <div className="rounded-2xl border border-slate-700/70 bg-[linear-gradient(180deg,#0D1117_0%,#0B1220_100%)] p-3.5 shadow-[0_14px_30px_rgba(2,6,23,0.45)]">
+        <div className="space-y-3 animate-pulse">
+          <div className="space-y-1.5">
+            <div className="h-3 w-24 rounded bg-slate-700/70" />
+            <div className="rounded-xl border border-[#FFC107]/15 bg-[#111827]/80 px-3 py-2.5 space-y-2">
+              <div className="h-4 w-28 rounded bg-slate-700/70" />
+              <div className="h-3 w-40 rounded bg-slate-700/60" />
+            </div>
+          </div>
+          <div className="h-9 w-full rounded-xl bg-slate-700/70" />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-2xl border border-slate-700/70 bg-[linear-gradient(180deg,#0D1117_0%,#0B1220_100%)] p-3.5 shadow-[0_14px_30px_rgba(2,6,23,0.45)]">
@@ -533,9 +551,9 @@ const SidebarBillingCard = memo(function SidebarBillingCard({
           <div className="rounded-xl border border-[#FFC107]/15 bg-[#111827]/80 px-3 py-2.5">
             <p className="text-[1rem] font-semibold leading-tight text-[#FFC107]">{resolvedPlanName}</p>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] leading-relaxed">
-              <span className={cancelPending ? 'font-semibold text-rose-300' : 'text-slate-400'}>{statusText}</span>
+              <span className={cancelPending ? 'font-semibold text-amber-200' : 'text-slate-400'}>{statusText}</span>
               {cancelPending && cancelUntilLabel && (
-                <span className="text-slate-400">until {cancelUntilLabel}</span>
+                <span className="text-slate-400">scheduled to end on {cancelUntilLabel}</span>
               )}
             </div>
           </div>
@@ -544,7 +562,7 @@ const SidebarBillingCard = memo(function SidebarBillingCard({
         <button
           type="button"
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#FFC107]/80 bg-gradient-to-r from-[#d9a406] to-[#FFC107] px-3 py-2 text-xs font-semibold text-[#0a1422] shadow-[0_8px_20px_rgba(255,193,7,0.28)] transition-all duration-200 hover:brightness-105"
-          onClick={cancelPending ? onUpgrade : (isPaid ? onChangeSubscription : onUpgrade)}
+          onClick={isPaid ? onChangeSubscription : onUpgrade}
         >
           <Zap className="h-3.5 w-3.5" /> {actionLabel}
         </button>
@@ -556,6 +574,7 @@ const SidebarBillingCard = memo(function SidebarBillingCard({
 const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
   isPaid,
   planName,
+  billingLoading,
   cancelPending,
   cancelUntilLabel,
   creditsBalance,
@@ -573,6 +592,7 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
       <SidebarBillingCard
         isPaid={isPaid}
         planName={planName}
+        isLoading={billingLoading}
         cancelPending={cancelPending}
         cancelUntilLabel={cancelUntilLabel}
         onUpgrade={onUpgrade}
@@ -2027,6 +2047,7 @@ function App({ initialTab = 'leads' }) {
     average_deal_value: Number(getStoredValue('lf_average_deal_value') || DEFAULT_AVERAGE_DEAL_VALUE),
     niche: String(getStoredValue('lf_niche') || '').trim(),
   }))
+  const [profileHydrated, setProfileHydrated] = useState(() => !hasSessionToken)
   const [searchParams, setSearchParams] = useSearchParams()
   const initialTabResolved = normalizeTabParam(searchParams.get('tab'), normalizeTabParam(initialTab, 'leads'))
   const [health, setHealth] = useState('checking')
@@ -4206,9 +4227,11 @@ function App({ initialTab = 'leads' }) {
         localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
         localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
       }
+      setProfileHydrated(true)
       return data
     } catch {
       // Keep existing credits values if profile call fails.
+      setProfileHydrated(true)
       return null
     }
   }, [tasks?.enrich?.status, pendingRequest, enrichRunRequested])
@@ -6840,6 +6863,7 @@ function App({ initialTab = 'leads' }) {
             <SidebarLeadFlowPanel
               isPaid={hasActiveSubscription}
               planName={currentPlanName}
+              billingLoading={!profileHydrated}
               cancelPending={cancelPending}
               cancelUntilLabel={cancelUntilLabel}
               creditsBalance={creditsBalance}

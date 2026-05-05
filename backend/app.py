@@ -4371,7 +4371,7 @@ def recover_billing_snapshot_from_stripe(
     return {
         "stripe_customer_id": customer_id,
         "subscription_active": True,
-        "subscription_status": "cancelled_pending" if cancel_at_period_end else (status or "active"),
+        "subscription_status": status or "active",
         "subscription_cancel_at": cancel_iso if cancel_at_period_end else None,
         "subscription_cancel_at_period_end": bool(cancel_at_period_end),
         "plan_key": plan_key,
@@ -17941,7 +17941,7 @@ def create_app() -> FastAPI:
                 elif cancel_at_period_end or (deleted_or_terminal and has_paid_access_until_end):
                     payload["plan_key"] = current_plan_key if current_plan_key != "free" else "pro"
                     payload["subscription_active"] = True
-                    payload["subscription_status"] = "cancelled_pending"
+                    payload["subscription_status"] = "active"
                     payload["subscription_cancel_at"] = cancel_effective_at
                     payload["subscription_cancel_at_period_end"] = True
                 else:
@@ -18067,7 +18067,7 @@ def create_app() -> FastAPI:
                     subscription_start_date_to_store = now_iso
                 elif cancel_at_period_end or (deleted_or_terminal and has_paid_access_until_end):
                     subscription_active_to_store = 1
-                    subscription_status_to_store = "cancelled_pending"
+                    subscription_status_to_store = "active"
                     subscription_cancel_at_to_store = cancel_effective_at
                     subscription_cancel_at_period_end_to_store = 1
                     plan_key_to_store = current_plan_key if current_plan_key != "free" else "pro"
