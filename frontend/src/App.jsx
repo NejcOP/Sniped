@@ -523,20 +523,37 @@ const creditDecimalFormatter = new Intl.NumberFormat('en-US', {
 })
 
 function formatCreditAmount(value, options = {}) {
-  const { compactThreshold = 10000, compactDecimals = 1, compactMode = 'round' } = options
+  const {
+    thousandThreshold = 1000,
+    thousandDecimals = 0,
+    thousandMode = 'round',
+    millionThreshold = 1000000,
+    millionDecimals = 2,
+    millionMode = 'round',
+  } = options
   const numericValue = Number(value || 0)
   if (!Number.isFinite(numericValue)) return '0'
 
+  const applyMode = (rawNumber, decimals, mode) => {
+    const safeDecimals = Math.max(0, Number(decimals || 0))
+    const factor = 10 ** safeDecimals
+    if (mode === 'floor') {
+      const scaled = rawNumber * factor
+      const floored = rawNumber >= 0 ? Math.floor(scaled) : Math.ceil(scaled)
+      return floored / factor
+    }
+    return Number(rawNumber.toFixed(safeDecimals))
+  }
+
   const absValue = Math.abs(numericValue)
-  if (absValue >= compactThreshold) {
-    const compact = numericValue / 1000
-    const decimals = Math.max(0, compactDecimals)
-    const factor = 10 ** decimals
-    const adjustedCompact = compactMode === 'floor'
-      ? (compact >= 0 ? Math.floor(compact * factor) : Math.ceil(compact * factor)) / factor
-      : Number(compact.toFixed(decimals))
-    const fixedCompact = Number(adjustedCompact)
-    return `${creditDecimalFormatter.format(fixedCompact)}k`
+  if (absValue >= millionThreshold) {
+    const compactMillions = applyMode(numericValue / 1000000, millionDecimals, millionMode)
+    return `${compactMillions.toLocaleString('en-US', { minimumFractionDigits: Math.max(0, millionDecimals), maximumFractionDigits: Math.max(0, millionDecimals) })}M`
+  }
+
+  if (absValue >= thousandThreshold) {
+    const compactThousands = applyMode(numericValue / 1000, thousandDecimals, thousandMode)
+    return `${compactThousands.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: Math.max(0, thousandDecimals) })}k`
   }
 
   return creditIntegerFormatter.format(Math.round(numericValue))
@@ -610,6 +627,7 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
   monthlyLimit,
   creditsPercent,
   creditsLabelClass,
+  creditsLoading,
   resetLabel,
   topupLabel,
   onUpgrade,
@@ -629,17 +647,32 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
       />
 
       <div className="rounded-xl border border-slate-700/70 bg-[#0D1117] p-3 shadow-[0_14px_30px_rgba(2,6,23,0.45)]">
-        <div className="mb-2 flex items-center justify-between text-sm font-semibold">
-          <p className="text-white">Credits</p>
-          <p className={`flex items-baseline gap-1 ${creditsLabelClass}`}>
-            <span className="text-[1.05rem] font-semibold text-yellow-200">
-              {formatCreditAmount(creditsBalance, { compactDecimals: 1, compactMode: 'floor' })}
-            </span>
-            <span className="text-[0.95rem] text-slate-500">/</span>
-            <span className="text-[0.85rem] font-semibold text-slate-400">
-              {formatCreditAmount(monthlyLimit, { compactDecimals: 0 })}
-            </span>
-            <span className="text-[0.75rem] font-medium uppercase tracking-[0.08em] text-slate-500">credits</span>
+        <div className="mb-2 pb-1 text-center">
+          <p className="inline-flex items-baseline justify-center gap-1.5 whitespace-nowrap text-sm font-semibold text-white">
+            <span>Credits&nbsp;</span>
+            {creditsLoading ? (
+              <span className="text-[0.95rem] font-medium text-slate-400">Loading...</span>
+            ) : (
+              <span className={`inline-flex items-baseline gap-1 ${creditsLabelClass}`}>
+                <span className="text-[1.05rem] font-semibold text-yellow-200">
+                  {formatCreditAmount(creditsBalance, {
+                    thousandDecimals: 1,
+                    thousandMode: 'floor',
+                    millionDecimals: 2,
+                    millionMode: 'floor',
+                  })}
+                </span>
+                <span className="text-[0.95rem] text-slate-500">/</span>
+                <span className="text-[0.85rem] font-semibold text-slate-400">
+                  {formatCreditAmount(monthlyLimit, {
+                    thousandDecimals: 0,
+                    thousandMode: 'round',
+                    millionDecimals: 2,
+                    millionMode: 'round',
+                  })}
+                </span>
+              </span>
+            )}
           </p>
         </div>
         <div className="mt-3 h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
@@ -2067,10 +2100,10 @@ function App({ initialTab = 'leads' }) {
   const currentUserEmail = getStoredValue('lf_email') || ''
   const currentUserName = getStoredValue('lf_display_name') || getStoredValue('lf_contact_name') || ''
   const [user, setUser] = useState(() => ({
-    credits: Number(getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
-    credits_balance: Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
-    topup_credits_balance: Number(getStoredValue('lf_topup_credits_balance') || 0),
-    credits_limit: Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT),
+    credits: null,
+    credits_balance: null,
+    topup_credits_balance: null,
+    credits_limit: null,
     isSubscribed: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     subscription_active: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     subscription_status: '',
@@ -2084,6 +2117,7 @@ function App({ initialTab = 'leads' }) {
     niche: String(getStoredValue('lf_niche') || '').trim(),
   }))
   const [profileHydrated, setProfileHydrated] = useState(() => !hasSessionToken)
+  const [profileLoadedFromApi, setProfileLoadedFromApi] = useState(() => !hasSessionToken)
   const [searchParams, setSearchParams] = useSearchParams()
   const initialTabResolved = normalizeTabParam(searchParams.get('tab'), normalizeTabParam(initialTab, 'leads'))
   const [health, setHealth] = useState('checking')
@@ -4263,6 +4297,7 @@ function App({ initialTab = 'leads' }) {
         localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
         localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
       }
+      setProfileLoadedFromApi(true)
       setProfileHydrated(true)
       return data
     } catch {
@@ -4271,6 +4306,19 @@ function App({ initialTab = 'leads' }) {
       return null
     }
   }, [tasks?.enrich?.status, pendingRequest, enrichRunRequested])
+
+  useEffect(() => {
+    if (!hasSessionToken) return
+    try {
+      const staleCreditKeys = ['lf_credits', 'lf_credits_balance', 'lf_topup_credits_balance', 'lf_credits_limit']
+      staleCreditKeys.forEach((key) => {
+        localStorage.removeItem(key)
+        sessionStorage.removeItem(key)
+      })
+    } catch {
+      // ignore storage clear issues in restricted browser contexts
+    }
+  }, [hasSessionToken])
 
   useEffect(() => {
     void refreshUserProfile()
@@ -6701,12 +6749,13 @@ function App({ initialTab = 'leads' }) {
   const topupCreditsBalance = Math.max(0, Number(user?.topup_credits_balance ?? 0))
   const creditsLimit = Math.max(baseCreditsLimit, creditsBalance, baseCreditsLimit + topupCreditsBalance)
   const creditsPercent = Math.max(0, Math.min(100, Math.round((creditsBalance / creditsLimit) * 100)))
+  const creditsReady = !hasSessionToken || profileLoadedFromApi
   const isOutOfCredits = creditsBalance <= 0
   const canRunScrape = creditsBalance >= requiredScrapeCredits
   const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && creditsBalance >= requiredEnrichCredits
   const isLowOnCredits = creditsBalance > 0 && creditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
-    ? `+ ${formatCreditAmount(topupCreditsBalance, { compactDecimals: 0 })} top-up credits`
+    ? `+ ${formatCreditAmount(topupCreditsBalance, { thousandDecimals: 0, millionDecimals: 2 })} top-up credits`
     : ''
   const visibleLiveMailTemplateCards = useMemo(
     () => resolveLiveMailTemplateCardsForNiche(selectedUserNiche),
@@ -6840,9 +6889,10 @@ function App({ initialTab = 'leads' }) {
     }
   }, [activeTab, canClientSuccessDashboard])
   useEffect(() => {
-    const frameId = window.requestAnimationFrame(() => setAnimatedCreditsPercent(creditsPercent))
+    const targetPercent = creditsReady ? creditsPercent : 0
+    const frameId = window.requestAnimationFrame(() => setAnimatedCreditsPercent(targetPercent))
     return () => window.cancelAnimationFrame(frameId)
-  }, [creditsPercent])
+  }, [creditsPercent, creditsReady])
   const isCreditsLow = creditsBalance / creditsLimit < 0.1
   const creditsLabelClass = isCreditsLow ? 'text-amber-300' : 'text-yellow-200'
   const resetLabel = useMemo(() => {
@@ -6904,8 +6954,9 @@ function App({ initialTab = 'leads' }) {
               cancelUntilLabel={cancelUntilLabel}
               creditsBalance={creditsBalance}
               monthlyLimit={creditsLimit}
-              creditsPercent={animatedCreditsPercent}
+              creditsPercent={creditsReady ? animatedCreditsPercent : 0}
               creditsLabelClass={creditsLabelClass}
+              creditsLoading={!creditsReady}
               resetLabel={resetLabel}
               topupLabel={topupLabel}
               onUpgrade={openPricingSection}
