@@ -2903,7 +2903,7 @@ def list_mailer_campaign_sequences(db_path: Path, user_id: str, limit: int = 25)
             SELECT *
             FROM CampaignSequences
             WHERE user_id = ?
-            ORDER BY COALESCE(active, 0) DESC, datetime(updated_at) DESC, id DESC
+            ORDER BY COALESCE(active, 0) DESC, updated_at DESC, id DESC
             LIMIT ?
             """,
             (user_id, int(limit)),
@@ -2979,7 +2979,7 @@ def list_saved_mail_templates(db_path: Path, user_id: str, limit: int = 50) -> l
             SELECT *
             FROM SavedTemplates
             WHERE user_id = ?
-            ORDER BY datetime(updated_at) DESC, id DESC
+            ORDER BY updated_at DESC, id DESC
             LIMIT ?
             """,
             (user_id, int(limit)),
@@ -3175,7 +3175,7 @@ def get_mailer_campaign_stats(db_path: Path, user_id: str) -> dict[str, Any]:
             FROM CampaignEvents e
             LEFT JOIN leads l ON l.id = e.lead_id
             WHERE e.user_id = ?
-            ORDER BY datetime(e.occurred_at) DESC, e.id DESC
+            ORDER BY e.occurred_at DESC, e.id DESC
             LIMIT 15
             """,
             (user_id,),
@@ -6962,6 +6962,7 @@ def get_queued_mail_count(db_path: Path, user_id: Optional[str] = None) -> int:
 
     uid_clause = "AND user_id = ?" if user_id else ""
     uid_params = [user_id] if user_id else []
+    now_iso = utc_now_iso()
 
     with pgdb.connect(db_path) as conn:
         row = conn.execute(
@@ -6975,11 +6976,11 @@ def get_queued_mail_count(db_path: Path, user_id: Optional[str] = None) -> int:
                 {uid_clause}
                 AND (
                     next_mail_at IS NULL
-                    OR datetime(next_mail_at) <= datetime('now')
+                    OR next_mail_at <= ?
                 )
             """
             ,
-            uid_params,
+            [*uid_params, now_iso],
         ).fetchone()
     return int(row[0] if row else 0)
 
@@ -7229,7 +7230,7 @@ def list_client_folders(db_path: Path, user_id: str) -> list[dict[str, Any]]:
             SELECT id, user_id, name, color, notes, created_at, updated_at
             FROM client_folders
             WHERE user_id = ?
-            ORDER BY datetime(updated_at) DESC, id DESC
+            ORDER BY updated_at DESC, id DESC
             """,
             (user_id,),
         ).fetchall()]
@@ -9728,6 +9729,7 @@ def run_daily_digest(_app: FastAPI) -> None:
 
     golden_count = 0
     uptime_alerts: list[dict] = []
+    day_cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     try:
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
@@ -9735,9 +9737,10 @@ def run_daily_digest(_app: FastAPI) -> None:
                 """
                 SELECT COUNT(*) FROM leads
                 WHERE ai_score >= 9
-                  AND datetime(enriched_at) >= datetime('now', '-1 day')
-                                -- SYSTEM-WIDE: intentionally unscoped.
-                """
+                  AND COALESCE(enriched_at, '') >= ?
+                  -- SYSTEM-WIDE: intentionally unscoped.
+                """,
+                (day_cutoff_iso,),
             ).fetchone()
             golden_count = int(row[0] or 0) if row else 0
 
@@ -9745,11 +9748,12 @@ def run_daily_digest(_app: FastAPI) -> None:
                 """
                 SELECT request_payload FROM system_tasks
                 WHERE task_type = 'uptime_alert'
-                  AND datetime(created_at) >= datetime('now', '-1 day')
-                                -- SYSTEM-WIDE: intentionally unscoped.
+                  AND COALESCE(created_at, '') >= ?
+                  -- SYSTEM-WIDE: intentionally unscoped.
                 ORDER BY id DESC
                 LIMIT 20
-                """
+                """,
+                (day_cutoff_iso,),
             ).fetchall()
             for ar in alert_rows:
                 try:
@@ -11512,7 +11516,7 @@ def create_app() -> FastAPI:
                     SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id
                     FROM leads
                     WHERE LOWER(COALESCE(email, '')) = ?
-                    ORDER BY datetime(COALESCE(last_contacted_at, sent_at, created_at)) DESC, id DESC
+                    ORDER BY COALESCE(last_contacted_at, sent_at, created_at) DESC, id DESC
                     LIMIT 1
                     """,
                     (str(payload.email or "").strip().lower(),),
@@ -12478,11 +12482,11 @@ def create_app() -> FastAPI:
             if quick_clause:
                 where_clauses.append(quick_clause)
 
-        order_clause = "datetime(COALESCE(created_at, scraped_at)) DESC, id DESC"
+        order_clause = "COALESCE(created_at, scraped_at) DESC, id DESC"
         if normalized_sort == "name":
             order_clause = "LOWER(COALESCE(business_name, '')) ASC, id DESC"
         elif normalized_sort in {"score", "best"}:
-            order_clause = "COALESCE(ai_score, 0) DESC, datetime(COALESCE(created_at, scraped_at)) DESC, id DESC"
+            order_clause = "COALESCE(ai_score, 0) DESC, COALESCE(created_at, scraped_at) DESC, id DESC"
 
         where_sql = " AND ".join(where_clauses)
         where_fragment = f" WHERE {where_sql}" if where_sql else ""
@@ -13123,7 +13127,7 @@ def create_app() -> FastAPI:
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             rows = conn.execute(
-                "SELECT id, kind, value, reason, created_at FROM lead_blacklist WHERE user_id = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 200",
+                "SELECT id, kind, value, reason, created_at FROM lead_blacklist WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 200",
                 (user_id,),
             ).fetchall()
         return {
@@ -14072,7 +14076,7 @@ def create_app() -> FastAPI:
                         WHEN 'done' THEN 4
                         ELSE 5
                     END,
-                    datetime(COALESCE(dt.due_at, dt.created_at)) ASC,
+                    COALESCE(dt.due_at, dt.created_at) ASC,
                     dt.id ASC
                 """,
                 params,
@@ -14426,11 +14430,11 @@ def create_app() -> FastAPI:
             where_clauses.append("LOWER(COALESCE(status, 'queued')) = ?")
             params.append(normalized_status)
 
-        order_clause = "datetime(COALESCE(created_at, updated_at)) DESC, id DESC"
+        order_clause = "COALESCE(created_at, updated_at) DESC, id DESC"
         if normalized_sort == "oldest":
-            order_clause = "datetime(COALESCE(created_at, updated_at)) ASC, id ASC"
+            order_clause = "COALESCE(created_at, updated_at) ASC, id ASC"
         elif normalized_sort == "status":
-            order_clause = "LOWER(COALESCE(status, 'queued')) ASC, datetime(COALESCE(created_at, updated_at)) DESC, id DESC"
+            order_clause = "LOWER(COALESCE(status, 'queued')) ASC, COALESCE(created_at, updated_at) DESC, id DESC"
 
         where_fragment = f" WHERE {' AND '.join(where_clauses)}"
         count_query = f"SELECT COUNT(*) FROM jobs{where_fragment}"
