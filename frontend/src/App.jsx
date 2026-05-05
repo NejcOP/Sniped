@@ -513,6 +513,30 @@ function resolveFeatureAccess(rawPlanKey, featureAccess) {
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
+const creditIntegerFormatter = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 0,
+})
+
+const creditDecimalFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1,
+})
+
+function formatCreditAmount(value, options = {}) {
+  const { compactThreshold = 10000, compactDecimals = 1 } = options
+  const numericValue = Number(value || 0)
+  if (!Number.isFinite(numericValue)) return '0'
+
+  const absValue = Math.abs(numericValue)
+  if (absValue >= compactThreshold) {
+    const compact = numericValue / 1000
+    const fixedCompact = Number(compact.toFixed(Math.max(0, compactDecimals)))
+    return `${creditDecimalFormatter.format(fixedCompact)}k`
+  }
+
+  return creditIntegerFormatter.format(Math.round(numericValue))
+}
+
 const SidebarBillingCard = memo(function SidebarBillingCard({
   isPaid,
   planName,
@@ -602,13 +626,20 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
       <div className="rounded-xl border border-slate-700/70 bg-[#0D1117] p-3 shadow-[0_14px_30px_rgba(2,6,23,0.45)]">
         <div className="mb-2 flex items-center justify-between text-sm font-semibold">
           <p className="text-white">Credits</p>
-          <p className={creditsLabelClass}>
-            {creditsBalance.toLocaleString('en-US')} / {monthlyLimit.toLocaleString('en-US')}
+          <p className={`flex items-baseline gap-1 ${creditsLabelClass}`}>
+            <span className="text-[1.05rem] font-semibold text-yellow-200">
+              {formatCreditAmount(creditsBalance, { compactDecimals: 1 })}
+            </span>
+            <span className="text-[0.95rem] text-slate-500">/</span>
+            <span className="text-[0.85rem] font-semibold text-slate-400">
+              {formatCreditAmount(monthlyLimit, { compactDecimals: 0 })}
+            </span>
+            <span className="text-[0.75rem] font-medium uppercase tracking-[0.08em] text-slate-500">credits</span>
           </p>
         </div>
-        <div className="h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
           <div
-            className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-200 ease-out"
+            className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-500 ease-out"
             style={{ width: `${creditsPercent}%` }}
           />
         </div>
@@ -6670,7 +6701,7 @@ function App({ initialTab = 'leads' }) {
   const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && creditsBalance >= requiredEnrichCredits
   const isLowOnCredits = creditsBalance > 0 && creditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
-    ? `${topupCreditsBalance.toLocaleString('en-US')} purchased top-up credits included`
+    ? `+ ${formatCreditAmount(topupCreditsBalance, { compactDecimals: 0 })} top-up credits`
     : ''
   const visibleLiveMailTemplateCards = useMemo(
     () => resolveLiveMailTemplateCardsForNiche(selectedUserNiche),
