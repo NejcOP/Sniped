@@ -223,10 +223,11 @@ class Cursor:
 
 
 class Connection:
-    def __init__(self, db_path: str | Path = "runtime-db") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = db_path
         self.row_factory: Optional[type[Row]] = None
-        self._ctx = get_shared_engine(str(db_path)).connect()
+        # db_path is retained for backwards compatibility; engine resolution is URL-driven.
+        self._ctx = get_shared_engine().connect()
         self._conn = None
 
     def __enter__(self) -> "Connection":
@@ -271,6 +272,6 @@ class Connection:
                 self._conn = None
 
 
-def connect(db_path: str | Path = "runtime-db", *args: Any, **kwargs: Any) -> Connection:
+def connect(db_path: str | Path | None = None, *args: Any, **kwargs: Any) -> Connection:
     del args, kwargs
     return Connection(db_path=db_path)

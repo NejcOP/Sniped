@@ -5,7 +5,7 @@ from .db import fetch_target_leads
 
 
 def export_target_leads(
-    db_path: str = "runtime-db",
+    db_path: Optional[str] = None,
     output_csv: str = "target_leads.csv",
     min_score: float = 7.0,
     user_id: Optional[str] = None,

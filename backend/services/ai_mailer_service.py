@@ -232,7 +232,7 @@ class SMTPAccount:
 
 
 class AIMailer:
-    def __init__(self, db_path: str = "runtime-db", config_path: str = "env", model_name_override: Optional[str] = None, user_id: Optional[str] = None, smtp_accounts_override: Optional[list[dict]] = None) -> None:
+    def __init__(self, db_path: str = "postgres", config_path: str = "env", model_name_override: Optional[str] = None, user_id: Optional[str] = None, smtp_accounts_override: Optional[list[dict]] = None) -> None:
         self.db_path = db_path
         self.config_path = Path(config_path)
         self.user_id = str(user_id).strip() if user_id is not None and str(user_id).strip() else None

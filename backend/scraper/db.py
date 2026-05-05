@@ -11,7 +11,6 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunpa
 from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint, asc, create_engine, desc, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .models import Lead
@@ -646,12 +645,9 @@ LEAD_UPSERT_IMMUTABLE_COLUMNS = {
 
 
 def _build_lead_upsert_statement(payloads: list[dict[str, Any]], dialect_name: str) -> Any:
-    if dialect_name == "postgresql":
-        stmt = pg_insert(LeadRecord).values(payloads)
-    elif dialect_name == "sqlite":
-        stmt = sqlite_insert(LeadRecord).values(payloads)
-    else:
+    if dialect_name != "postgresql":
         return None
+    stmt = pg_insert(LeadRecord).values(payloads)
 
     updatable_columns = [
         column.name
@@ -801,11 +797,11 @@ def _apply_lead_updates(record: LeadRecord, updates: dict[str, Any]) -> None:
             setattr(record, field_name, value)
 
 
-def init_db(db_path: str = "runtime-db") -> None:
+def init_db(db_path: Optional[str] = None) -> None:
     Base.metadata.create_all(get_engine(db_path))
 
 
-def create_lead(lead: Lead, user_id: str, db_path: str = "runtime-db") -> dict[str, Any]:
+def create_lead(lead: Lead, user_id: str, db_path: Optional[str] = None) -> dict[str, Any]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -834,7 +830,7 @@ def create_lead(lead: Lead, user_id: str, db_path: str = "runtime-db") -> dict[s
         return _lead_record_to_dict(record)
 
 
-def get_lead(lead_id: int, db_path: str = "runtime-db") -> Optional[dict[str, Any]]:
+def get_lead(lead_id: int, db_path: Optional[str] = None) -> Optional[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -842,7 +838,7 @@ def get_lead(lead_id: int, db_path: str = "runtime-db") -> Optional[dict[str, An
         return _lead_record_to_dict(record) if record is not None else None
 
 
-def update_lead(lead_id: int, updates: dict[str, Any], db_path: str = "runtime-db") -> Optional[dict[str, Any]]:
+def update_lead(lead_id: int, updates: dict[str, Any], db_path: Optional[str] = None) -> Optional[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -856,7 +852,7 @@ def update_lead(lead_id: int, updates: dict[str, Any], db_path: str = "runtime-d
         return _lead_record_to_dict(record)
 
 
-def delete_lead(lead_id: int, db_path: str = "runtime-db") -> bool:
+def delete_lead(lead_id: int, db_path: Optional[str] = None) -> bool:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -868,7 +864,7 @@ def delete_lead(lead_id: int, db_path: str = "runtime-db") -> bool:
         return True
 
 
-def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "") -> bool:
+def upsert_lead(lead: Lead, db_path: Optional[str] = None, user_id: str = "") -> bool:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:
@@ -890,7 +886,7 @@ def upsert_lead(lead: Lead, db_path: str = "runtime-db", user_id: str = "") -> b
         return True
 
 
-def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_id: str = "") -> int:
+def batch_upsert_leads(leads: Sequence[Lead], db_path: Optional[str] = None, user_id: str = "") -> int:
     if not leads:
         return 0
 
@@ -929,7 +925,7 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: str = "runtime-db", user_
         return len(payloads)
 
 
-def fetch_target_leads(db_path: str = "runtime-db", min_score: float = 7.0, user_id: Optional[str] = None) -> list[dict[str, Any]]:
+def fetch_target_leads(db_path: Optional[str] = None, min_score: float = 7.0, user_id: Optional[str] = None) -> list[dict[str, Any]]:
     init_db(db_path)
     session_factory = get_session_factory(db_path)
     with session_factory() as session:

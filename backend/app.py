@@ -1107,6 +1107,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                 """
                 UPDATE leads
                 SET created_at = COALESCE(NULLIF(CAST(scraped_at AS TEXT), ''), CAST(CURRENT_TIMESTAMP AS TEXT))
+                -- SYSTEM-WIDE: intentionally unscoped.
                 WHERE created_at IS NULL
                 """
             )
@@ -1119,6 +1120,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                     WHEN sent_at IS NOT NULL OR last_contacted_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('emailed', 'contacted', 'failed', 'bounced', 'invalid_email') THEN 'Contacted'
                     ELSE 'Scraped'
                 END
+                -- SYSTEM-WIDE: intentionally unscoped.
                 WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
                 """
             )
@@ -1242,7 +1244,7 @@ def sync_blacklisted_leads(db_path: Path, user_id: Optional[str] = None) -> int:
     return affected
 
 
-def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manual blacklist") -> dict:
+def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manual blacklist", user_id: Optional[str] = None) -> dict:
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
         return blacklist_lead_and_matches_supabase(lead_id, reason, DEFAULT_CONFIG_PATH)
 
@@ -1250,11 +1252,15 @@ def blacklist_lead_and_matches(db_path: Path, lead_id: int, reason: str = "Manua
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         row = conn.execute(
-            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ?",
-            (lead_id,),
+            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ? AND (? IS NULL OR user_id = ?)",
+            (lead_id, user_id, user_id),
         ).fetchone()
 
         if row is None:
+            if user_id is not None:
+                exists_row = conn.execute("SELECT 1 FROM leads WHERE id = ? LIMIT 1", (lead_id,)).fetchone()
+                if exists_row is not None:
+                    raise HTTPException(status_code=403, detail="Forbidden")
             raise HTTPException(status_code=404, detail="Lead not found")
 
         email_value = str(row["email"] or "").strip().lower()
@@ -1422,15 +1428,19 @@ def remove_blacklist_entry(db_path: Path, *, user_id: str, kind: str, value: str
     }
 
 
-def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int) -> dict:
+def remove_lead_blacklist_and_matches(db_path: Path, lead_id: int, user_id: Optional[str] = None) -> dict:
     ensure_system_tables(db_path)
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         row = conn.execute(
-            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ?",
-            (lead_id,),
+            "SELECT id, business_name, email, website_url, user_id FROM leads WHERE id = ? AND (? IS NULL OR user_id = ?)",
+            (lead_id, user_id, user_id),
         ).fetchone()
         if row is None:
+            if user_id is not None:
+                exists_row = conn.execute("SELECT 1 FROM leads WHERE id = ? LIMIT 1", (lead_id,)).fetchone()
+                if exists_row is not None:
+                    raise HTTPException(status_code=403, detail="Forbidden")
             raise HTTPException(status_code=404, detail="Lead not found")
 
         removed_entries: list[tuple[str, str]] = []
@@ -1537,7 +1547,12 @@ def ensure_jobs_queue_table(db_path: Path) -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "user_id" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
+            conn.execute("UPDATE jobs SET user_id = 'legacy' WHERE user_id IS NULL OR TRIM(COALESCE(user_id, '')) = ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status, created_at ASC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user_status ON jobs (user_id, status, created_at ASC)")
         conn.commit()
 
 
@@ -2445,8 +2460,8 @@ def _refresh_enriched_lead_scores(
             lead_row = dict(row)
             seo_score, performance_score = _extract_scores_from_lead_payload(lead_row)
             conn.execute(
-                "UPDATE leads SET seo_score = ?, performance_score = ? WHERE id = ?",
-                (seo_score, performance_score, int(lead_row.get("id") or 0)),
+                "UPDATE leads SET seo_score = ?, performance_score = ? WHERE id = ? AND user_id = ?",
+                (seo_score, performance_score, int(lead_row.get("id") or 0), str(user_id or "legacy")),
             )
             updated_map[int(lead_row.get("id") or 0)] = (seo_score, performance_score)
         conn.commit()
@@ -2690,6 +2705,14 @@ def ensure_client_success_tables(db_path: Path) -> None:
             )
             """
         )
+        folder_columns = {row[1] for row in conn.execute("PRAGMA table_info(client_folders)").fetchall()}
+        if "user_id" not in folder_columns:
+            conn.execute("ALTER TABLE client_folders ADD COLUMN user_id TEXT")
+            conn.execute("UPDATE client_folders SET user_id = 'legacy' WHERE user_id IS NULL OR TRIM(COALESCE(user_id, '')) = ''")
+        segment_columns = {row[1] for row in conn.execute("PRAGMA table_info(saved_segments)").fetchall()}
+        if "user_id" not in segment_columns:
+            conn.execute("ALTER TABLE saved_segments ADD COLUMN user_id TEXT")
+            conn.execute("UPDATE saved_segments SET user_id = 'legacy' WHERE user_id IS NULL OR TRIM(COALESCE(user_id, '')) = ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_client_folders_user_id ON client_folders(user_id, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_segments_user_updated ON saved_segments(user_id, updated_at)")
         conn.execute(
@@ -2701,6 +2724,7 @@ def ensure_client_success_tables(db_path: Path) -> None:
                 WHEN sent_at IS NOT NULL OR last_contacted_at IS NOT NULL OR LOWER(COALESCE(status, '')) IN ('emailed', 'contacted', 'failed', 'bounced', 'invalid_email') THEN 'Contacted'
                 ELSE 'Scraped'
             END
+            -- SYSTEM-WIDE: intentionally unscoped.
             WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
             """
         )
@@ -2786,7 +2810,7 @@ def ensure_mailer_campaign_tables(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_sequences_user_active ON CampaignSequences(user_id, active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_templates_user_category ON SavedTemplates(user_id, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_events_user_type ON CampaignEvents(user_id, event_type)")
-        conn.execute("UPDATE leads SET campaign_step = 1 WHERE campaign_step IS NULL")
+        conn.execute("UPDATE leads SET campaign_step = 1 WHERE campaign_step IS NULL -- SYSTEM-WIDE: intentionally unscoped.")
         conn.commit()
 
 
@@ -2984,13 +3008,11 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
         email = str(payload.get("email") or "").strip()
         if lead_id is not None:
             lead_row = conn.execute(
-                "SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id, status FROM leads WHERE id = ? LIMIT 1",
-                (lead_id,),
+                "SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id, status FROM leads WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ? LIMIT 1",
+                (lead_id, str(user_id or "legacy")),
             ).fetchone()
             if lead_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(lead_row["user_id"] or "legacy") != str(user_id or "legacy"):
-                raise HTTPException(status_code=403, detail="Forbidden")
             if not email:
                 email = str(lead_row["email"] or "").strip()
 
@@ -3019,12 +3041,13 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                 SET
                     last_subject_line = COALESCE(?, last_subject_line),
                     ab_variant = COALESCE(?, ab_variant)
-                WHERE id = ?
+                WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                 """,
                 (
                     str(payload.get("subject_line") or "").strip() or None,
                     str(payload.get("subject_variant") or "").strip() or None,
                     lead_id,
+                    str(user_id or "legacy"),
                 ),
             )
 
@@ -3044,9 +3067,9 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                         END,
                         sent_at = COALESCE(sent_at, ?),
                         last_contacted_at = COALESCE(last_contacted_at, ?)
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
-                    (now_iso, now_iso, lead_id),
+                    (now_iso, now_iso, lead_id, str(user_id or "legacy")),
                 )
             elif event_type == "open":
                 conn.execute(
@@ -3056,9 +3079,9 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                         open_count = COALESCE(open_count, 0) + 1,
                         first_opened_at = COALESCE(first_opened_at, ?),
                         last_opened_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
-                    (now_iso, now_iso, lead_id),
+                    (now_iso, now_iso, lead_id, str(user_id or "legacy")),
                 )
             elif event_type == "reply":
                 conn.execute(
@@ -3074,9 +3097,9 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                             WHEN LOWER(COALESCE(status, '')) IN ('paid', 'closed') THEN status
                             ELSE 'Replied'
                         END
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
-                    (now_iso, lead_id),
+                    (now_iso, lead_id, str(user_id or "legacy")),
                 )
             elif event_type == "bounce":
                 conn.execute(
@@ -3094,9 +3117,9 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                             WHEN LOWER(COALESCE(status, '')) IN ('paid', 'closed') THEN status
                             ELSE 'Failed'
                         END
-                    WHERE id = ?
+                    WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
-                    (now_iso, reason or None, lead_id),
+                    (now_iso, reason or None, lead_id, str(user_id or "legacy")),
                 )
 
         row = conn.execute(
@@ -3497,6 +3520,7 @@ def mark_task_running(db_path: Path, task_id: int) -> None:
             """
             UPDATE system_tasks
             SET status = ?, started_at = COALESCE(started_at, ?), error = NULL
+            -- SYSTEM-WIDE: intentionally unscoped.
             WHERE id = ?
             """,
             ("running", utc_now_iso(), task_id),
@@ -3523,6 +3547,7 @@ def update_task_progress(db_path: Path, task_id: int, result_payload: dict) -> N
             """
             UPDATE system_tasks
             SET result_payload = ?
+            -- SYSTEM-WIDE: intentionally unscoped.
             WHERE id = ?
             """,
             (serialize_json(result_payload), task_id),
@@ -3559,6 +3584,7 @@ def finish_task_record(
             """
             UPDATE system_tasks
             SET status = ?, result_payload = ?, error = ?, finished_at = ?
+            -- SYSTEM-WIDE: intentionally unscoped.
             WHERE id = ?
             """,
             (status, serialize_json(result_payload), error, utc_now_iso(), task_id),
@@ -3622,6 +3648,7 @@ def fetch_latest_task(db_path: Path, task_type: str, user_id: Optional[str] = No
                     error
                 FROM system_tasks
                 WHERE task_type = ?
+                -- SYSTEM-WIDE: intentionally unscoped.
                 ORDER BY id DESC
                 LIMIT 1
                 """,
@@ -3675,6 +3702,7 @@ def fetch_all_latest_tasks(db_path: Path, user_id: Optional[str] = None) -> dict
                 INNER JOIN (
                     SELECT task_type, MAX(id) AS max_id
                     FROM system_tasks
+                    -- SYSTEM-WIDE: intentionally unscoped.
                     GROUP BY task_type
                 ) latest ON latest.max_id = st.id
                 ORDER BY st.id DESC
@@ -3739,6 +3767,7 @@ def fetch_task_history(db_path: Path, limit: int = TASK_HISTORY_LIMIT, user_id: 
                     result_payload,
                     error
                 FROM system_tasks
+                -- SYSTEM-WIDE: intentionally unscoped.
                 ORDER BY id DESC
                 LIMIT ?
                 """,
@@ -3801,6 +3830,7 @@ def fetch_task_by_id(db_path: Path, task_id: int, user_id: Optional[str] = None)
                     result_payload,
                     error
                 FROM system_tasks
+                -- SYSTEM-WIDE: intentionally unscoped.
                 WHERE id = ?
                 """,
                 (task_id,),
@@ -6434,7 +6464,7 @@ def has_any_ai_api_key(config_path: Path) -> bool:
     return False
 
 
-def extract_keyword_performance(db_path: Path, limit: int = 8) -> list[dict]:
+def extract_keyword_performance(db_path: Path, limit: int = 8, user_id: Optional[str] = None) -> list[dict]:
     # Use Supabase primary when enabled so niche advisor reflects live cloud data
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
         client = get_supabase_client(DEFAULT_CONFIG_PATH)
@@ -6483,6 +6513,7 @@ def extract_keyword_performance(db_path: Path, limit: int = 8) -> list[dict]:
                 SUM(CASE WHEN LOWER(COALESCE(status, '')) IN ('interested', 'meeting set') THEN 1 ELSE 0 END) AS replies
             FROM leads
             WHERE search_keyword IS NOT NULL AND TRIM(search_keyword) != ''
+              AND (? IS NULL OR user_id = ?)
             GROUP BY TRIM(search_keyword)
             HAVING SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) > 0
             ORDER BY
@@ -6492,7 +6523,7 @@ def extract_keyword_performance(db_path: Path, limit: int = 8) -> list[dict]:
                 COUNT(*) DESC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, user_id, limit),
         ).fetchall()
 
     result = []
@@ -6653,7 +6684,7 @@ def heuristic_recommendations_from_performance(performance: list[dict], country_
     return recs[:3]
 
 
-def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str = "US") -> dict:
+def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str = "US", user_id: Optional[str] = None) -> dict:
     ensure_system_tables(db_path)
     selected_country = normalize_country_value(country_code)
     country_labels = {
@@ -6663,7 +6694,7 @@ def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str
         "SI": "Slovenia",
     }
     selected_country_label = country_labels.get(selected_country, selected_country)
-    performance = extract_keyword_performance(db_path)
+    performance = extract_keyword_performance(db_path, user_id=user_id)
     heuristic = heuristic_recommendations_from_performance(performance, selected_country)
 
     client, model_name = load_openai_client(config_path)
@@ -6872,9 +6903,9 @@ def queue_high_score_enriched_leads(
                                 status = 'queued_mail',
                                 next_mail_at = COALESCE(next_mail_at, ?),
                                 status_updated_at = ?
-                            WHERE id = ?
+                            WHERE id = ? AND (? IS NULL OR user_id = ?)
                             """,
-                            (now_iso, now_iso, lead_id),
+                            (now_iso, now_iso, lead_id, user_id, user_id),
                         )
                         queued_count += 1
 
@@ -7140,7 +7171,10 @@ def create_client_folder(db_path: Path, user_id: str, payload: dict[str, Any]) -
                 now_iso,
             ),
         )
-        row = conn.execute("SELECT * FROM client_folders WHERE id = ? LIMIT 1", (cursor.lastrowid,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM client_folders WHERE id = ? AND user_id = ? LIMIT 1",
+            (cursor.lastrowid, str(user_id or "legacy")),
+        ).fetchone()
         conn.commit()
     return dict(row) if row else {}
 
@@ -7233,10 +7267,13 @@ def create_saved_segment(db_path: Path, user_id: str, payload: dict[str, Any]) -
         ).fetchone()
         if existing is not None:
             conn.execute(
-                "UPDATE saved_segments SET filters_json = ?, updated_at = ? WHERE id = ?",
-                (filters_json, now_iso, int(existing["id"])),
+                "UPDATE saved_segments SET filters_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (filters_json, now_iso, int(existing["id"]), str(user_id or "legacy")),
             )
-            row = conn.execute("SELECT * FROM saved_segments WHERE id = ? LIMIT 1", (int(existing["id"]),)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM saved_segments WHERE id = ? AND user_id = ? LIMIT 1",
+                (int(existing["id"]), str(user_id or "legacy")),
+            ).fetchone()
         else:
             cursor = conn.execute(
                 """
@@ -7245,7 +7282,10 @@ def create_saved_segment(db_path: Path, user_id: str, payload: dict[str, Any]) -
                 """,
                 (str(user_id or "legacy"), name, filters_json, now_iso, now_iso),
             )
-            row = conn.execute("SELECT * FROM saved_segments WHERE id = ? LIMIT 1", (cursor.lastrowid,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM saved_segments WHERE id = ? AND user_id = ? LIMIT 1",
+                (cursor.lastrowid, str(user_id or "legacy")),
+            ).fetchone()
         conn.commit()
     return _normalize_saved_segment_row(row)
 
@@ -7281,13 +7321,11 @@ def assign_lead_to_client_folder(db_path: Path, user_id: str, lead_id: int, clie
     with pgdb.connect(db_path) as conn:
         conn.row_factory = pgdb.Row
         lead_row = conn.execute(
-            "SELECT id, user_id, business_name FROM leads WHERE id = ? LIMIT 1",
-            (lead_id,),
+            "SELECT id, user_id, business_name FROM leads WHERE id = ? AND user_id = ? LIMIT 1",
+            (lead_id, user_id),
         ).fetchone()
         if lead_row is None:
             raise HTTPException(status_code=404, detail="Lead not found")
-        if str(lead_row["user_id"] or "") != str(user_id or ""):
-            raise HTTPException(status_code=403, detail="Forbidden")
 
         folder_name = None
         normalized_folder_id = int(client_folder_id) if client_folder_id not in (None, 0, "0", "") else None
@@ -7300,11 +7338,13 @@ def assign_lead_to_client_folder(db_path: Path, user_id: str, lead_id: int, clie
                 raise HTTPException(status_code=404, detail="Client folder not found")
             folder_name = str(folder_row["name"] or "").strip() or None
 
-        conn.execute(
-            "UPDATE leads SET client_folder_id = ?, status_updated_at = COALESCE(status_updated_at, ?) WHERE id = ?",
-            (normalized_folder_id, utc_now_iso(), lead_id),
+        update_cursor = conn.execute(
+            "UPDATE leads SET client_folder_id = ?, status_updated_at = COALESCE(status_updated_at, ?) WHERE id = ? AND user_id = ?",
+            (normalized_folder_id, utc_now_iso(), lead_id, user_id),
         )
         conn.commit()
+        if int(update_cursor.rowcount or 0) == 0:
+            raise HTTPException(status_code=404, detail="Lead not found")
 
     _invalidate_leads_cache()
     return {
@@ -7783,25 +7823,40 @@ def enqueue_task(
             )
             return {"status": "running", "task_id": running_task.get("id")}
 
-        task_id = create_task_record(db_path, user_id, task_type, "queued", request_payload, source=source)
+        normalized_user_id = str(user_id or "").strip()
+        normalized_request_user_id = str(request_payload.get("user_id") or "").strip() if isinstance(request_payload, dict) else ""
+        if normalized_request_user_id and normalized_request_user_id != normalized_user_id:
+            logging.warning(
+                "Task enqueue payload user_id mismatch ignored | type=%s auth_user_id=%s payload_user_id=%s",
+                task_type,
+                normalized_user_id,
+                normalized_request_user_id,
+            )
+
+        safe_payload = dict(request_payload)
+        safe_payload["user_id"] = normalized_user_id
+        safe_payload["owner_id"] = normalized_user_id
+        safe_payload["request_user_id"] = normalized_user_id
+
+        task_id = create_task_record(db_path, normalized_user_id, task_type, "queued", safe_payload, source=source)
         logging.info(
             "Task queued | type=%s user_id=%s task_id=%s source=%s",
             task_type,
-            user_id,
+            normalized_user_id,
             task_id,
             source,
         )
 
-    payload_data = dict(request_payload)
+    payload_data = dict(safe_payload)
     payload_data["task_id"] = task_id
     payload_data["task_type"] = task_type
-    payload_data["user_id"] = user_id
+    payload_data["user_id"] = normalized_user_id
 
     if _should_use_external_worker(task_type):
         logging.info(
             "Delegating task to external worker | type=%s user_id=%s task_id=%s",
             task_type,
-            user_id,
+            normalized_user_id,
             task_id,
         )
         return {
@@ -9654,6 +9709,7 @@ def run_daily_digest(_app: FastAPI) -> None:
                 SELECT COUNT(*) FROM leads
                 WHERE ai_score >= 9
                   AND datetime(enriched_at) >= datetime('now', '-1 day')
+                                -- SYSTEM-WIDE: intentionally unscoped.
                 """
             ).fetchone()
             golden_count = int(row[0] or 0) if row else 0
@@ -9663,6 +9719,7 @@ def run_daily_digest(_app: FastAPI) -> None:
                 SELECT request_payload FROM system_tasks
                 WHERE task_type = 'uptime_alert'
                   AND datetime(created_at) >= datetime('now', '-1 day')
+                                -- SYSTEM-WIDE: intentionally unscoped.
                 ORDER BY id DESC
                 LIMIT 20
                 """
@@ -9754,6 +9811,7 @@ def run_uptime_check(_app: FastAPI) -> None:
             WHERE LOWER(COALESCE(status, '')) = 'paid'
               AND website_url IS NOT NULL
               AND TRIM(website_url) != ''
+                        -- SYSTEM-WIDE: intentionally unscoped.
             """
         ).fetchall()
 
@@ -11715,7 +11773,12 @@ def create_app() -> FastAPI:
                 })
             return response
 
-        result = get_niche_recommendation(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH, country_code=selected_country_code)
+        result = get_niche_recommendation(
+            DEFAULT_DB_PATH,
+            DEFAULT_CONFIG_PATH,
+            country_code=selected_country_code,
+            user_id=user_id,
+        )
         if not isinstance(result, dict):
             result = {
                 "generated_at": utc_now_iso(),
@@ -11897,11 +11960,12 @@ def create_app() -> FastAPI:
         ensure_revenue_logs_table(db_path)
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
-            lead_row = conn.execute("SELECT id, user_id, business_name FROM leads WHERE id = ? LIMIT 1", (int(payload.lead_id),)).fetchone()
+            lead_row = conn.execute(
+                "SELECT id, user_id, business_name FROM leads WHERE id = ? AND user_id = ? LIMIT 1",
+                (int(payload.lead_id), user_id),
+            ).fetchone()
             if lead_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(lead_row["user_id"] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
             lead_name = str(lead_row["business_name"] or "").strip() or None
 
             conn.execute(
@@ -12339,6 +12403,7 @@ def create_app() -> FastAPI:
                 pipeline_stage,
                 client_folder_id
             FROM leads
+            -- user_id is enforced in composed where_fragment for non-debug requests
         """
         where_clauses: list[str] = []
         params: list[Any] = []
@@ -13079,13 +13144,11 @@ def create_app() -> FastAPI:
             return blacklist_lead_and_matches_supabase(lead_id, "Manual blacklist", DEFAULT_CONFIG_PATH)
 
         with pgdb.connect(db_path) as conn:
-            owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ? AND user_id = ?", (lead_id, user_id)).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(owner_row[0] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
 
-        return blacklist_lead_and_matches(db_path, lead_id, "Manual blacklist")
+        return blacklist_lead_and_matches(db_path, lead_id, "Manual blacklist", user_id=user_id)
 
     @app.delete("/api/leads/{lead_id}/blacklist")
     def unblacklist_lead(lead_id: int, request: Request) -> dict:
@@ -13105,13 +13168,11 @@ def create_app() -> FastAPI:
             return remove_lead_blacklist_and_matches_supabase(lead_id, DEFAULT_CONFIG_PATH)
 
         with pgdb.connect(db_path) as conn:
-            owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ? AND user_id = ?", (lead_id, user_id)).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(owner_row[0] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
 
-        return remove_lead_blacklist_and_matches(db_path, lead_id)
+        return remove_lead_blacklist_and_matches(db_path, lead_id, user_id=user_id)
 
     @app.patch("/api/leads/{lead_id}/status")
     def update_lead_status(lead_id: int, payload: LeadStatusRequest, request: Request) -> dict:
@@ -13204,23 +13265,19 @@ def create_app() -> FastAPI:
 
         if next_status_normalized == "blacklisted":
             with pgdb.connect(db_path) as conn:
-                owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
+                owner_row = conn.execute("SELECT user_id FROM leads WHERE id = ? AND user_id = ?", (lead_id, user_id)).fetchone()
                 if owner_row is None:
                     raise HTTPException(status_code=404, detail="Lead not found")
-                if str(owner_row[0] or "") != user_id:
-                    raise HTTPException(status_code=403, detail="Forbidden")
-            return blacklist_lead_and_matches(db_path, lead_id, "Manual status blacklist")
+            return blacklist_lead_and_matches(db_path, lead_id, "Manual status blacklist", user_id=user_id)
 
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             owner_row = conn.execute(
-                "SELECT user_id, business_name, status, pipeline_stage, paid_at, sent_at, last_contacted_at, reply_detected_at FROM leads WHERE id = ?",
-                (lead_id,),
+                "SELECT user_id, business_name, status, pipeline_stage, paid_at, sent_at, last_contacted_at, reply_detected_at FROM leads WHERE id = ? AND user_id = ?",
+                (lead_id, user_id),
             ).fetchone()
             if owner_row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(owner_row["user_id"] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
             previous_stage = _derive_pipeline_stage(
                 status=str(owner_row["status"] or ""),
                 pipeline_stage=str(owner_row["pipeline_stage"] or ""),
@@ -13241,7 +13298,7 @@ def create_app() -> FastAPI:
                     sent_at = CASE WHEN ? IS NOT NULL THEN COALESCE(sent_at, ?) ELSE sent_at END,
                     last_contacted_at = CASE WHEN ? IS NOT NULL THEN ? ELSE last_contacted_at END,
                     reply_detected_at = CASE WHEN ? IS NOT NULL THEN COALESCE(reply_detected_at, ?) ELSE reply_detected_at END
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
                 (
                     next_status,
@@ -13255,6 +13312,7 @@ def create_app() -> FastAPI:
                     reply_detected_at_value,
                     reply_detected_at_value,
                     lead_id,
+                    user_id,
                 ),
             )
             conn.commit()
@@ -13680,9 +13738,9 @@ def create_app() -> FastAPI:
                 """
                 UPDATE workers
                 SET worker_name = ?, role = ?, monthly_cost = ?, status = ?, comms_link = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
-                (worker_name, role, monthly_cost, status, comms_link, utc_now_iso(), worker_id),
+                (worker_name, role, monthly_cost, status, comms_link, utc_now_iso(), worker_id, user_id),
             )
             conn.commit()
 
@@ -13828,11 +13886,9 @@ def create_app() -> FastAPI:
                     raise HTTPException(status_code=403, detail="Forbidden")
                 worker_name = row[2]
 
-            lead_owner = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            lead_owner = conn.execute("SELECT user_id FROM leads WHERE id = ? AND user_id = ?", (lead_id, user_id)).fetchone()
             if lead_owner is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(lead_owner[0] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
 
             assigned_at = utc_now_iso() if worker_id is not None else None
             cursor = conn.execute(
@@ -13965,8 +14021,8 @@ def create_app() -> FastAPI:
                     l.paid_at,
                     w.worker_name
                 FROM delivery_tasks dt
-                LEFT JOIN leads l ON l.id = dt.lead_id
-                LEFT JOIN workers w ON w.id = dt.worker_id
+                LEFT JOIN leads l ON l.id = dt.lead_id AND l.user_id = dt.user_id
+                LEFT JOIN workers w ON w.id = dt.worker_id AND w.user_id = dt.user_id
                 {where_clause}
                 ORDER BY
                     COALESCE(NULLIF(dt.position, 0), dt.id) ASC,
@@ -14064,13 +14120,11 @@ def create_app() -> FastAPI:
         with pgdb.connect(db_path) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT id, user_id, worker_id, lead_id, business_name, status, notes, done_at FROM delivery_tasks WHERE id = ?",
-                (task_id,),
+                "SELECT id, user_id, worker_id, lead_id, business_name, status, notes, done_at FROM delivery_tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
             ).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Delivery task not found")
-            if str(row["user_id"] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
 
             worker_id = row["worker_id"] if payload.worker_id is None else payload.worker_id
             if worker_id is not None:
@@ -14090,9 +14144,9 @@ def create_app() -> FastAPI:
                 """
                 UPDATE delivery_tasks
                 SET worker_id = ?, status = ?, notes = ?, done_at = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
-                (worker_id, status_value, notes_value, done_at_value, utc_now_iso(), task_id),
+                (worker_id, status_value, notes_value, done_at_value, utc_now_iso(), task_id, user_id),
             )
             conn.commit()
 
@@ -14145,14 +14199,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail=f"Invalid tier. Allowed: {', '.join(sorted(allowed_tiers))}")
 
         with pgdb.connect(db_path) as conn:
-            row = conn.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            row = conn.execute("SELECT user_id FROM leads WHERE id = ? AND user_id = ?", (lead_id, user_id)).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if str(row[0] or "") != user_id:
-                raise HTTPException(status_code=403, detail="Forbidden")
             cursor = conn.execute(
-                "UPDATE leads SET client_tier = ? WHERE id = ?",
-                (tier_value, lead_id),
+                "UPDATE leads SET client_tier = ? WHERE id = ? AND user_id = ?",
+                (tier_value, lead_id, user_id),
             )
             conn.commit()
 
@@ -14589,6 +14641,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=401, detail="Authentication required.")
 
         jwt_user_id = resolve_supabase_auth_user_id(token, DEFAULT_CONFIG_PATH)
+        if jwt_user_id:
+            return jwt_user_id
         if jwt_user_id:
             return jwt_user_id
 

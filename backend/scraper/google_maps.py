@@ -334,7 +334,8 @@ class GoogleMapsScraper:
 
         if self._browser is None:
             self._playwright = sync_playwright().start()
-            launch_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_LAUNCH_TIMEOUT_MS", "15000") or "15000"))
+            # Temporary diagnostic override: force a short launch timeout to detect hard crashes quickly.
+            launch_timeout_ms = 10000
             nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "10000") or "10000"))
             launch_targets = proxy_candidates or [""]
             last_exc: Optional[Exception] = None
@@ -429,7 +430,8 @@ class GoogleMapsScraper:
                 pass
 
             _SHARED_PLAYWRIGHT = sync_playwright().start()
-            launch_timeout_ms = max(10000, int(os.environ.get("SCRAPE_BROWSER_LAUNCH_TIMEOUT_MS", "30000") or "30000"))
+            # Temporary diagnostic override: force a short launch timeout to detect hard crashes quickly.
+            launch_timeout_ms = 10000
             with _BROWSER_LAUNCH_LOCK:
                 _SHARED_BROWSER = _SHARED_PLAYWRIGHT.chromium.launch(
                     headless=headless,

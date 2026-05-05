@@ -4,7 +4,7 @@ from .db import fetch_target_leads
 
 
 def export_target_leads(
-    db_path: str = "runtime-db", output_csv: str = "target_leads.csv", min_rating: float = 3.5
+    db_path: str = "postgres", output_csv: str = "target_leads.csv", min_rating: float = 3.5
 ) -> int:
     rows = fetch_target_leads(db_path=db_path, min_rating=min_rating)
 

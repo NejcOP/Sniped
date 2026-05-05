@@ -43,11 +43,9 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.app import (
     DEFAULT_CONFIG_PATH,
-    DEFAULT_DB_PATH,
     app as backend_app,
     finish_task_record,
     get_task_executor,
-    is_supabase_primary_enabled,
 )
 from backend.scraper.db import dispose_cached_engines, get_engine
 
@@ -72,12 +70,9 @@ WORKER_STARTED_AT = datetime.now(timezone.utc)
 # Postgres task/runtime helpers
 # ---------------------------------------------------------------------------
 
-def _use_supabase() -> bool:
-    return is_supabase_primary_enabled(DEFAULT_CONFIG_PATH)
-
-
 def _pg_enabled() -> bool:
-    if not _use_supabase():
+    database_url = str(os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
         return False
     try:
         get_engine()
@@ -230,7 +225,6 @@ async def process_task(task: dict[str, Any], semaphore: asyncio.Semaphore) -> No
     payload_data["task_id"] = task_id
     payload_data["task_type"] = task_type
     payload_data["user_id"] = str(task.get("user_id") or payload_data.get("user_id") or "legacy")
-    payload_data.setdefault("db_path", str(DEFAULT_DB_PATH))
     payload_data.setdefault("config_path", str(DEFAULT_CONFIG_PATH))
 
     log.info("Processing system task %s type=%s", task_id, task_type)
@@ -240,7 +234,7 @@ async def process_task(task: dict[str, Any], semaphore: asyncio.Semaphore) -> No
         try:
             executor = get_task_executor(task_type)
         except Exception:
-            finish_task_record(DEFAULT_DB_PATH, task_id, status="failed", error=f"Unsupported task type: {task_type}")
+            finish_task_record(None, task_id, status="failed", error=f"Unsupported task type: {task_type}")
             _record_task_outcome(task_id, task_type)
             return
 
@@ -249,7 +243,7 @@ async def process_task(task: dict[str, Any], semaphore: asyncio.Semaphore) -> No
             await loop.run_in_executor(None, executor, backend_app, payload_data)
         except Exception:
             err_msg = traceback.format_exc()
-            finish_task_record(DEFAULT_DB_PATH, task_id, status="failed", error=err_msg)
+            finish_task_record(None, task_id, status="failed", error=err_msg)
             log.error("System task %s crashed in worker", task_id, exc_info=True)
         finally:
             _record_task_outcome(task_id, task_type)
@@ -260,18 +254,29 @@ async def poll_loop() -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     in_flight_tasks: set[asyncio.Task[Any]] = set()
     consecutive_empty = 0
+    connection_failures = 0
     log.info(
-        "Worker %s started | concurrency=%d | poll_interval=%.1fs | primary_mode=%s",
-        WORKER_ID, MAX_CONCURRENT, POLL_INTERVAL, _use_supabase(),
+        "Worker %s started | concurrency=%d | poll_interval=%.1fs",
+        WORKER_ID,
+        MAX_CONCURRENT,
+        POLL_INTERVAL,
     )
     _runtime_upsert(f"worker:{WORKER_ID}:status", "online")
 
     while True:
         try:
             if not _pg_enabled():
-                log.warning("Worker %s is waiting for SUPABASE_DATABASE_URL + primary mode.", WORKER_ID)
-                await asyncio.sleep(BACKOFF_BASE)
+                connection_failures += 1
+                retry_sleep = min(BACKOFF_BASE ** min(connection_failures, 8), BACKOFF_MAX)
+                log.warning(
+                    "Worker %s is waiting for a healthy DATABASE_URL connection (retry in %.1fs).",
+                    WORKER_ID,
+                    retry_sleep,
+                )
+                await asyncio.sleep(retry_sleep)
                 continue
+
+            connection_failures = 0
 
             _update_worker_heartbeat()
             in_flight_tasks = {task for task in in_flight_tasks if not task.done()}
@@ -301,10 +306,12 @@ async def poll_loop() -> None:
             dispose_cached_engines()
             break
         except Exception as exc:
+            connection_failures += 1
+            retry_sleep = min(BACKOFF_BASE ** min(connection_failures, 8), BACKOFF_MAX)
             log.error("Poll loop error: %s", exc, exc_info=True)
             _runtime_upsert(f"worker:{WORKER_ID}:status", "error")
             gc.collect()
-            await asyncio.sleep(POLL_INTERVAL * 2)
+            await asyncio.sleep(retry_sleep)
 
     dispose_cached_engines()
 
