@@ -10950,6 +10950,17 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type", "Authorization", "Accept", "Origin"],
     )
 
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logging.exception("Unhandled exception on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Internal server error.",
+                "error_type": type(exc).__name__,
+            },
+        )
+
     async def _log_playwright_runtime_diagnostics() -> None:
         try:
             from playwright.async_api import async_playwright
@@ -11136,6 +11147,7 @@ def create_app() -> FastAPI:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
+        _, dev_threshold = _get_developer_webhook_settings(DEFAULT_CONFIG_PATH)
         openai_key = str(cfg.get("openai", {}).get("api_key", "") or "")
         smtp_accounts = load_user_smtp_accounts(session_token=session_token, db_path=DEFAULT_DB_PATH)
         billing = load_user_billing_context(session_token, allow_stripe_recovery=False)
