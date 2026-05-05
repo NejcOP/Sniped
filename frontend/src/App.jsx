@@ -431,9 +431,15 @@ const TOP_UP_PACKAGES = [
   { id: 'credits_250000', credits: 250000, priceUsd: 2199.00, badge: '' },
   { id: 'credits_500000', credits: 500000, priceUsd: 3499.00, badge: '' },
 ]
+function compactPkgCredits(n) {
+  const v = Number(n || 0)
+  if (v >= 1000000) return `${(v / 1000000).toFixed(2).replace(/\.?0+$/, '')}M`
+  if (v >= 1000) return `${Math.round(v / 1000)}k`
+  return String(v)
+}
 const TOP_UP_PACKAGE_OPTIONS = TOP_UP_PACKAGES.map((pkg) => ({
   ...pkg,
-  label: `${pkg.credits.toLocaleString('en-US')} Credits - $${Number(pkg.priceUsd || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+  label: `${compactPkgCredits(pkg.credits)} Credits - $${Number(pkg.priceUsd || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
 }))
 const formatUsd = (value) => Number(value || 0).toLocaleString('en-US', {
   minimumFractionDigits: 2,
@@ -757,7 +763,7 @@ const TopUpCreditsModal = memo(function TopUpCreditsModal({
                 >
                   {packages.map((pkg) => (
                     <option key={pkg.id} value={pkg.id}>
-                      {pkg.label || `${pkg.credits.toLocaleString('en-US')} Credits - $${formatUsd(pkg.priceUsd)}`}
+                      {pkg.label || `${compactPkgCredits(pkg.credits)} Credits - $${formatUsd(pkg.priceUsd)}`}
                     </option>
                   ))}
                 </select>
@@ -768,7 +774,7 @@ const TopUpCreditsModal = memo(function TopUpCreditsModal({
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-slate-300">Selected package</span>
                   <span className="font-semibold text-[#FFE082]">
-                    {Number(selectedPackage?.credits || 0).toLocaleString('en-US')} credits
+                    {compactPkgCredits(selectedPackage?.credits)} credits
                   </span>
                 </div>
                 <div className="mt-1.5 flex items-center justify-between text-base">
