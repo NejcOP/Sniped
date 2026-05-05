@@ -11,6 +11,8 @@ def test_sniped_ai_prompts_and_cta_match_new_outreach_rules() -> None:
     assert "employee_count" in enrichment_prompt
     assert "lead_score_100" in enrichment_prompt
     assert "lead_priority" in enrichment_prompt
+    assert "personalized_hook" in enrichment_prompt
+    assert "reasoning" in enrichment_prompt
 
     assert "The Hook" in email_prompt
     assert "The Bridge" in email_prompt

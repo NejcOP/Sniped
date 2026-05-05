@@ -2034,7 +2034,9 @@ class LeadEnricher:
         best_lead_score = round(min(100.0, email_component + size_component + sentiment_component), 1)
 
         return {
-            "competitive_hook": str(parsed.get("competitive_hook") or "").strip(),
+            "personalized_hook": str(parsed.get("personalized_hook") or parsed.get("competitive_hook") or "").strip(),
+            "reasoning": str(parsed.get("reasoning") or parsed.get("reason") or parsed.get("enrichment_summary") or "").strip(),
+            "competitive_hook": str(parsed.get("competitive_hook") or parsed.get("personalized_hook") or "").strip(),
             "main_offer": str(parsed.get("main_offer") or "").strip(),
             "latest_achievements": self._normalize_string_list(parsed.get("latest_achievements"), limit=3),
             "strengths": strengths[:3],
@@ -2054,8 +2056,8 @@ class LeadEnricher:
             "qualification_score": qualification_score,
             "best_lead_score": best_lead_score,
             "lead_priority": str(parsed.get("lead_priority") or ("Hot Lead" if best_lead_score >= 80 else "Qualified" if best_lead_score >= 55 else "Low Priority")).strip(),
-            "reason": str(parsed.get("reason") or parsed.get("enrichment_summary") or "").strip(),
-            "enrichment_summary": str(parsed.get("enrichment_summary") or parsed.get("reason") or "").strip(),
+            "reason": str(parsed.get("reason") or parsed.get("reasoning") or parsed.get("enrichment_summary") or "").strip(),
+            "enrichment_summary": str(parsed.get("enrichment_summary") or parsed.get("reasoning") or parsed.get("reason") or "").strip(),
             "google_maps": {
                 "claimed": google_claimed,
                 "rating": rating,
@@ -2371,10 +2373,14 @@ class LeadEnricher:
                 )
             )
             base_score = max(1, min(10, int(float(parsed.get("score", 5)))))
-            ai_summary = str(parsed.get("reason", "")).strip()
+            ai_summary = str(parsed.get("reasoning", "")).strip()
+            if not ai_summary:
+                ai_summary = str(parsed.get("reason", "")).strip()
             if not ai_summary:
                 ai_summary = str(parsed.get("enrichment_summary", "")).strip()
-            competitive_hook = str(parsed.get("competitive_hook", "")).strip()
+            competitive_hook = str(parsed.get("personalized_hook", "")).strip()
+            if not competitive_hook:
+                competitive_hook = str(parsed.get("competitive_hook", "")).strip()
             if not ai_summary:
                 ai_summary = str(shortcoming or "").strip() or "AI scoring completed."
 

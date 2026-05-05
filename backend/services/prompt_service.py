@@ -326,7 +326,7 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
         Get the system prompt for lead enrichment and AI scoring.
 
         Used when analyzing a prospect's website and competitive position.
-        Returns JSON with a pipeline-safe score plus a richer 0-100 lead analysis.
+        Returns JSON with a pipeline-safe score plus outreach-focused hook/reasoning.
         """
         niche = PromptFactory._validate_niche(user_niche)
 
@@ -389,8 +389,12 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
             "- lead_score_100 = sum of the three\n"
             "- lead_priority = 'Low Priority' if under 60, 'Hot Lead' if above 85, otherwise 'Qualified'\n\n"
             "TASK 3 — OUTREACH PREP INSIGHT:\n"
-            "- reason must be exactly 2 short sentences: sentence 1 = their biggest commercial gap, sentence 2 = the clearest next-step solution.\n"
-            "- competitive_hook must say what competitors are likely doing better.\n"
+            "- personalized_hook must be one specific outreach sentence for email personalization.\n"
+            "- personalized_hook must reference either: (a) latest LinkedIn activity OR (b) website tech stack signals.\n"
+            "- reasoning must explain why the score was assigned and must include one concrete fit/gap statement.\n"
+            "- reasoning should follow the format: 'Fit signal, but gap signal'. Example: 'High revenue company, but uses outdated web tech.'\n"
+            "- reason must mirror reasoning for backward compatibility.\n"
+            "- competitive_hook must mirror personalized_hook for backward compatibility.\n"
             "- Keep everything specific, evidence-based, and free of corporate fluff.\n"
             "- Do not invent precise achievements unless the input supports them.\n\n"
             "IMPORTANT PIPELINE RULE:\n"
@@ -399,6 +403,8 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
             "OUTPUT MUST BE VALID JSON ONLY (NO markdown):\n"
             "{\n"
             '  "score": <integer 1-10>,\n'
+            '  "personalized_hook": "<one specific sentence for email, based on latest LinkedIn post or website tech stack>",\n'
+            '  "reasoning": "<why this score was assigned; include one fit signal and one gap signal>",\n'
             '  "employee_count": "<exact count or best estimate>",\n'
             '  "main_offer": "<what they sell>",\n'
             '  "weak_points": ["<point 1>", "<point 2>"],\n'
@@ -408,9 +414,9 @@ Focus your analysis and recommendations on: {', '.join(config['focus_areas'][:3]
             '  "timing_score": <integer 0-20>,\n'
             '  "lead_score_100": <integer 0-100>,\n'
             '  "lead_priority": "<Low Priority|Qualified|Hot Lead>",\n'
-            '  "reason": "<exactly 2 short sentences: Gap + Solution>",\n'
-            '  "competitive_hook": "<one sentence>",\n'
-            '  "enrichment_summary": "<same 2-sentence summary as reason>"\n'
+            '  "reason": "<same value as reasoning>",\n'
+            '  "competitive_hook": "<same value as personalized_hook>",\n'
+            '  "enrichment_summary": "<same value as reasoning>"\n'
             "}\n"
         )
 
