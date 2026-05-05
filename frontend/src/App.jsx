@@ -73,6 +73,8 @@ const ENRICH_CREDIT_COST_PER_LEAD = 2
 const LOW_CREDITS_THRESHOLD = 20
 const ONBOARDING_COMPLETED_KEY = 'lf_onboarding_completed_v1'
 const ONBOARDING_DISMISSED_KEY = 'lf_onboarding_dismissed_v1'
+const ENRICH_TASK_SNAPSHOT_KEY = 'lf_enrich_task_snapshot_v1'
+const ENRICH_TASK_SNAPSHOT_TTL_MS = 30 * 60 * 1000
 const BYPASS_LEAD_FILTERS = false
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 
@@ -972,6 +974,37 @@ function replaceTemplatePlaceholders(text, vars) {
 
 function getIdleTask(taskType) {
   return { id: null, task_type: taskType, status: 'idle', running: false, created_at: null, started_at: null, finished_at: null, last_request: null, result: null, error: null }
+}
+
+function readEnrichTaskSnapshot() {
+  try {
+    if (typeof window === 'undefined') return null
+    const raw = window.localStorage.getItem(ENRICH_TASK_SNAPSHOT_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeEnrichTaskSnapshot(snapshot) {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(ENRICH_TASK_SNAPSHOT_KEY, JSON.stringify(snapshot))
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function clearEnrichTaskSnapshot() {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.removeItem(ENRICH_TASK_SNAPSHOT_KEY)
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 function isBlacklistedLeadStatus(status) {
@@ -2187,6 +2220,7 @@ function App({ initialTab = 'leads' }) {
   }, [])
   const [enrichRetrySeconds, setEnrichRetrySeconds] = useState(0)
   const [enrichRunRequested, setEnrichRunRequested] = useState(false)
+  const [enrichTaskSnapshot, setEnrichTaskSnapshot] = useState(() => readEnrichTaskSnapshot())
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [activeTab, setActiveTab] = useState(initialTabResolved)
   // (job queue removed — direct execution)
@@ -2564,6 +2598,32 @@ function App({ initialTab = 'leads' }) {
   const scrapeTask = tasks.scrape || getIdleTask('scrape')
   const enrichTask = tasks.enrich || getIdleTask('enrich')
   const mailerTask = tasks.mailer || getIdleTask('mailer')
+  const enrichTaskView = useMemo(() => {
+    const liveStatus = String(enrichTask?.status || 'idle').toLowerCase().trim()
+    if (['queued', 'running', 'completed', 'failed', 'stopped'].includes(liveStatus)) {
+      return enrichTask
+    }
+
+    const snapshot = enrichTaskSnapshot && typeof enrichTaskSnapshot === 'object' ? enrichTaskSnapshot : null
+    if (!snapshot) return enrichTask
+
+    const savedAt = Number(snapshot.saved_at || 0)
+    if (!Number.isFinite(savedAt) || (Date.now() - savedAt) > ENRICH_TASK_SNAPSHOT_TTL_MS) {
+      return enrichTask
+    }
+
+    const snapshotStatus = String(snapshot.status || 'idle').toLowerCase().trim()
+    if (!['queued', 'running', 'completed', 'failed', 'stopped'].includes(snapshotStatus)) {
+      return enrichTask
+    }
+
+    return {
+      ...enrichTask,
+      ...snapshot,
+      status: snapshotStatus,
+      running: ['queued', 'running'].includes(snapshotStatus),
+    }
+  }, [enrichTask, enrichTaskSnapshot])
   const scrapeTaskStateRef = useRef({ id: null, status: 'idle' })
   const hardcodedUserRepairAttemptedRef = useRef(false)
 
@@ -2574,11 +2634,40 @@ function App({ initialTab = 'leads' }) {
   }, [mailerTask.running])
 
   useEffect(() => {
-    const status = String(enrichTask.status || 'idle').toLowerCase()
-    if (!enrichTask.running && ['completed', 'failed', 'idle', 'stopped'].includes(status)) {
+    const status = String(enrichTaskView.status || 'idle').toLowerCase()
+    if (!enrichTaskView.running && ['completed', 'failed', 'stopped'].includes(status)) {
       setEnrichRunRequested(false)
     }
-  }, [enrichTask.running, enrichTask.status])
+  }, [enrichTaskView.running, enrichTaskView.status])
+
+  useEffect(() => {
+    const status = String(enrichTask.status || 'idle').toLowerCase().trim()
+    const snapshotCandidate = {
+      id: enrichTask.id || null,
+      task_type: 'enrich',
+      status,
+      running: Boolean(enrichTask.running),
+      created_at: enrichTask.created_at || null,
+      started_at: enrichTask.started_at || null,
+      finished_at: enrichTask.finished_at || null,
+      last_request: enrichTask.last_request || null,
+      result: enrichTask.result || null,
+      error: enrichTask.error || null,
+      saved_at: Date.now(),
+    }
+
+    if (['queued', 'running', 'completed', 'failed', 'stopped'].includes(status)) {
+      setEnrichTaskSnapshot(snapshotCandidate)
+      writeEnrichTaskSnapshot(snapshotCandidate)
+      return
+    }
+
+    const savedAt = Number(enrichTaskSnapshot?.saved_at || 0)
+    if (savedAt > 0 && (Date.now() - savedAt) > ENRICH_TASK_SNAPSHOT_TTL_MS) {
+      setEnrichTaskSnapshot(null)
+      clearEnrichTaskSnapshot()
+    }
+  }, [enrichTask, enrichTaskSnapshot])
 
   useEffect(() => {
     localStorage.setItem(TASK_MANAGER_STORAGE_KEY, JSON.stringify(customTasks))
@@ -3023,9 +3112,9 @@ function App({ initialTab = 'leads' }) {
   }, [scrapeTask, scrapeForm.results])
 
   const enrichProgress = useMemo(() => {
-    const status = String(enrichTask.status || 'idle').toLowerCase()
-    const result = enrichTask.result && typeof enrichTask.result === 'object' ? enrichTask.result : {}
-    const requestedLimit = Number(result.effective_limit || enrichTask.last_request?.limit || enrichForm.limit || 50)
+    const status = String(enrichTaskView.status || 'idle').toLowerCase()
+    const result = enrichTaskView.result && typeof enrichTaskView.result === 'object' ? enrichTaskView.result : {}
+    const requestedLimit = Number(result.effective_limit || enrichTaskView.last_request?.limit || enrichForm.limit || 50)
     const totalFromTask = Number(result.total || requestedLimit || 0)
     const processed = Number(result.processed || 0)
     const queued = Number(result.queued_for_mail || 0)
@@ -3053,9 +3142,9 @@ function App({ initialTab = 'leads' }) {
       currentPhase,
       statusMessage,
       percent,
-      isVisible: ['running', 'completed', 'failed'].includes(status),
+      isVisible: ['queued', 'running', 'completed', 'failed'].includes(status),
     }
-  }, [enrichTask, enrichForm.limit])
+  }, [enrichTaskView, enrichForm.limit])
 
   const mailerProgress = useMemo(() => {
     const baseStatus = String(mailerTask.status || 'idle').toLowerCase()
@@ -5220,8 +5309,15 @@ function App({ initialTab = 'leads' }) {
     } catch (error) {
       const fails = taskFetchFailCountRef.current + 1
       taskFetchFailCountRef.current = fails
-      // Cap delay at 5 minutes; 3s * 2^n
-      const delayMs = Math.min(3000 * Math.pow(2, fails - 1), 5 * 60 * 1000)
+      const liveEnrichStatus = String(tasks?.enrich?.status || '').toLowerCase().trim()
+      const snapshotEnrichStatus = String(enrichTaskSnapshot?.status || '').toLowerCase().trim()
+      const enrichPossiblyActive = enrichRunRequested
+        || ['queued', 'running'].includes(liveEnrichStatus)
+        || ['queued', 'running'].includes(snapshotEnrichStatus)
+
+      // Keep polling tighter while enrichment may still be active.
+      const maxBackoffMs = enrichPossiblyActive ? 15000 : 5 * 60 * 1000
+      const delayMs = Math.min(3000 * Math.pow(2, fails - 1), maxBackoffMs)
       taskFetchBackoffUntilRef.current = Date.now() + delayMs
       console.error('[tasks] fetch failed:', error)
     }
@@ -6458,6 +6554,30 @@ function App({ initialTab = 'leads' }) {
 
     setEnrichRunRequested(true)
 
+    setTasks((prev) => ({
+      ...prev,
+      enrich: {
+        ...(prev?.enrich || getIdleTask('enrich')),
+        status: 'queued',
+        running: true,
+        last_request: {
+          ...(prev?.enrich?.last_request || {}),
+          limit: normalizedBatchSize,
+          lead_ids: selectedLeadIds,
+          headless: Boolean(enrichForm.headless),
+          skip_export: Boolean(enrichForm.skipExport),
+        },
+        result: {
+          processed: 0,
+          with_email: 0,
+          total: selectedLeadIds.length,
+          current_lead: null,
+          status_message: 'Queued for enrichment...',
+        },
+        error: null,
+      },
+    }))
+
     const selectedNiche = String(user?.niche || getStoredValue('lf_niche') || '').trim()
 
     void startTask('enrich', '/api/enrich', {
@@ -7611,7 +7731,7 @@ function App({ initialTab = 'leads' }) {
               step="02"
               title={<span className="flex items-center gap-2">AI Enrichment</span>}
               summary={`${workflowStats.scraped} raw leads need scoring and email discovery`}
-              status={String(enrichTask.status || '').toLowerCase() === 'queued' ? 'Queued' : (enrichRunRequested && enrichTask.running) ? 'Running' : 'Ready'}
+              status={String(enrichTaskView.status || '').toLowerCase() === 'queued' ? 'Queued' : (enrichRunRequested && enrichTaskView.running) ? 'Running' : 'Ready'}
               accent="teal"
             >
               <div className="grid gap-3 sm:grid-cols-2">
@@ -7633,8 +7753,8 @@ function App({ initialTab = 'leads' }) {
                   Heavy traffic! We are processing other leads. Retry in <strong>{enrichRetrySeconds}s</strong>.
                 </div>
               ) : null}
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) || enrichRetrySeconds > 0 || !canRunEnrich} onClick={onEnrichSubmit}>
-                {pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTask.running) ? (
+              <button className="workflow-btn" type="button" disabled={pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTaskView.running) || enrichRetrySeconds > 0 || !canRunEnrich} onClick={onEnrichSubmit}>
+                {pendingRequest === 'enrich' || isAnalyzing || (enrichRunRequested && enrichTaskView.running) ? (
                   <>
                     <RefreshCw className="h-4 w-4 animate-spin" /> AI is analyzing...
                   </>
@@ -7644,7 +7764,7 @@ function App({ initialTab = 'leads' }) {
                   </>
                 ) : (
                   <>
-                    <Sparkles className="h-4 w-4" /> {submitLabel('enrich', enrichTask.running, pendingRequest === 'enrich').replace('Start', 'Run')}
+                    <Sparkles className="h-4 w-4" /> {submitLabel('enrich', enrichTaskView.running, pendingRequest === 'enrich').replace('Start', 'Run')}
                   </>
                 )}
               </button>
@@ -7662,7 +7782,7 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               ) : null}
-              {(pendingRequest === 'enrich' || isAnalyzing || enrichRunRequested || enrichTask.running || enrichRetrySeconds > 0) ? (
+              {(pendingRequest === 'enrich' || isAnalyzing || enrichRunRequested || enrichTaskView.running || enrichRetrySeconds > 0) ? (
                 <button className="workflow-btn" type="button" onClick={resetEnrichUiState} style={{ marginTop: '0.6rem', background: 'linear-gradient(135deg,#334155,#0f172a)' }}>
                   Reset Enrichment Status
                 </button>
@@ -7683,6 +7803,11 @@ function App({ initialTab = 'leads' }) {
                       style={{ width: `${enrichProgress.percent}%` }}
                     />
                   </div>
+                  {enrichProgress.status === 'queued' ? (
+                    <p className="scrape-progress-copy">
+                      ⏳ Enrichment task is queued. Progress will start as soon as a worker slot is available.
+                    </p>
+                  ) : null}
                   {enrichProgress.status === 'running' ? (
                     <p className="scrape-progress-copy">
                       ✨ Processing <span className="scrape-count-pulse">{enrichProgress.processed}</span> / {enrichProgress.total} leads, please wait...
