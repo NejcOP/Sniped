@@ -523,14 +523,19 @@ const creditDecimalFormatter = new Intl.NumberFormat('en-US', {
 })
 
 function formatCreditAmount(value, options = {}) {
-  const { compactThreshold = 10000, compactDecimals = 1 } = options
+  const { compactThreshold = 10000, compactDecimals = 1, compactMode = 'round' } = options
   const numericValue = Number(value || 0)
   if (!Number.isFinite(numericValue)) return '0'
 
   const absValue = Math.abs(numericValue)
   if (absValue >= compactThreshold) {
     const compact = numericValue / 1000
-    const fixedCompact = Number(compact.toFixed(Math.max(0, compactDecimals)))
+    const decimals = Math.max(0, compactDecimals)
+    const factor = 10 ** decimals
+    const adjustedCompact = compactMode === 'floor'
+      ? (compact >= 0 ? Math.floor(compact * factor) : Math.ceil(compact * factor)) / factor
+      : Number(compact.toFixed(decimals))
+    const fixedCompact = Number(adjustedCompact)
     return `${creditDecimalFormatter.format(fixedCompact)}k`
   }
 
@@ -628,7 +633,7 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
           <p className="text-white">Credits</p>
           <p className={`flex items-baseline gap-1 ${creditsLabelClass}`}>
             <span className="text-[1.05rem] font-semibold text-yellow-200">
-              {formatCreditAmount(creditsBalance, { compactDecimals: 1 })}
+              {formatCreditAmount(creditsBalance, { compactDecimals: 1, compactMode: 'floor' })}
             </span>
             <span className="text-[0.95rem] text-slate-500">/</span>
             <span className="text-[0.85rem] font-semibold text-slate-400">
