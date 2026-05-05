@@ -75,6 +75,7 @@ const ONBOARDING_COMPLETED_KEY = 'lf_onboarding_completed_v1'
 const ONBOARDING_DISMISSED_KEY = 'lf_onboarding_dismissed_v1'
 const ENRICH_TASK_SNAPSHOT_KEY = 'lf_enrich_task_snapshot_v1'
 const ENRICH_TASK_SNAPSHOT_TTL_MS = 30 * 60 * 1000
+const CREDITS_SWR_CACHE_KEY = 'lf_credits_swr_cache_v1'
 const BYPASS_LEAD_FILTERS = false
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 
@@ -525,11 +526,6 @@ const creditIntegerFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 0,
 })
 
-const creditDecimalFormatter = new Intl.NumberFormat('en-US', {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 1,
-})
-
 function formatCreditAmount(value, options = {}) {
   const {
     thousandThreshold = 1000,
@@ -631,8 +627,6 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
   billingLoading,
   cancelPending,
   cancelUntilLabel,
-  creditsBalance,
-  monthlyLimit,
   creditsBalanceLabel,
   creditsLimitLabel,
   creditsPercent,
@@ -970,6 +964,38 @@ function replaceTemplatePlaceholders(text, vars) {
     '{YourName}': String(vars?.YourName || ''),
   }
   return Object.entries(map).reduce((acc, [token, value]) => acc.split(token).join(value), payload)
+}
+
+function readStoredNumber(...candidates) {
+  for (const candidate of candidates) {
+    const raw = String(candidate ?? '').trim()
+    if (!raw) continue
+    const value = Number(raw)
+    if (Number.isFinite(value)) return value
+  }
+  return undefined
+}
+
+function readCreditsSwrCache() {
+  try {
+    if (typeof window === 'undefined') return null
+    const raw = window.localStorage.getItem(CREDITS_SWR_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeCreditsSwrCache(cache) {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(CREDITS_SWR_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    // Ignore storage write failures.
+  }
 }
 
 function getIdleTask(taskType) {
@@ -2130,11 +2156,16 @@ function App({ initialTab = 'leads' }) {
   const displayName = getStoredValue('lf_display_name') || getStoredValue('lf_email') || 'there'
   const currentUserEmail = getStoredValue('lf_email') || ''
   const currentUserName = getStoredValue('lf_display_name') || getStoredValue('lf_contact_name') || ''
+  const initialCachedCredits = readStoredNumber(getStoredValue('lf_credits_balance'), getStoredValue('lf_credits'))
+  const initialCachedTopupCredits = readStoredNumber(getStoredValue('lf_topup_credits_balance'))
+  const initialCachedCreditsLimit = readStoredNumber(getStoredValue('lf_credits_limit'))
   const [user, setUser] = useState(() => ({
-    credits: null,
-    credits_balance: null,
-    topup_credits_balance: null,
-    credits_limit: null,
+    credits: initialCachedCredits,
+    credits_balance: initialCachedCredits,
+    topup_credits_balance: initialCachedTopupCredits,
+    credits_limit: initialCachedCreditsLimit,
+    monthly_limit: initialCachedCreditsLimit,
+    monthly_quota: initialCachedCreditsLimit,
     isSubscribed: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     subscription_active: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     subscription_status: '',
@@ -2585,6 +2616,21 @@ function App({ initialTab = 'leads' }) {
   }, [hasSessionToken])
   const taskFetchFailCountRef = useRef(0)
   const taskFetchBackoffUntilRef = useRef(0)
+  const enrichRunRequestedRef = useRef(enrichRunRequested)
+  const enrichTaskSnapshotRef = useRef(enrichTaskSnapshot)
+  const tasksRef = useRef(tasks)
+
+  useEffect(() => {
+    enrichRunRequestedRef.current = enrichRunRequested
+  }, [enrichRunRequested])
+
+  useEffect(() => {
+    enrichTaskSnapshotRef.current = enrichTaskSnapshot
+  }, [enrichTaskSnapshot])
+
+  useEffect(() => {
+    tasksRef.current = tasks
+  }, [tasks])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -4063,6 +4109,14 @@ function App({ initialTab = 'leads' }) {
     }
   }, [scrapeForm.country])
 
+  const refreshSignalLayer = useCallback(async ({ forceRefresh = true, silentNiche = false } = {}) => {
+    await Promise.allSettled([
+      refreshCreditsBalance({ timeoutMs: 2500 }),
+      fetchMailerCampaignStats({ silent: true }),
+      fetchNicheAdvice({ silent: silentNiche, forceRefresh }),
+    ])
+  }, [refreshCreditsBalance, fetchMailerCampaignStats, fetchNicheAdvice])
+
   useEffect(() => {
     if (activeTab !== 'leads') return undefined
     void fetchNicheAdvice({ silent: true, countryCode: scrapeForm.country })
@@ -4141,13 +4195,13 @@ function App({ initialTab = 'leads' }) {
         refreshConfigHealth(),
         refreshLeads(),
         refreshStats(),
+        refreshCreditsBalance({ timeoutMs: 2500 }),
         fetchTaskState(),
         fetchRevenueLog(),
-        fetchNicheAdvice({ silent: true }),
+        refreshSignalLayer({ forceRefresh: true, silentNiche: true }),
         refreshWorkers(),
         refreshDeliveryTasks(),
         refreshUserProfile(),
-        fetchMailerCampaignStats({ silent: true }),
         refreshWeeklyReport({ silent: true }),
         refreshMonthlyReport({ silent: true }),
         refreshClientFolders({ silent: true }),
@@ -4397,13 +4451,26 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     if (!hasSessionToken) return
     try {
-      const staleCreditKeys = ['lf_credits', 'lf_credits_balance', 'lf_topup_credits_balance', 'lf_credits_limit']
-      staleCreditKeys.forEach((key) => {
-        localStorage.removeItem(key)
-        sessionStorage.removeItem(key)
-      })
+      const cache = readCreditsSwrCache()
+      const cachedBalance = Number(cache?.credits_balance)
+      const cachedLimit = Number(cache?.credits_limit)
+      const cachedTopup = Number(cache?.topup_credits_balance)
+      const hasCachedBalance = Number.isFinite(cachedBalance)
+      const hasCachedLimit = Number.isFinite(cachedLimit)
+
+      if (hasCachedBalance || hasCachedLimit) {
+        setUser((prev) => ({
+          ...prev,
+          credits: hasCachedBalance ? cachedBalance : prev.credits,
+          credits_balance: hasCachedBalance ? cachedBalance : prev.credits_balance,
+          topup_credits_balance: Number.isFinite(cachedTopup) ? Math.max(0, cachedTopup) : prev.topup_credits_balance,
+          credits_limit: hasCachedLimit ? Math.max(1, cachedLimit) : prev.credits_limit,
+          monthly_limit: hasCachedLimit ? Math.max(1, cachedLimit) : prev.monthly_limit,
+          monthly_quota: hasCachedLimit ? Math.max(1, cachedLimit) : prev.monthly_quota,
+        }))
+      }
     } catch {
-      // ignore storage clear issues in restricted browser contexts
+      // Ignore cache read issues in restricted browser contexts.
     }
   }, [hasSessionToken])
 
@@ -5297,7 +5364,49 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  async function fetchTaskState(force = false) {
+  const refreshCreditsBalance = useCallback(async (options = {}) => {
+    if (!hasSessionToken) return null
+    try {
+      const data = await fetchJson('/api/user/credits', {
+        method: 'GET',
+        timeoutMs: Number(options?.timeoutMs || 4500),
+      })
+
+      const nextBalance = Number(data?.credits_balance)
+      const nextLimit = Number(data?.credits_limit)
+      const nextTopup = Math.max(0, Number(data?.topup_credits_balance || 0))
+      if (!Number.isFinite(nextBalance)) return null
+
+      const safeBalance = Math.max(0, nextBalance)
+      const safeLimit = Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : DEFAULT_FREE_CREDIT_LIMIT
+
+      setUser((prev) => ({
+        ...prev,
+        credits: safeBalance,
+        credits_balance: safeBalance,
+        credits_limit: safeLimit,
+        monthly_limit: safeLimit,
+        monthly_quota: safeLimit,
+        topup_credits_balance: nextTopup,
+      }))
+
+      localStorage.setItem('lf_credits', String(safeBalance))
+      localStorage.setItem('lf_credits_balance', String(safeBalance))
+      localStorage.setItem('lf_credits_limit', String(safeLimit))
+      localStorage.setItem('lf_topup_credits_balance', String(nextTopup))
+      writeCreditsSwrCache({
+        credits_balance: safeBalance,
+        credits_limit: safeLimit,
+        topup_credits_balance: nextTopup,
+        updated_at: Date.now(),
+      })
+      return data
+    } catch {
+      return null
+    }
+  }, [hasSessionToken])
+
+  const fetchTaskState = useCallback(async (force = false) => {
     // Exponential backoff — skip if we are in a cooldown period
     if (!force && Date.now() < taskFetchBackoffUntilRef.current) return
     try {
@@ -5309,9 +5418,9 @@ function App({ initialTab = 'leads' }) {
     } catch (error) {
       const fails = taskFetchFailCountRef.current + 1
       taskFetchFailCountRef.current = fails
-      const liveEnrichStatus = String(tasks?.enrich?.status || '').toLowerCase().trim()
-      const snapshotEnrichStatus = String(enrichTaskSnapshot?.status || '').toLowerCase().trim()
-      const enrichPossiblyActive = enrichRunRequested
+      const liveEnrichStatus = String(tasksRef.current?.enrich?.status || '').toLowerCase().trim()
+      const snapshotEnrichStatus = String(enrichTaskSnapshotRef.current?.status || '').toLowerCase().trim()
+      const enrichPossiblyActive = enrichRunRequestedRef.current
         || ['queued', 'running'].includes(liveEnrichStatus)
         || ['queued', 'running'].includes(snapshotEnrichStatus)
 
@@ -5321,7 +5430,7 @@ function App({ initialTab = 'leads' }) {
       taskFetchBackoffUntilRef.current = Date.now() + delayMs
       console.error('[tasks] fetch failed:', error)
     }
-  }
+  }, [])
 
   async function refreshSavedSegments({ silent = false } = {}) {
     if (!silent) {
@@ -5386,6 +5495,7 @@ function App({ initialTab = 'leads' }) {
       checkHealth(),
       refreshConfigHealth(),
       refreshStats(),
+      refreshCreditsBalance({ timeoutMs: 2500 }),
       fetchTaskState(),
       fetchPersonalGoal(),
     ]
@@ -5415,7 +5525,7 @@ function App({ initialTab = 'leads' }) {
     }, 3000)
 
     const slowId = window.setInterval(() => {
-      const requests = [checkHealth(), refreshConfigHealth(), refreshStats()]
+      const requests = [checkHealth(), refreshConfigHealth(), refreshStats(), refreshCreditsBalance({ timeoutMs: 2500 })]
 
       if (activeTab === 'leads') {
         requests.push(fetchTaskState(), refreshLeads({ silent: true }), refreshSavedSegments({ silent: true }))
@@ -5440,7 +5550,7 @@ function App({ initialTab = 'leads' }) {
       window.clearInterval(fastId)
       window.clearInterval(slowId)
     }
-  }, [activeTab, fetchMailerCampaignStats, refreshClientDashboard, refreshClientFolders, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
+  }, [activeTab, fetchMailerCampaignStats, fetchTaskState, refreshClientDashboard, refreshClientFolders, refreshCreditsBalance, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
 
   function applySavedSegment(segment) {
     const filters = normalizeSavedSegmentFilters(segment?.filters || {})
@@ -6862,18 +6972,22 @@ function App({ initialTab = 'leads' }) {
   )
   const rawCredits = user?.credits ?? user?.credits_balance
   const rawCreditLimit = user?.monthly_quota ?? user?.monthly_limit ?? user?.creditLimit ?? user?.credits_limit
-  const creditsBalance = Number(rawCredits ?? 0)
+  const hasCreditsValue = rawCredits !== null && rawCredits !== undefined && Number.isFinite(Number(rawCredits))
+  const creditsBalance = hasCreditsValue ? Math.max(0, Number(rawCredits)) : undefined
   const baseCreditsLimit = Math.max(1, Number(rawCreditLimit ?? DEFAULT_FREE_CREDIT_LIMIT))
   const topupCreditsBalance = Math.max(0, Number(user?.topup_credits_balance ?? 0))
-  const creditsLimit = Math.max(baseCreditsLimit, creditsBalance, baseCreditsLimit + topupCreditsBalance)
-  const creditsPercent = Math.max(0, Math.min(100, Math.round((creditsBalance / creditsLimit) * 100)))
-  const creditsReady = !hasSessionToken || profileLoadedFromApi
-  const creditsBalanceLabel = formatCreditAmount(creditsBalance, {
+  const normalizedCreditsBalance = hasCreditsValue ? Number(creditsBalance) : 0
+  const creditsLimit = Math.max(baseCreditsLimit, normalizedCreditsBalance, baseCreditsLimit + topupCreditsBalance)
+  const creditsPercent = hasCreditsValue
+    ? Math.max(0, Math.min(100, Math.round((normalizedCreditsBalance / creditsLimit) * 100)))
+    : 0
+  const creditsReady = !hasSessionToken || profileLoadedFromApi || hasCreditsValue
+  const creditsBalanceLabel = hasCreditsValue ? formatCreditAmount(normalizedCreditsBalance, {
     thousandDecimals: 1,
     thousandMode: 'floor',
     millionDecimals: 2,
     millionMode: 'floor',
-  })
+  }) : '...'
   const creditsLimitLabel = formatCreditAmount(creditsLimit, {
     thousandDecimals: 0,
     thousandMode: 'round',
@@ -6882,10 +6996,11 @@ function App({ initialTab = 'leads' }) {
   })
   const requiredScrapeCreditsLabel = creditIntegerFormatter.format(requiredScrapeCredits)
   const requiredEnrichCreditsLabel = creditIntegerFormatter.format(requiredEnrichCredits)
-  const isOutOfCredits = creditsBalance <= 0
-  const canRunScrape = creditsBalance >= requiredScrapeCredits
-  const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && creditsBalance >= requiredEnrichCredits
-  const isLowOnCredits = creditsBalance > 0 && creditsBalance <= LOW_CREDITS_THRESHOLD
+  const isCreditsLoading = !hasCreditsValue && hasSessionToken && !profileLoadedFromApi
+  const isOutOfCredits = hasCreditsValue && normalizedCreditsBalance === 0
+  const canRunScrape = !hasCreditsValue || normalizedCreditsBalance >= requiredScrapeCredits
+  const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && (!hasCreditsValue || normalizedCreditsBalance >= requiredEnrichCredits)
+  const isLowOnCredits = hasCreditsValue && normalizedCreditsBalance > 0 && normalizedCreditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
     ? `+ ${formatCreditAmount(topupCreditsBalance, { thousandDecimals: 0, millionDecimals: 2 })} top-up credits`
     : ''
@@ -7025,7 +7140,7 @@ function App({ initialTab = 'leads' }) {
     const frameId = window.requestAnimationFrame(() => setAnimatedCreditsPercent(targetPercent))
     return () => window.cancelAnimationFrame(frameId)
   }, [creditsPercent, creditsReady])
-  const isCreditsLow = creditsBalance / creditsLimit < 0.1
+  const isCreditsLow = hasCreditsValue && normalizedCreditsBalance / creditsLimit < 0.1
   const creditsLabelClass = isCreditsLow ? 'text-amber-300' : 'text-yellow-200'
   const resetLabel = useMemo(() => {
     if (hasActiveSubscription && planKey !== 'free') {
@@ -7460,10 +7575,10 @@ function App({ initialTab = 'leads' }) {
                 <button
                   className="sidebar-btn"
                   type="button"
-                  onClick={() => void fetchNicheAdvice({ silent: false, forceRefresh: true })}
-                  disabled={nicheAdvice.loading}
+                  onClick={() => void refreshSignalLayer({ forceRefresh: true, silentNiche: false })}
+                  disabled={nicheAdvice.loading || campaignLoading || refreshingDashboard}
                 >
-                  <RefreshCw className={`h-3.5 w-3.5 ${nicheAdvice.loading ? 'animate-spin' : ''}`} /> Refresh
+                  <RefreshCw className={`h-3.5 w-3.5 ${(nicheAdvice.loading || campaignLoading || refreshingDashboard) ? 'animate-spin' : ''}`} /> Refresh
                 </button>
               </div>
 
@@ -7483,7 +7598,7 @@ function App({ initialTab = 'leads' }) {
                   <button
                     className="mt-2 text-xs text-cyan-400 hover:text-cyan-300 underline"
                     type="button"
-                    onClick={() => void fetchNicheAdvice({ silent: false, forceRefresh: true })}
+                    onClick={() => void refreshSignalLayer({ forceRefresh: true, silentNiche: false })}
                   >
                     Try again
                   </button>
@@ -7562,6 +7677,16 @@ function App({ initialTab = 'leads' }) {
             </div>
           </aside>
         </section>
+
+        {isCreditsLoading ? (
+          <section className="glass-card mb-6 rounded-[24px] border border-slate-700/40 bg-slate-900/50 p-5">
+            <div className="animate-pulse space-y-3">
+              <div className="h-3 w-32 rounded bg-slate-700/70" />
+              <div className="h-6 w-64 rounded bg-slate-700/70" />
+              <div className="h-4 w-full rounded bg-slate-800/80" />
+            </div>
+          </section>
+        ) : null}
 
         {isOutOfCredits ? (
           <section className="glass-card mb-6 rounded-[24px] border border-rose-500/30 bg-rose-500/10 p-5 shadow-[0_12px_40px_rgba(244,63,94,0.18)]">

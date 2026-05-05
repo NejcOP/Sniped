@@ -5331,8 +5331,18 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
 
     CREATE INDEX IF NOT EXISTS idx_users_token
         ON public.users(token);
+    CREATE INDEX IF NOT EXISTS idx_users_id_lookup
+        ON public.users(id);
     CREATE INDEX IF NOT EXISTS idx_users_reset_token
         ON public.users(reset_token);
+
+    DO $$
+    BEGIN
+        IF to_regclass('public.subscriptions') IS NOT NULL THEN
+            EXECUTE 'CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id ON public.subscriptions(user_id)';
+        END IF;
+    END
+    $$;
 
     CREATE TABLE IF NOT EXISTS public.credit_logs (
         id BIGSERIAL PRIMARY KEY,
@@ -8348,13 +8358,6 @@ def deduct_credits_on_success(
         verified_limit = int(verified.get("credits_limit") or credits_limit)
         if verified_balance != next_balance:
             raise HTTPException(status_code=409, detail="Credit balance changed concurrently. Please retry.")
-
-        raw_dev_threshold = cfg.get("developer_score_drop_threshold", 6.0)
-        try:
-            dev_threshold = float(raw_dev_threshold)
-        except (TypeError, ValueError):
-            dev_threshold = 6.0
-        dev_threshold = max(0.0, min(10.0, dev_threshold))
 
         result = {
             "user_id": target_user_id,
@@ -17020,6 +17023,23 @@ def create_app() -> FastAPI:
     def auth_me(request: Request) -> dict:
         token = require_authenticated_session(request)
         return auth_profile(SessionTokenRequest(token=token))
+
+    @app.get("/api/user/credits")
+    def user_credits(request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        snapshot = _load_user_credit_snapshot(user_id, db_path=DEFAULT_DB_PATH)
+        credits_balance = max(0, int(snapshot.get("credits_balance") or 0))
+        credits_limit = max(1, int(snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT))
+        topup_credits_balance = max(0, int(snapshot.get("topup_credits_balance") or 0))
+        return {
+            "user_id": str(snapshot.get("user_id") or user_id),
+            "credits_balance": credits_balance,
+            "credits_limit": credits_limit,
+            "monthly_limit": credits_limit,
+            "monthly_quota": credits_limit,
+            "topup_credits_balance": topup_credits_balance,
+            "updated_at": utc_now_iso(),
+        }
 
     @app.post("/api/stripe/create-portal-session")
     def stripe_create_portal_session(request: Request) -> dict:
