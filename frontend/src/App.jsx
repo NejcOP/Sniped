@@ -5398,14 +5398,6 @@ function App({ initialTab = 'leads' }) {
     }
   }, [hasSessionToken])
 
-  const refreshSignalLayer = useCallback(async ({ forceRefresh = true, silentNiche = false } = {}) => {
-    await Promise.allSettled([
-      refreshCreditsBalance({ timeoutMs: 2500 }),
-      fetchMailerCampaignStats({ silent: true }),
-      fetchNicheAdvice({ silent: silentNiche, forceRefresh }),
-    ])
-  }, [refreshCreditsBalance, fetchMailerCampaignStats, fetchNicheAdvice])
-
   const fetchTaskState = useCallback(async (force = false) => {
     // Exponential backoff — skip if we are in a cooldown period
     if (!force && Date.now() < taskFetchBackoffUntilRef.current) return
@@ -5480,6 +5472,14 @@ function App({ initialTab = 'leads' }) {
       setCampaignLoading(false)
     }
   }, [setLastError])
+
+  const refreshSignalLayer = useCallback(async ({ forceRefresh = true, silentNiche = false } = {}) => {
+    await Promise.allSettled([
+      refreshCreditsBalance({ timeoutMs: 2500 }),
+      fetchMailerCampaignStats({ silent: true }),
+      fetchNicheAdvice({ silent: silentNiche, forceRefresh }),
+    ])
+  }, [refreshCreditsBalance, fetchMailerCampaignStats, fetchNicheAdvice])
 
   useEffect(() => {
     if (activeTab !== 'leads') {
