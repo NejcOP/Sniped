@@ -518,6 +518,8 @@ function BillingTab({
   isSubscribed,
   subscriptionActive,
   credits,
+  topupCreditsBalance,
+  baseCreditsLimit,
   creditsLimit,
   subscriptionStatus,
   subscriptionCancelAt,
@@ -527,9 +529,14 @@ function BillingTab({
   onReactivateSubscription,
   actionLoading,
 }) {
-  const usagePct = Math.max(0, Math.min(100, Math.round((Number(credits || 0) / Math.max(1, Number(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT))) * 100)))
-  const creditsLabel = formatCompactCredits(credits, { thousandDecimals: 1, millionDecimals: 2, mode: 'floor' })
-  const creditsLimitLabel = formatCompactCredits(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT, { thousandDecimals: 0, millionDecimals: 2, mode: 'round' })
+  const rawCredits = Number(credits || 0)
+  const rawTopup = Math.max(0, Number(topupCreditsBalance || 0))
+  const rawBase = Math.max(1, Number(baseCreditsLimit || creditsLimit || DEFAULT_FREE_CREDIT_LIMIT))
+  // Mirror the sidebar formula: max(base, balance, base + topup)
+  const totalAvailableCredits = Math.max(rawBase, rawCredits, rawBase + rawTopup)
+  const usagePct = Math.max(0, Math.min(100, Math.round((rawCredits / totalAvailableCredits) * 100)))
+  const creditsLabel = formatCompactCredits(rawCredits, { thousandDecimals: 1, millionDecimals: 2, mode: 'floor' })
+  const creditsLimitLabel = formatCompactCredits(totalAvailableCredits, { thousandDecimals: 0, millionDecimals: 2, mode: 'round' })
   const normalizedStatus = String(subscriptionStatus || '').toLowerCase().trim()
   const cancelDate = subscriptionCancelAt ? new Date(subscriptionCancelAt) : null
   const cancelDateValid = Boolean(cancelDate && !Number.isNaN(cancelDate.getTime()))
@@ -573,8 +580,8 @@ function BillingTab({
 
       <div className="mt-4 rounded-xl border border-slate-800 bg-[#111827] p-4">
         <div className="mb-2 flex items-center justify-between">
-          <p className="text-sm font-semibold text-white">Credits</p>
-          <p className="text-sm font-semibold text-[#FFC107]">{creditsLabel} / {creditsLimitLabel}</p>
+          <p className="text-sm font-semibold text-white">Credits&nbsp;</p>
+          <p className="text-sm font-semibold text-[#FFC107]">{creditsLabel} / {creditsLimitLabel}</p>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
           <div className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-200" style={{ width: `${usagePct}%` }} />
@@ -761,6 +768,8 @@ export default function SettingsPage() {
     subscriptionActive: String(getStoredValue('lf_is_subscribed') || '').trim().toLowerCase() === 'true',
     planName: String(getStoredValue('lf_plan_name') || 'Free Plan').trim() || 'Free Plan',
     credits: Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || DEFAULT_FREE_CREDIT_LIMIT),
+    topupCreditsBalance: 0,
+    baseCreditsLimit: Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT),
     creditsLimit: Number(getStoredValue('lf_credits_limit') || DEFAULT_FREE_CREDIT_LIMIT),
     subscriptionStatus: '',
     subscriptionCancelAt: null,
@@ -818,6 +827,8 @@ export default function SettingsPage() {
       subscriptionActive,
       planName: String(profileData.currentPlanName || storedPlanName || (isSubscribed ? 'Pro Plan' : 'Free Plan')).trim(),
       credits: Number(profileData.credits ?? profileData.credits_balance ?? storedCredits ?? 0),
+      topupCreditsBalance: Math.max(0, Number(profileData.topup_credits_balance ?? 0)),
+      baseCreditsLimit: Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? storedCreditsLimit ?? DEFAULT_FREE_CREDIT_LIMIT),
       creditsLimit: Number(profileData.creditLimit ?? profileData.monthly_quota ?? profileData.monthly_limit ?? profileData.credits_limit ?? storedCreditsLimit ?? DEFAULT_FREE_CREDIT_LIMIT),
       subscriptionStatus: String(profileData.subscription_status || profileData.subscriptionStatus || '').trim().toLowerCase() || (storedIsSubscribed ? 'active' : ''),
       subscriptionCancelAt: profileData.subscription_cancel_at || null,
@@ -1269,6 +1280,8 @@ export default function SettingsPage() {
                     isSubscribed={billingSnapshot.isSubscribed}
                     subscriptionActive={billingSnapshot.subscriptionActive}
                     credits={billingSnapshot.credits}
+                    topupCreditsBalance={billingSnapshot.topupCreditsBalance}
+                    baseCreditsLimit={billingSnapshot.baseCreditsLimit}
                     creditsLimit={billingSnapshot.creditsLimit}
                     subscriptionStatus={billingSnapshot.subscriptionStatus}
                     subscriptionCancelAt={billingSnapshot.subscriptionCancelAt}
