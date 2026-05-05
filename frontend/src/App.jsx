@@ -625,6 +625,8 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
   cancelUntilLabel,
   creditsBalance,
   monthlyLimit,
+  creditsBalanceLabel,
+  creditsLimitLabel,
   creditsPercent,
   creditsLabelClass,
   creditsLoading,
@@ -655,21 +657,11 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
             ) : (
               <span className={`inline-flex items-baseline gap-1 ${creditsLabelClass}`}>
                 <span className="text-[1.05rem] font-semibold text-yellow-200">
-                  {formatCreditAmount(creditsBalance, {
-                    thousandDecimals: 1,
-                    thousandMode: 'floor',
-                    millionDecimals: 2,
-                    millionMode: 'floor',
-                  })}
+                  {creditsBalanceLabel}
                 </span>
                 <span className="text-[0.95rem] text-slate-500">/</span>
                 <span className="text-[0.85rem] font-semibold text-slate-400">
-                  {formatCreditAmount(monthlyLimit, {
-                    thousandDecimals: 0,
-                    thousandMode: 'round',
-                    millionDecimals: 2,
-                    millionMode: 'round',
-                  })}
+                  {creditsLimitLabel}
                 </span>
               </span>
             )}
@@ -4025,7 +4017,7 @@ function App({ initialTab = 'leads' }) {
                 creditLimit: Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : prevUser.creditLimit,
                 credits_limit: Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : prevUser.credits_limit,
               }))
-              toast.success(`Credits remaining: ${Math.max(0, nextBalance).toLocaleString('en-US')}`)
+              toast.success(`Credits remaining: ${formatCreditAmount(Math.max(0, nextBalance), { thousandDecimals: 1, thousandMode: 'floor', millionDecimals: 2, millionMode: 'floor' })}`)
             }
             const billingWarning = String(cur.result?.billing_warning || '').trim()
             if (billingWarning) {
@@ -6363,7 +6355,7 @@ function App({ initialTab = 'leads' }) {
       return
     }
     if (!canRunScrape) {
-      toast.error(`Not enough credits for this scrape. Need ${requiredScrapeCredits}, available ${creditsBalance}.`)
+      toast.error(`Not enough credits for this scrape. Need ${requiredScrapeCreditsLabel}, available ${creditsBalanceLabel}.`)
       void handleTopUpClick()
       return
     }
@@ -6452,7 +6444,7 @@ function App({ initialTab = 'leads' }) {
 
     const requiredCredits = selectedLeadIds.length * ENRICH_CREDIT_COST_PER_LEAD
     if (creditsBalance < requiredCredits) {
-      toast.error(`Not enough credits for enrichment. Need ${requiredCredits}, available ${creditsBalance}.`)
+      toast.error(`Not enough credits for enrichment. Need ${creditIntegerFormatter.format(requiredCredits)}, available ${creditsBalanceLabel}.`)
       void handleTopUpClick()
       setEnrichRunRequested(false)
       return
@@ -6750,6 +6742,20 @@ function App({ initialTab = 'leads' }) {
   const creditsLimit = Math.max(baseCreditsLimit, creditsBalance, baseCreditsLimit + topupCreditsBalance)
   const creditsPercent = Math.max(0, Math.min(100, Math.round((creditsBalance / creditsLimit) * 100)))
   const creditsReady = !hasSessionToken || profileLoadedFromApi
+  const creditsBalanceLabel = formatCreditAmount(creditsBalance, {
+    thousandDecimals: 1,
+    thousandMode: 'floor',
+    millionDecimals: 2,
+    millionMode: 'floor',
+  })
+  const creditsLimitLabel = formatCreditAmount(creditsLimit, {
+    thousandDecimals: 0,
+    thousandMode: 'round',
+    millionDecimals: 2,
+    millionMode: 'round',
+  })
+  const requiredScrapeCreditsLabel = creditIntegerFormatter.format(requiredScrapeCredits)
+  const requiredEnrichCreditsLabel = creditIntegerFormatter.format(requiredEnrichCredits)
   const isOutOfCredits = creditsBalance <= 0
   const canRunScrape = creditsBalance >= requiredScrapeCredits
   const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && creditsBalance >= requiredEnrichCredits
@@ -6954,6 +6960,8 @@ function App({ initialTab = 'leads' }) {
               cancelUntilLabel={cancelUntilLabel}
               creditsBalance={creditsBalance}
               monthlyLimit={creditsLimit}
+              creditsBalanceLabel={creditsBalanceLabel}
+              creditsLimitLabel={creditsLimitLabel}
               creditsPercent={creditsReady ? animatedCreditsPercent : 0}
               creditsLabelClass={creditsLabelClass}
               creditsLoading={!creditsReady}
@@ -7051,7 +7059,7 @@ function App({ initialTab = 'leads' }) {
                 <div className="flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-950/35 px-2.5 py-1">
                   <Zap className="h-3 w-3 text-amber-300" />
                   <span className={`text-[11px] font-semibold ${creditsLabelClass}`}>
-                    {creditsBalance.toLocaleString('en-US')}
+                    {creditsReady ? creditsBalanceLabel : '...'}
                   </span>
                 </div>
                 <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-slate-800/70 text-[11px] font-semibold text-slate-200">
@@ -7456,7 +7464,7 @@ function App({ initialTab = 'leads' }) {
                 <p className="label-overline text-amber-300">Low credits warning</p>
                 <h3 className="mt-1 text-lg font-semibold text-white">You are running low on credits.</h3>
                 <p className="mt-1 text-sm text-slate-300">
-                  Current balance: {creditsBalance.toLocaleString('en-US')} credits. Scrape uses 1/lead, AI enrichment uses 2/lead.
+                  Current balance: {creditsBalanceLabel} credits. Scrape uses 1/lead, AI enrichment uses 2/lead.
                 </p>
               </div>
               <div className="flex flex-wrap gap-3">
@@ -7539,7 +7547,7 @@ function App({ initialTab = 'leads' }) {
               </button>
               {!canRunScrape ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
-                  <span>Need {requiredScrapeCredits} credits for this scrape. You have {creditsBalance}.</span>
+                  <span>Need {requiredScrapeCreditsLabel} credits for this scrape. You have {creditsBalanceLabel}.</span>
                   <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
                     <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
                   </button>
@@ -7639,7 +7647,7 @@ function App({ initialTab = 'leads' }) {
                   <span>
                     {enrichmentEligibleLeadIds.length <= 0
                       ? 'No eligible leads to enrich right now.'
-                      : `Need ${requiredEnrichCredits} credits for enrichment. You have ${creditsBalance}.`}
+                      : `Need ${requiredEnrichCreditsLabel} credits for enrichment. You have ${creditsBalanceLabel}.`}
                   </span>
                   {enrichmentEligibleLeadIds.length > 0 ? (
                     <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>

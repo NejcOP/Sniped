@@ -76,6 +76,36 @@ async function fetchJson(path, options) {
   return data || {}
 }
 
+function formatCompactCredits(value, options = {}) {
+  const { thousandDecimals = 0, millionDecimals = 2, mode = 'round' } = options
+  const numericValue = Number(value || 0)
+  if (!Number.isFinite(numericValue)) return '0'
+
+  const applyMode = (rawNumber, decimals) => {
+    const safeDecimals = Math.max(0, Number(decimals || 0))
+    const factor = 10 ** safeDecimals
+    if (mode === 'floor') {
+      const scaled = rawNumber * factor
+      const floored = rawNumber >= 0 ? Math.floor(scaled) : Math.ceil(scaled)
+      return floored / factor
+    }
+    return Number(rawNumber.toFixed(safeDecimals))
+  }
+
+  const absValue = Math.abs(numericValue)
+  if (absValue >= 1000000) {
+    const compact = applyMode(numericValue / 1000000, millionDecimals)
+    return `${compact.toLocaleString('en-US', { minimumFractionDigits: millionDecimals, maximumFractionDigits: millionDecimals })}M`
+  }
+
+  if (absValue >= 1000) {
+    const compact = applyMode(numericValue / 1000, thousandDecimals)
+    return `${compact.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: thousandDecimals })}k`
+  }
+
+  return Math.round(numericValue).toLocaleString('en-US')
+}
+
 const SettingsSidebar = memo(function SettingsSidebar({ activeTab, onTabChange }) {
   return (
     <aside className="rounded-xl border border-slate-800 bg-[#0D1117] p-3">
@@ -498,6 +528,8 @@ function BillingTab({
   actionLoading,
 }) {
   const usagePct = Math.max(0, Math.min(100, Math.round((Number(credits || 0) / Math.max(1, Number(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT))) * 100)))
+  const creditsLabel = formatCompactCredits(credits, { thousandDecimals: 1, millionDecimals: 2, mode: 'floor' })
+  const creditsLimitLabel = formatCompactCredits(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT, { thousandDecimals: 0, millionDecimals: 2, mode: 'round' })
   const normalizedStatus = String(subscriptionStatus || '').toLowerCase().trim()
   const cancelDate = subscriptionCancelAt ? new Date(subscriptionCancelAt) : null
   const cancelDateValid = Boolean(cancelDate && !Number.isNaN(cancelDate.getTime()))
@@ -542,7 +574,7 @@ function BillingTab({
       <div className="mt-4 rounded-xl border border-slate-800 bg-[#111827] p-4">
         <div className="mb-2 flex items-center justify-between">
           <p className="text-sm font-semibold text-white">Credits</p>
-          <p className="text-sm font-semibold text-[#FFC107]">{Number(credits || 0).toLocaleString('en-US')} / {Number(creditsLimit || DEFAULT_FREE_CREDIT_LIMIT).toLocaleString('en-US')}</p>
+          <p className="text-sm font-semibold text-[#FFC107]">{creditsLabel} / {creditsLimitLabel}</p>
         </div>
         <div className="h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
           <div className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-200" style={{ width: `${usagePct}%` }} />
