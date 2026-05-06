@@ -31,6 +31,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from sqlalchemy import bindparam, text
 
@@ -66,14 +67,49 @@ BACKOFF_MAX: float = 60.0        # max sleep after repeating errors
 SUPPORTED_TASK_TYPES: tuple[str, ...] = ("scrape", "enrich", "mailer")
 WORKER_STARTED_AT = datetime.now(timezone.utc)
 
+
+def _looks_local_hostname(hostname: str) -> bool:
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return False
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(".local")
+
+
+def _is_railway_runtime() -> bool:
+    return bool(
+        str(os.environ.get("RAILWAY_PROJECT_ID") or "").strip()
+        or str(os.environ.get("RAILWAY_ENVIRONMENT") or "").strip()
+        or str(os.environ.get("RAILWAY_STATIC_URL") or "").strip()
+    )
+
+
+def _resolve_db_url_candidate() -> str:
+    return str(
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("SUPABASE_DATABASE_URL")
+        or os.environ.get("SUPABASE_DB_POOLER_URL")
+        or os.environ.get("SUPABASE_POOLER_URL")
+        or ""
+    ).strip()
+
 # ---------------------------------------------------------------------------
 # Postgres task/runtime helpers
 # ---------------------------------------------------------------------------
 
 def _pg_enabled() -> bool:
-    database_url = str(os.environ.get("DATABASE_URL") or "").strip()
+    database_url = _resolve_db_url_candidate()
     if not database_url:
         return False
+    try:
+        parsed = urlparse(database_url)
+        if _is_railway_runtime() and _looks_local_hostname(str(parsed.hostname or "")):
+            log.error(
+                "Worker DB URL points to local host in Railway runtime (%s). Set DATABASE_URL/SUPABASE_DATABASE_URL to production Supabase.",
+                str(parsed.hostname or "<unknown>"),
+            )
+            return False
+    except Exception:
+        pass
     try:
         get_engine()
     except Exception:
@@ -82,7 +118,8 @@ def _pg_enabled() -> bool:
 
 
 def _log_worker_credential_status() -> None:
-    has_database_url = bool(str(os.environ.get("DATABASE_URL") or "").strip())
+    resolved_db_url = _resolve_db_url_candidate()
+    has_database_url = bool(resolved_db_url)
     has_supabase_url = bool(str(os.environ.get("SUPABASE_URL") or "").strip())
     has_supabase_service_role = bool(str(os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip())
 
@@ -94,7 +131,29 @@ def _log_worker_credential_status() -> None:
     )
 
     if not has_database_url:
-        log.error("DATABASE_URL is missing; worker cannot claim or update tasks.")
+        log.error("DATABASE_URL/SUPABASE_DATABASE_URL is missing; worker cannot claim or update tasks.")
+    elif _is_railway_runtime():
+        try:
+            parsed_db = urlparse(resolved_db_url)
+            if _looks_local_hostname(str(parsed_db.hostname or "")):
+                log.error(
+                    "DB URL is local in Railway runtime (%s). Railway must point to production Supabase Postgres.",
+                    str(parsed_db.hostname or "<unknown>"),
+                )
+        except Exception:
+            pass
+
+        try:
+            raw_supabase_url = str(os.environ.get("SUPABASE_URL") or "").strip()
+            if raw_supabase_url:
+                parsed_supabase = urlparse(raw_supabase_url)
+                if _looks_local_hostname(str(parsed_supabase.hostname or "")):
+                    log.error(
+                        "SUPABASE_URL is local in Railway runtime (%s). It must reference the production Supabase project.",
+                        str(parsed_supabase.hostname or "<unknown>"),
+                    )
+        except Exception:
+            pass
     if has_supabase_url and not has_supabase_service_role:
         log.warning("SUPABASE_SERVICE_ROLE_KEY is missing; Supabase writes may fail under RLS policies.")
 

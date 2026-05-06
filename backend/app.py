@@ -5006,6 +5006,42 @@ def load_supabase_settings(config_path: Path) -> dict:
     }
 
 
+def _looks_local_hostname(hostname: str) -> bool:
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return False
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(".local")
+
+
+def _is_railway_runtime() -> bool:
+    return bool(
+        str(os.environ.get("RAILWAY_PROJECT_ID") or "").strip()
+        or str(os.environ.get("RAILWAY_ENVIRONMENT") or "").strip()
+        or str(os.environ.get("RAILWAY_STATIC_URL") or "").strip()
+    )
+
+
+def _ensure_sslmode_require(db_url: str) -> str:
+    raw = str(db_url or "").strip()
+    if not raw:
+        return raw
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return raw
+
+    scheme = str(parsed.scheme or "").lower()
+    if not scheme.startswith("postgres"):
+        return raw
+
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    sslmode = str(query.get("sslmode") or "").strip().lower()
+    if sslmode == "require":
+        return raw
+    query["sslmode"] = "require"
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
 def ensure_supabase_runtime(context: str = "backend") -> dict[str, Any]:
     settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
     if not settings.get("enabled"):
@@ -11041,6 +11077,35 @@ def create_app() -> FastAPI:
         print(f"[startup] CORS allowed origins: {', '.join(allowed_cors_origins)}")
         supabase_settings = load_supabase_settings(DEFAULT_CONFIG_PATH)
         resolved_db_url = unquote(str(supabase_settings.get("resolved_database_url") or supabase_settings.get("database_url") or "").strip())
+        resolved_db_url = _ensure_sslmode_require(resolved_db_url)
+
+        if _is_railway_runtime():
+            supabase_url = str(supabase_settings.get("url") or "").strip()
+            if supabase_url:
+                try:
+                    supabase_host = str(urlparse(supabase_url).hostname or "")
+                    if _looks_local_hostname(supabase_host):
+                        raise RuntimeError(
+                            "SUPABASE_URL points to a local address in Railway runtime. "
+                            "Set SUPABASE_URL to the production Supabase project URL."
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+            if resolved_db_url:
+                try:
+                    db_host = str(urlparse(resolved_db_url).hostname or "")
+                    if _looks_local_hostname(db_host):
+                        raise RuntimeError(
+                            "DATABASE_URL/SUPABASE_DATABASE_URL points to a local address in Railway runtime. "
+                            "Set it to the production Supabase Postgres URL."
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+
         if resolved_db_url:
             os.environ["DATABASE_URL"] = resolved_db_url
             os.environ["SUPABASE_DATABASE_URL"] = resolved_db_url
