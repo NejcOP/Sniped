@@ -2671,12 +2671,14 @@ function App({ initialTab = 'leads' }) {
   const [mailerScheduledHour, setMailerScheduledHour] = useState('now')
   const [mailerHourOpen, setMailerHourOpen] = useState(false)
   const [mailerStopRequested, setMailerStopRequested] = useState(false)
+  const [scrapeSuccessLeadsFound, setScrapeSuccessLeadsFound] = useState(null)
   const previousTasksRef = useRef({})
   const leadSearchRef = useRef(null)
   const workflowRef = useRef(null)
   const mainPanelRef = useRef(null)
   const pendingDeletesRef = useRef({})
   const checkoutRedirectHandledRef = useRef('')
+  const scrapeSuccessResetTimerRef = useRef(null)
 
   useEffect(() => {
     if (hasSessionToken) return
@@ -2703,6 +2705,13 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     tasksRef.current = tasks
   }, [tasks])
+
+  useEffect(() => () => {
+    if (scrapeSuccessResetTimerRef.current) {
+      window.clearTimeout(scrapeSuccessResetTimerRef.current)
+      scrapeSuccessResetTimerRef.current = null
+    }
+  }, [])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -3207,7 +3216,7 @@ function App({ initialTab = 'leads' }) {
     const phase = String(result.phase || '')
     const statusMessage = String(result.status_message || '').trim()
     // isLoading = scraper launched but Maps hasn't returned any card yet
-    const isLoading = (status === 'running' || status === 'queued' || status === 'processing') && currentFound === 0 && scannedCount === 0
+    const isLoading = (status === 'running' || status === 'queued' || status === 'processing' || status === 'pending') && currentFound === 0 && scannedCount === 0
 
     let percent = 0
     if (totalToFind > 0) {
@@ -3225,9 +3234,20 @@ function App({ initialTab = 'leads' }) {
       phase,
       statusMessage,
       isLoading,
-      isVisible: ['queued', 'running', 'processing', 'completed', 'failed'].includes(status),
+      isVisible: ['queued', 'running', 'processing', 'pending', 'completed', 'failed'].includes(status),
     }
   }, [scrapeTask, scrapeForm.results])
+
+  const scrapeRuntimeStatus = String(scrapeTask.status || 'idle').toLowerCase().trim()
+  const scrapeIsActive = ['queued', 'running', 'processing', 'pending'].includes(scrapeRuntimeStatus)
+  const scrapeCardStatusLabel = scrapeIsActive
+    ? 'RUNNING'
+    : scrapeRuntimeStatus === 'completed'
+      ? 'SUCCESS'
+      : scrapeRuntimeStatus === 'failed'
+        ? 'FAILED'
+        : 'READY'
+  const scrapeButtonLocked = pendingRequest === 'scrape' || scrapeIsActive || Boolean(scrapeSuccessLeadsFound) || !canRunScrape
 
   const enrichProgress = useMemo(() => {
     const status = String(enrichTaskView.status || 'idle').toLowerCase()
@@ -3998,7 +4018,7 @@ function App({ initialTab = 'leads' }) {
     const currentStatus = String(scrapeTask.status || 'idle').toLowerCase()
     const sameTask = previous.id === scrapeTask.id
     const transitionedToCompleted = sameTask
-      ? (previous.status === 'running' || previous.status === 'queued') && currentStatus === 'completed'
+      ? ['running', 'queued', 'processing', 'pending'].includes(previous.status) && currentStatus === 'completed'
       : currentStatus === 'completed'
 
     if (transitionedToCompleted) {
@@ -4198,7 +4218,7 @@ function App({ initialTab = 'leads' }) {
       const cur = tasks[taskType]
       const prev = previousTasks[taskType]
       if (!cur || !prev) continue
-      const wasRunning = ['queued', 'running'].includes(String(prev.status || '').toLowerCase())
+      const wasRunning = ['queued', 'running', 'processing', 'pending'].includes(String(prev.status || '').toLowerCase())
       const isCompleted = String(cur.status || '').toLowerCase() === 'completed'
       const isFailed = String(cur.status || '').toLowerCase() === 'failed'
       const sameTask = cur.id === prev.id
@@ -4206,6 +4226,15 @@ function App({ initialTab = 'leads' }) {
         toast.success(`${taskLabels[taskType]} completed`)
         if (taskType === 'scrape') {
           const inserted = Number(cur.result?.inserted || 0)
+          const leadsFound = Number(cur.result?.scraped || cur.result?.current_found || inserted || 0)
+          setScrapeSuccessLeadsFound(Math.max(0, leadsFound))
+          if (scrapeSuccessResetTimerRef.current) {
+            window.clearTimeout(scrapeSuccessResetTimerRef.current)
+          }
+          scrapeSuccessResetTimerRef.current = window.setTimeout(() => {
+            setScrapeSuccessLeadsFound(null)
+            scrapeSuccessResetTimerRef.current = null
+          }, 3000)
           if (inserted > 0) shootConfetti()
           if (inserted > 0) {
             // Make newly scraped rows visible immediately.
@@ -4243,6 +4272,13 @@ function App({ initialTab = 'leads' }) {
         invalidateLeadsCache() // clear SWR cache so next open shows fresh leads
       }
       if (wasRunning && sameTask && isFailed) {
+        if (taskType === 'scrape') {
+          if (scrapeSuccessResetTimerRef.current) {
+            window.clearTimeout(scrapeSuccessResetTimerRef.current)
+            scrapeSuccessResetTimerRef.current = null
+          }
+          setScrapeSuccessLeadsFound(null)
+        }
         toast.error(`${taskLabels[taskType]} failed`)
         if (cur.error) setLastError(String(cur.error))
         void Promise.allSettled([refreshLeads(), refreshStats(), refreshConfigHealth()])
@@ -5488,7 +5524,7 @@ function App({ initialTab = 'leads' }) {
         const nextScrape = next?.scrape
         const prevScrapeStatus = String(prevScrape?.status || '').toLowerCase().trim()
         const nextScrapeStatus = String(nextScrape?.status || '').toLowerCase().trim()
-        const prevScrapeActive = ['queued', 'running', 'processing'].includes(prevScrapeStatus)
+        const prevScrapeActive = ['queued', 'running', 'processing', 'pending'].includes(prevScrapeStatus)
         const nextScrapeMissingOrIdle = !nextScrape || !nextScrapeStatus || nextScrapeStatus === 'idle'
         if (prevScrapeActive && nextScrapeMissingOrIdle) {
           next.scrape = prevScrape
@@ -5502,7 +5538,7 @@ function App({ initialTab = 'leads' }) {
       const liveScrapeStatus = String(tasksRef.current?.scrape?.status || '').toLowerCase().trim()
       const liveEnrichStatus = String(tasksRef.current?.enrich?.status || '').toLowerCase().trim()
       const snapshotEnrichStatus = String(enrichTaskSnapshotRef.current?.status || '').toLowerCase().trim()
-      const scrapePossiblyActive = ['queued', 'running', 'processing'].includes(liveScrapeStatus)
+      const scrapePossiblyActive = ['queued', 'running', 'processing', 'pending'].includes(liveScrapeStatus)
       const enrichPossiblyActive = enrichRunRequestedRef.current
         || ['queued', 'running'].includes(liveEnrichStatus)
         || ['queued', 'running'].includes(snapshotEnrichStatus)
@@ -7849,7 +7885,7 @@ function App({ initialTab = 'leads' }) {
               step="01"
               title="Search & Scrape"
               summary={`${workflowStats.scraped} leads waiting for enrichment`}
-              status={scrapeTask.running ? 'Running' : 'Ready'}
+              status={scrapeCardStatusLabel}
               accent="cyan"
             >
               <div className="grid gap-3 sm:grid-cols-2">
@@ -7884,8 +7920,20 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               </div>
-              <button className="workflow-btn" type="button" disabled={pendingRequest === 'scrape' || scrapeTask.running || !canRunScrape} onClick={onScrapeSubmit}>
-                <Database className="h-4 w-4" /> {submitLabel('scrape', scrapeTask.running, pendingRequest === 'scrape').replace('Start', 'Launch')}
+              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked} onClick={onScrapeSubmit}>
+                {scrapeSuccessLeadsFound ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
+                  </>
+                ) : scrapeIsActive || pendingRequest === 'scrape' ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Scraper Running...
+                  </>
+                ) : (
+                  <>
+                    <Database className="h-4 w-4" /> Launch Scrape
+                  </>
+                )}
               </button>
               {!canRunScrape ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
@@ -7909,7 +7957,7 @@ function App({ initialTab = 'leads' }) {
                       style={scrapeProgress.isLoading ? {} : { width: `${scrapeProgress.percent}%` }}
                     />
                   </div>
-                  {scrapeProgress.status === 'queued' ? (
+                  {scrapeProgress.status === 'queued' || scrapeProgress.status === 'pending' ? (
                     <p className="scrape-progress-copy">
                       ⏳ Scrape queued, waiting for worker slot...
                     </p>
@@ -7919,7 +7967,7 @@ function App({ initialTab = 'leads' }) {
                       {scrapeProgress.statusMessage || '🌐 Launching browser and opening Google Maps... (cold start can take up to ~30s)'}
                     </p>
                   ) : null}
-                  {scrapeProgress.status === 'running' && !scrapeProgress.isLoading ? (
+                  {['running', 'processing', 'pending'].includes(scrapeProgress.status) && !scrapeProgress.isLoading ? (
                     <p className="scrape-progress-copy">
                       {scrapeProgress.statusMessage || (
                         <>
