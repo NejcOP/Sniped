@@ -3207,6 +3207,7 @@ function App({ initialTab = 'leads' }) {
   const scrapeProgress = useMemo(() => {
     const status = String(scrapeTask.status || 'idle').toLowerCase()
     const result = scrapeTask.result && typeof scrapeTask.result === 'object' ? scrapeTask.result : {}
+    const taskError = String(scrapeTask.error || '').trim()
     const requestedFromTask = Number(scrapeTask.last_request?.results || 0)
     const requestedFromForm = Number(scrapeForm.results || 0)
     const totalToFind = Number(result.total_to_find || requestedFromTask || requestedFromForm || 0)
@@ -3214,7 +3215,7 @@ function App({ initialTab = 'leads' }) {
     const scannedCount = Number(result.scanned_count || 0)
     const inserted = Number(result.inserted || (status === 'completed' ? result.scraped || 0 : 0))
     const phase = String(result.phase || '')
-    const statusMessage = String(result.status_message || '').trim()
+    const statusMessage = String(result.status_message || taskError || '').trim()
     // isLoading = scraper launched but Maps hasn't returned any card yet
     const isLoading = (status === 'running' || status === 'queued' || status === 'processing' || status === 'pending') && currentFound === 0 && scannedCount === 0
 
@@ -5524,9 +5525,9 @@ function App({ initialTab = 'leads' }) {
         const nextScrape = next?.scrape
         const prevScrapeStatus = String(prevScrape?.status || '').toLowerCase().trim()
         const nextScrapeStatus = String(nextScrape?.status || '').toLowerCase().trim()
-        const prevScrapeActive = ['queued', 'running', 'processing', 'pending'].includes(prevScrapeStatus)
+        const prevScrapeSticky = ['queued', 'running', 'processing', 'pending', 'failed'].includes(prevScrapeStatus)
         const nextScrapeMissingOrIdle = !nextScrape || !nextScrapeStatus || nextScrapeStatus === 'idle'
-        if (prevScrapeActive && nextScrapeMissingOrIdle) {
+        if (prevScrapeSticky && nextScrapeMissingOrIdle) {
           next.scrape = prevScrape
         }
         return next
@@ -7983,7 +7984,9 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                   {scrapeProgress.status === 'failed' ? (
                     <p className="scrape-progress-copy is-error">
-                      Stopped at {scrapeProgress.currentFound}. Check logs for details.
+                      {scrapeProgress.statusMessage
+                        ? `Scrape failed: ${scrapeProgress.statusMessage}`
+                        : `Scrape failed: Stopped at ${scrapeProgress.currentFound}. Check logs for details.`}
                     </p>
                   ) : null}
                 </div>

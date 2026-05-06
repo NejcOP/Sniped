@@ -81,6 +81,24 @@ def _pg_enabled() -> bool:
     return True
 
 
+def _log_worker_credential_status() -> None:
+    has_database_url = bool(str(os.environ.get("DATABASE_URL") or "").strip())
+    has_supabase_url = bool(str(os.environ.get("SUPABASE_URL") or "").strip())
+    has_supabase_service_role = bool(str(os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip())
+
+    log.info(
+        "Worker credential check | DATABASE_URL=%s SUPABASE_URL=%s SUPABASE_SERVICE_ROLE_KEY=%s",
+        "set" if has_database_url else "missing",
+        "set" if has_supabase_url else "missing",
+        "set" if has_supabase_service_role else "missing",
+    )
+
+    if not has_database_url:
+        log.error("DATABASE_URL is missing; worker cannot claim or update tasks.")
+    if has_supabase_url and not has_supabase_service_role:
+        log.warning("SUPABASE_SERVICE_ROLE_KEY is missing; Supabase writes may fail under RLS policies.")
+
+
 def _runtime_upsert(key: str, value: str) -> None:
     if not _pg_enabled():
         return
@@ -255,6 +273,7 @@ async def poll_loop() -> None:
     in_flight_tasks: set[asyncio.Task[Any]] = set()
     consecutive_empty = 0
     connection_failures = 0
+    _log_worker_credential_status()
     log.info(
         "Worker %s started | concurrency=%d | poll_interval=%.1fs",
         WORKER_ID,

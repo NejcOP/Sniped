@@ -532,13 +532,17 @@ class GoogleMapsScraper:
         if not self.page:
             raise RuntimeError("Scraper not started. Use with-context or call start().")
 
+        logging.info("Navigating to URL | keyword=%r country=%s headless=%s", keyword, self.country_code, bool(self.headless))
         self._open_maps_and_search(keyword)
+        logging.info("Waiting for results | keyword=%r", keyword)
         # Small human-like idle before first interaction/scroll.
         random_delay(1000, 3000)
         leads: List[Lead] = []
         seen_cards = set()
         stalled_rounds = 0
         scanned_count = 0
+        headless_no_results_snapshot_taken = False
+        results_found_logged = False
         started_at = time.monotonic()
         last_progress_at = started_at
         last_keep_alive_at = started_at
@@ -571,6 +575,24 @@ class GoogleMapsScraper:
             cards = self.page.locator("a[href*='/maps/place/']")
             count = cards.count()
             before_seen = len(seen_cards)
+
+            if count > 0 and not results_found_logged:
+                logging.info("Results found | cards=%s keyword=%r", count, keyword)
+                results_found_logged = True
+            elif count == 0:
+                logging.info("Waiting for results | cards=0 elapsed=%ss", int(elapsed_seconds))
+
+            if self.headless and count == 0 and scanned_count == 0 and elapsed_seconds >= 10 and not headless_no_results_snapshot_taken:
+                screenshot_path = self._capture_debug_screenshot(reason="headless_no_results_10s")
+                logging.warning(
+                    "No results found after 10s in headless mode. Saved debug screenshot=%s url=%s",
+                    screenshot_path or "<none>",
+                    str(self.page.url or ""),
+                )
+                headless_no_results_snapshot_taken = True
+
+            if count > 0:
+                logging.info("Starting extraction | cards=%s found=%s scanned=%s", count, len(leads), scanned_count)
 
             for idx in range(count):
                 if len(leads) >= max_results:
@@ -834,7 +856,7 @@ class GoogleMapsScraper:
 
         for url in url_candidates:
             try:
-                logging.info("Trying Maps URL candidate: %s", url)
+                logging.info("Navigating to URL | candidate=%s", url)
                 self._goto_with_retry(url)
                 self._accept_consent_if_present()
                 try:
@@ -842,7 +864,9 @@ class GoogleMapsScraper:
                 except Exception:
                     pass
                 random_delay(900, 1700)
+                logging.info("Waiting for results | candidate=%s", url)
                 if self._wait_for_any_result_signal(timeout_ms=20000):
+                    logging.info("Results found | candidate=%s", url)
                     return True
             except Exception as exc:
                 logging.warning("Maps URL candidate failed: %s | reason=%s", url, exc)
@@ -858,6 +882,7 @@ class GoogleMapsScraper:
         ]
         for base_url in base_urls:
             try:
+                logging.info("Navigating to URL | searchbox_base=%s", base_url)
                 self._goto_with_retry(base_url)
                 self._accept_consent_if_present()
                 random_mouse_movements(self.page, count=3)
@@ -875,7 +900,9 @@ class GoogleMapsScraper:
                 random_delay(1000, 1900)
                 self._accept_consent_if_present()
 
+                logging.info("Waiting for results | searchbox_base=%s", base_url)
                 if self._wait_for_any_result_signal(timeout_ms=20000):
+                    logging.info("Results found | searchbox_base=%s", base_url)
                     return True
             except Exception as exc:
                 logging.warning("Search-box fallback failed on %s: %s", base_url, exc)
