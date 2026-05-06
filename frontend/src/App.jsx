@@ -3247,7 +3247,7 @@ function App({ initialTab = 'leads' }) {
       : scrapeRuntimeStatus === 'failed'
         ? 'FAILED'
         : 'READY'
-  const scrapeButtonLocked = pendingRequest === 'scrape' || scrapeIsActive || Boolean(scrapeSuccessLeadsFound) || !canRunScrape
+  const scrapeButtonLocked = pendingRequest === 'scrape' || scrapeIsActive || Boolean(scrapeSuccessLeadsFound)
 
   const enrichProgress = useMemo(() => {
     const status = String(enrichTaskView.status || 'idle').toLowerCase()
@@ -7920,7 +7920,7 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               </div>
-              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked} onClick={onScrapeSubmit}>
+              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked || !canRunScrape} onClick={onScrapeSubmit}>
                 {scrapeSuccessLeadsFound ? (
                   <>
                     <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
