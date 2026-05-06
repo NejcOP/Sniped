@@ -54,7 +54,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import Footer from './Footer'
-import { getStoredValue } from './authStorage'
+import { clearUserSession, getStoredValue } from './authStorage'
 import { appToasterProps } from './toastTheme'
 // ── Performance modules ────────────────────────────────────────────────────
 import { useDebounce } from './hooks/useDebounce'
@@ -1060,10 +1060,79 @@ function normalizeLeadStatus(status) {
 
 const REQUEST_ABORT_REGISTRY = new Map()
 const RESPONSE_CACHE_REGISTRY = new Map()
+let AUTH_REDIRECT_IN_PROGRESS = false
 const ENDPOINT_CACHE_RULES = [
   { prefix: '/api/config', ttlMs: 45000 },
   { prefix: '/api/workers', ttlMs: 12000 },
 ]
+
+function buildLoginRedirectPath() {
+  try {
+    if (typeof window === 'undefined') return '/login'
+    const rawSearch = new URLSearchParams(window.location.search || '')
+    const activeTab = String(rawSearch.get('tab') || '').trim().toLowerCase()
+    const cleanAppTarget = activeTab ? `/app?tab=${encodeURIComponent(activeTab)}` : '/app'
+    return `/login?redirect=${encodeURIComponent(cleanAppTarget)}`
+  } catch {
+    return '/login'
+  }
+}
+
+async function forceLogoutToLogin(reason = 'auth_failed') {
+  void reason
+  if (AUTH_REDIRECT_IN_PROGRESS) return
+  AUTH_REDIRECT_IN_PROGRESS = true
+
+  try {
+    if (typeof window !== 'undefined' && window?.supabase?.auth?.signOut) {
+      await window.supabase.auth.signOut()
+    }
+  } catch {
+    // Ignore Supabase sign-out failures; local session cleanup still runs.
+  }
+
+  try {
+    clearUserSession()
+    localStorage.removeItem('lf_credits_swr_cache_v1')
+  } catch {
+    // Ignore browser storage errors.
+  }
+
+  try {
+    if (typeof window !== 'undefined') {
+      const nextUrl = buildLoginRedirectPath()
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.replace(nextUrl)
+      }
+    }
+  } catch {
+    // Ignore redirect edge-cases.
+  }
+}
+
+function isAuthInvalidError(error) {
+  const status = Number(error?.status || 0)
+  if (status === 401) return true
+  const detail = String(error?.message || error?.detail || '').toLowerCase()
+  return detail.includes('authentication required')
+    || detail.includes('invalid or expired session token')
+    || detail.includes('authenticated user does not exist')
+    || detail.includes('profile')
+}
+
+if (!axios.__LF_AUTH_INTERCEPTOR_ATTACHED__) {
+  axios.__LF_AUTH_INTERCEPTOR_ATTACHED__ = true
+  axios.interceptors.response.use(
+    (response) => response,
+    async (error) => {
+      const status = Number(error?.response?.status || 0)
+      if (status === 401) {
+        await forceLogoutToLogin('axios_401')
+      }
+      return Promise.reject(error)
+    },
+  )
+}
 
 function getEndpointCacheTtl(pathname) {
   const normalized = String(pathname || '').toLowerCase()
@@ -1184,6 +1253,9 @@ async function fetchJson(path, options) {
       const error = new Error(detail)
       error.status = response.status
       error.path = requestUrl
+      if (Number(response.status || 0) === 401) {
+        await forceLogoutToLogin('fetch_401')
+      }
       throw error
     }
 
@@ -4433,7 +4505,11 @@ function App({ initialTab = 'leads' }) {
       setProfileLoadedFromApi(true)
       setProfileHydrated(true)
       return data
-    } catch {
+    } catch (error) {
+      if (isAuthInvalidError(error)) {
+        await forceLogoutToLogin('profile_missing_or_invalid')
+        return null
+      }
       // Keep existing credits values if profile call fails.
       setProfileHydrated(true)
       return null
