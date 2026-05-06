@@ -12114,6 +12114,22 @@ def create_app() -> FastAPI:
             },
         }
 
+    @app.get("/api/tasks/{task_id}")
+    def task_by_id(task_id: int, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
+        task = fetch_task_by_id(DEFAULT_DB_PATH, int(task_id), user_id=user_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        status = str(task.get("status") or "idle").lower()
+        return {
+            **task,
+            "running": status in ACTIVE_TASK_STATUSES,
+            "result": task.get("result") if isinstance(task.get("result"), dict) else {},
+            "status": task.get("status") or "idle",
+        }
+
     @app.get("/api/task")
     def task_alias(request: Request, task_type: str = Query("scrape")) -> dict:
         user_id = require_current_user_id(request)

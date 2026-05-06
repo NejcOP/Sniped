@@ -76,6 +76,7 @@ const ONBOARDING_DISMISSED_KEY = 'lf_onboarding_dismissed_v1'
 const ENRICH_TASK_SNAPSHOT_KEY = 'lf_enrich_task_snapshot_v1'
 const ENRICH_TASK_SNAPSHOT_TTL_MS = 30 * 60 * 1000
 const CREDITS_SWR_CACHE_KEY = 'lf_credits_swr_cache_v1'
+const SCRAPE_ACTIVE_TASK_ID_KEY = 'lf_active_scrape_task_id_v1'
 const BYPASS_LEAD_FILTERS = false
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 
@@ -2671,6 +2672,14 @@ function App({ initialTab = 'leads' }) {
   const [mailerScheduledHour, setMailerScheduledHour] = useState('now')
   const [mailerHourOpen, setMailerHourOpen] = useState(false)
   const [mailerStopRequested, setMailerStopRequested] = useState(false)
+  const [activeScrapeTaskId, setActiveScrapeTaskId] = useState(() => {
+    try {
+      const raw = Number(window.localStorage.getItem(SCRAPE_ACTIVE_TASK_ID_KEY) || 0)
+      return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : null
+    } catch {
+      return null
+    }
+  })
   const [scrapeSuccessLeadsFound, setScrapeSuccessLeadsFound] = useState(null)
   const previousTasksRef = useRef({})
   const leadSearchRef = useRef(null)
@@ -2693,6 +2702,7 @@ function App({ initialTab = 'leads' }) {
   const enrichRunRequestedRef = useRef(enrichRunRequested)
   const enrichTaskSnapshotRef = useRef(enrichTaskSnapshot)
   const tasksRef = useRef(tasks)
+  const activeScrapeTaskIdRef = useRef(activeScrapeTaskId)
 
   useEffect(() => {
     enrichRunRequestedRef.current = enrichRunRequested
@@ -2705,6 +2715,19 @@ function App({ initialTab = 'leads' }) {
   useEffect(() => {
     tasksRef.current = tasks
   }, [tasks])
+
+  useEffect(() => {
+    activeScrapeTaskIdRef.current = activeScrapeTaskId
+    try {
+      if (Number.isFinite(Number(activeScrapeTaskId)) && Number(activeScrapeTaskId) > 0) {
+        window.localStorage.setItem(SCRAPE_ACTIVE_TASK_ID_KEY, String(Math.trunc(Number(activeScrapeTaskId))))
+      } else {
+        window.localStorage.removeItem(SCRAPE_ACTIVE_TASK_ID_KEY)
+      }
+    } catch {
+      // Ignore storage errors in constrained browsers.
+    }
+  }, [activeScrapeTaskId])
 
   useEffect(() => () => {
     if (scrapeSuccessResetTimerRef.current) {
@@ -3212,6 +3235,8 @@ function App({ initialTab = 'leads' }) {
     const requestedFromForm = Number(scrapeForm.results || 0)
     const totalToFind = Number(result.total_to_find || requestedFromTask || requestedFromForm || 0)
     const currentFound = Number(result.current_found || (status === 'completed' ? result.scraped || 0 : 0))
+    const currentInDb = Number(result.inserted || 0)
+    const progressCurrent = Math.max(currentInDb, currentFound)
     const scannedCount = Number(result.scanned_count || 0)
     const inserted = Number(result.inserted || (status === 'completed' ? result.scraped || 0 : 0))
     const phase = String(result.phase || '')
@@ -3221,7 +3246,7 @@ function App({ initialTab = 'leads' }) {
 
     let percent = 0
     if (totalToFind > 0) {
-      percent = Math.min(100, Math.round((currentFound / totalToFind) * 100))
+      percent = Math.min(100, Math.round((progressCurrent / totalToFind) * 100))
     }
     if (status === 'completed') percent = 100
 
@@ -3229,6 +3254,8 @@ function App({ initialTab = 'leads' }) {
       status,
       totalToFind,
       currentFound,
+      currentInDb,
+      progressCurrent,
       scannedCount,
       inserted,
       percent,
@@ -4024,6 +4051,21 @@ function App({ initialTab = 'leads' }) {
 
     if (transitionedToCompleted) {
       void refreshLeads({ silent: false })
+    }
+
+    if (Number(scrapeTask.id || 0) > 0) {
+      setActiveScrapeTaskId(Number(scrapeTask.id))
+    }
+
+    if (['completed', 'failed'].includes(currentStatus)) {
+      const tracked = Number(activeScrapeTaskIdRef.current || 0)
+      if (tracked > 0 && tracked === Number(scrapeTask.id || 0)) {
+        window.setTimeout(() => {
+          if (activeScrapeTaskIdRef.current === tracked) {
+            setActiveScrapeTaskId(null)
+          }
+        }, 4000)
+      }
     }
 
     scrapeTaskStateRef.current = { id: scrapeTask.id, status: currentStatus }
@@ -5515,12 +5557,54 @@ function App({ initialTab = 'leads' }) {
     // Exponential backoff — skip if we are in a cooldown period
     if (!force && Date.now() < taskFetchBackoffUntilRef.current) return
     try {
+      const trackedScrapeId = Number(activeScrapeTaskIdRef.current || 0)
+      const trackedTaskPromise = trackedScrapeId > 0
+        ? fetchJson(`/api/tasks/${trackedScrapeId}`).catch(() => null)
+        : Promise.resolve(null)
       const data = await fetchJson('/api/tasks')
+      const trackedTask = await trackedTaskPromise
       taskFetchFailCountRef.current = 0
       taskFetchBackoffUntilRef.current = 0
       setTasks((prev) => {
         const incoming = data.tasks && typeof data.tasks === 'object' ? data.tasks : {}
+        const history = Array.isArray(data.history) ? data.history : []
         const next = { ...incoming }
+
+        const trackedScrapeId = Number(activeScrapeTaskIdRef.current || prev?.scrape?.id || 0)
+        if (trackedScrapeId > 0) {
+          const explicitTrackedCandidate = trackedTask
+            && Number(trackedTask?.id || 0) === trackedScrapeId
+            && String(trackedTask?.task_type || '').toLowerCase() === 'scrape'
+              ? {
+                ...trackedTask,
+                task_type: 'scrape',
+                running: ['queued', 'running', 'processing', 'pending'].includes(String(trackedTask.status || '').toLowerCase()),
+              }
+              : null
+          const nextScrapeCandidate = next?.scrape && Number(next.scrape?.id || 0) === trackedScrapeId ? next.scrape : null
+          const historyScrapeCandidate = history.find((entry) => Number(entry?.id || 0) === trackedScrapeId)
+          const prevScrapeCandidate = prev?.scrape && Number(prev.scrape?.id || 0) === trackedScrapeId
+            ? prev.scrape
+            : null
+
+          if (explicitTrackedCandidate) {
+            next.scrape = explicitTrackedCandidate
+          } else if (nextScrapeCandidate) {
+            next.scrape = nextScrapeCandidate
+          } else if (historyScrapeCandidate && String(historyScrapeCandidate.task_type || '').toLowerCase() === 'scrape') {
+            next.scrape = {
+              ...historyScrapeCandidate,
+              task_type: 'scrape',
+              running: ['queued', 'running', 'processing', 'pending'].includes(String(historyScrapeCandidate.status || '').toLowerCase()),
+            }
+          } else if (prevScrapeCandidate) {
+            const prevStatus = String(prevScrapeCandidate.status || '').toLowerCase().trim()
+            if (['queued', 'running', 'processing', 'pending'].includes(prevStatus)) {
+              next.scrape = prevScrapeCandidate
+            }
+          }
+        }
+
         const prevScrape = prev?.scrape
         const nextScrape = next?.scrape
         const prevScrapeStatus = String(prevScrape?.status || '').toLowerCase().trim()
@@ -6706,15 +6790,20 @@ function App({ initialTab = 'leads' }) {
     setPendingRequest('scrape')
     setLastError('')
     try {
-      await fetchJson('/api/scrape', {
+      const response = await fetchJson('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keyword, results, country, headless, export_targets: exportTargets, min_rating: 3.5, speed_mode: speedMode }),
       })
+      const launchedTaskId = Number(response?.task_id || 0)
+      if (Number.isFinite(launchedTaskId) && launchedTaskId > 0) {
+        setActiveScrapeTaskId(launchedTaskId)
+      }
       setTasks((prev) => ({
         ...prev,
         scrape: {
           ...(prev?.scrape || getIdleTask('scrape')),
+          id: (Number.isFinite(launchedTaskId) && launchedTaskId > 0) ? launchedTaskId : prev?.scrape?.id || null,
           status: 'queued',
           running: true,
           last_request: {
@@ -7972,7 +8061,7 @@ function App({ initialTab = 'leads' }) {
                     <p className="scrape-progress-copy">
                       {scrapeProgress.statusMessage || (
                         <>
-                          🔍 <span className="scrape-count-pulse">{scrapeProgress.currentFound}</span> / {scrapeProgress.totalToFind || Number(scrapeForm.results || 0)} leads found… (scanned {scrapeProgress.scannedCount})
+                          🔍 <span className="scrape-count-pulse">{scrapeProgress.progressCurrent}</span> / {scrapeProgress.totalToFind || Number(scrapeForm.results || 0)} leads found… (scanned {scrapeProgress.scannedCount})
                         </>
                       )}
                     </p>
@@ -7986,7 +8075,7 @@ function App({ initialTab = 'leads' }) {
                     <p className="scrape-progress-copy is-error">
                       {scrapeProgress.statusMessage
                         ? `Scrape failed: ${scrapeProgress.statusMessage}`
-                        : `Scrape failed: Stopped at ${scrapeProgress.currentFound}. Check logs for details.`}
+                        : `Scrape failed: Stopped at ${scrapeProgress.progressCurrent}. Check logs for details.`}
                     </p>
                   ) : null}
                 </div>
