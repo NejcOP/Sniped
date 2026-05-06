@@ -8696,14 +8696,20 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     )
     requested_total = int(payload_data.get("results", 25))
     progress_state: dict[str, Any] = {
-        "phase": "scraping",
+        "phase": "processing",
         "total_to_find": requested_total,
         "current_found": 0,
         "scanned_count": 0,
         "inserted": 0,
-        "status_message": "Scrape task started.",
+        "status_message": f"Scraped 0/{requested_total}",
     }
     heartbeat_stop = Event()
+
+    def _safe_update_progress() -> None:
+        try:
+            update_task_progress(db_path, task_id, progress_state)
+        except Exception:
+            logging.debug("[scrape-task:%s] Progress update failed", task_id)
 
     def _scrape_heartbeat() -> None:
         while not heartbeat_stop.wait(10):
@@ -8716,8 +8722,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             try:
                 progress_state["heartbeat_ts"] = datetime.now(timezone.utc).isoformat()
                 if str(progress_state.get("status_message") or "").strip() == "":
-                    progress_state["status_message"] = f"Searching... Found 0 / {requested_total} (scanned 0)"
-                update_task_progress(db_path, task_id, progress_state)
+                    progress_state["status_message"] = f"Scraped {int(progress_state.get('current_found') or 0)}/{requested_total}"
+                _safe_update_progress()
             except Exception:
                 logging.debug("[scrape-task:%s] Heartbeat progress update failed", task_id)
 
@@ -8727,7 +8733,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     try:
         mark_task_running(db_path, task_id)
         logging.info("[scrape-task:%s] Marked task as running", task_id)
-        update_task_progress(db_path, task_id, progress_state)
+        _safe_update_progress()
         logging.info("[scrape-task:%s] Initial progress state saved", task_id)
 
         force_headless = str(os.environ.get("SCRAPE_FORCE_HEADLESS", "1") or "1").strip().lower() in {
@@ -8772,22 +8778,25 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             _proxy_url = None
 
         def _on_progress(current_found: int, total_to_find: int, scanned_count: int, _lead: Any) -> None:
-            progress_state["phase"] = "scraping"
-            progress_state["current_found"] = int(current_found)
-            progress_state["total_to_find"] = int(total_to_find or requested_total)
-            progress_state["scanned_count"] = int(scanned_count)
-            progress_state["status_message"] = (
-                f"Searching... Found {int(current_found)} / {int(total_to_find or requested_total)} "
-                f"(scanned {int(scanned_count)})"
-            )
-            update_task_progress(db_path, task_id, progress_state)
-            logging.info(
-                "[scrape-task:%s] Progress | found=%s | target=%s | scanned=%s",
-                task_id,
-                int(current_found),
-                int(total_to_find or requested_total),
-                int(scanned_count),
-            )
+            try:
+                progress_state["phase"] = "processing"
+                progress_state["current_found"] = int(current_found)
+                progress_state["total_to_find"] = int(total_to_find or requested_total)
+                progress_state["scanned_count"] = int(scanned_count)
+                progress_state["status_message"] = (
+                    f"Scraped {int(current_found)}/{int(total_to_find or requested_total)}"
+                    f" (scanned {int(scanned_count)})"
+                )
+                _safe_update_progress()
+                logging.info(
+                    "[scrape-task:%s] Progress | found=%s | target=%s | scanned=%s",
+                    task_id,
+                    int(current_found),
+                    int(total_to_find or requested_total),
+                    int(scanned_count),
+                )
+            except Exception:
+                logging.exception("[scrape-task:%s] Progress callback failed unexpectedly", task_id)
 
             # Keep the Maps loop hot by default: per-lead persistence is opt-in.
             progress_save_mode = str(os.environ.get("SCRAPE_PROGRESS_SAVE_MODE", "off") or "off").strip().lower()
@@ -8810,7 +8819,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         def _scrape_once(headless_value: bool):
             progress_state["status_message"] = "Launching browser..."
-            update_task_progress(db_path, task_id, progress_state)
+            _safe_update_progress()
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
             logging.info("[scrape-task:%s] Navigating to Google Maps search...", task_id)
             logging.info(
@@ -8827,7 +8836,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 proxy_urls=_proxy_urls or None,
             ) as scraper:
                 progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
-                update_task_progress(db_path, task_id, progress_state)
+                _safe_update_progress()
                 return scraper.scrape(
                     keyword=str(payload_data.get("keyword", "")),
                     max_results=int(payload_data.get("results", 25)),
@@ -8876,14 +8885,14 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     progress_state.get("scanned_count", 0),
                 )
                 if int(progress_state.get("current_found", 0) or 0) == 0 and int(progress_state.get("scanned_count", 0) or 0) == 0:
-                    progress_state["status_message"] = f"Searching... Found 0 / {requested_total} (scanned 0)"
-                elif not str(progress_state.get("status_message") or "").startswith("Searching..."):
+                    progress_state["status_message"] = f"Scraped 0/{requested_total} (scanned 0)"
+                elif not str(progress_state.get("status_message") or "").startswith("Scraped "):
                     progress_state["status_message"] = (
-                        f"Searching... Found {progress_state.get('current_found', 0)}"
-                        f" / {progress_state.get('total_to_find', requested_total)}"
+                        f"Scraped {progress_state.get('current_found', 0)}"
+                        f"/{progress_state.get('total_to_find', requested_total)}"
                         f" (scanned {progress_state.get('scanned_count', 0)})"
                     )
-                update_task_progress(db_path, task_id, progress_state)
+                _safe_update_progress()
 
                 if elapsed_wait >= int(boot_timeout_seconds):
                     break
@@ -8916,7 +8925,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             leads = [lead for lead in leads if not is_slovenia_address(getattr(lead, "address", None))]
 
         total_scraped_from_maps = len(leads)
-        progress_state["status_message"] = f"Found {total_scraped_from_maps} results from Google Maps."
+        progress_state["status_message"] = f"Scraped {total_scraped_from_maps}/{requested_total} from Google Maps."
+        _safe_update_progress()
         logging.info("[scrape-task:%s] Google Maps search finished | leads_found=%s", task_id, total_scraped_from_maps)
 
         deep_scan_mode = str(os.environ.get("SCRAPE_DEEP_SCAN_MODE", "off") or "off").strip().lower()
@@ -8926,7 +8936,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 progress_state["deep_crawled"] = 0
                 progress_state["deep_total"] = len([lead for lead in leads if str(getattr(lead, "website_url", "") or "").strip() not in {"", "None", "none"}])
                 progress_state["status_message"] = "Deep enrichment crawl started..."
-                update_task_progress(db_path, task_id, progress_state)
+                _safe_update_progress()
 
                 deep_crawl_concurrency = min(10, max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "8") or "8")))
                 deep_crawl_timeout = max(4, int(os.environ.get("SCRAPE_DEEP_CRAWL_TIMEOUT_SECONDS", "12") or "12"))
@@ -8940,7 +8950,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                         f"Deep crawl {int(done_count)}/{int(total_count)}"
                         + (f" — {str(lead_name or '').strip()}" if str(lead_name or '').strip() else "")
                     )
-                    update_task_progress(db_path, task_id, progress_state)
+                    _safe_update_progress()
 
                 logging.info(
                     "[scrape-task:%s] Starting deep crawl enrichment | leads=%s concurrency=%s timeout=%ss",
@@ -8959,7 +8969,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 )
                 progress_state["deep_crawled"] = int(deep_crawl_result.get("crawled") or 0)
                 progress_state["deep_total"] = int(deep_crawl_result.get("eligible") or 0)
-                update_task_progress(db_path, task_id, progress_state)
+                _safe_update_progress()
                 logging.info(
                     "[scrape-task:%s] Deep crawl enrichment completed | crawled=%s eligible=%s",
                     task_id,
@@ -9066,7 +9076,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         progress_state["current_found"] = total_scraped_from_maps
         progress_state["total_to_find"] = requested_total
         progress_state["status_message"] = f"Saving {inserted} leads to database..."
-        update_task_progress(db_path, task_id, progress_state)
+        _safe_update_progress()
 
         with pgdb.connect(db_path) as conn:
             conn.execute(

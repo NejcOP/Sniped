@@ -3207,7 +3207,7 @@ function App({ initialTab = 'leads' }) {
     const phase = String(result.phase || '')
     const statusMessage = String(result.status_message || '').trim()
     // isLoading = scraper launched but Maps hasn't returned any card yet
-    const isLoading = (status === 'running' || status === 'queued') && currentFound === 0 && scannedCount === 0
+    const isLoading = (status === 'running' || status === 'queued' || status === 'processing') && currentFound === 0 && scannedCount === 0
 
     let percent = 0
     if (totalToFind > 0) {
@@ -3225,7 +3225,7 @@ function App({ initialTab = 'leads' }) {
       phase,
       statusMessage,
       isLoading,
-      isVisible: ['queued', 'running', 'completed', 'failed'].includes(status),
+      isVisible: ['queued', 'running', 'processing', 'completed', 'failed'].includes(status),
     }
   }, [scrapeTask, scrapeForm.results])
 
@@ -5481,19 +5481,34 @@ function App({ initialTab = 'leads' }) {
       const data = await fetchJson('/api/tasks')
       taskFetchFailCountRef.current = 0
       taskFetchBackoffUntilRef.current = 0
-      setTasks(data.tasks || {})
+      setTasks((prev) => {
+        const incoming = data.tasks && typeof data.tasks === 'object' ? data.tasks : {}
+        const next = { ...incoming }
+        const prevScrape = prev?.scrape
+        const nextScrape = next?.scrape
+        const prevScrapeStatus = String(prevScrape?.status || '').toLowerCase().trim()
+        const nextScrapeStatus = String(nextScrape?.status || '').toLowerCase().trim()
+        const prevScrapeActive = ['queued', 'running', 'processing'].includes(prevScrapeStatus)
+        const nextScrapeMissingOrIdle = !nextScrape || !nextScrapeStatus || nextScrapeStatus === 'idle'
+        if (prevScrapeActive && nextScrapeMissingOrIdle) {
+          next.scrape = prevScrape
+        }
+        return next
+      })
       setTaskHistory(Array.isArray(data.history) ? data.history : [])
     } catch (error) {
       const fails = taskFetchFailCountRef.current + 1
       taskFetchFailCountRef.current = fails
+      const liveScrapeStatus = String(tasksRef.current?.scrape?.status || '').toLowerCase().trim()
       const liveEnrichStatus = String(tasksRef.current?.enrich?.status || '').toLowerCase().trim()
       const snapshotEnrichStatus = String(enrichTaskSnapshotRef.current?.status || '').toLowerCase().trim()
+      const scrapePossiblyActive = ['queued', 'running', 'processing'].includes(liveScrapeStatus)
       const enrichPossiblyActive = enrichRunRequestedRef.current
         || ['queued', 'running'].includes(liveEnrichStatus)
         || ['queued', 'running'].includes(snapshotEnrichStatus)
 
       // Keep polling tighter while enrichment may still be active.
-      const maxBackoffMs = enrichPossiblyActive ? 15000 : 5 * 60 * 1000
+      const maxBackoffMs = (scrapePossiblyActive || enrichPossiblyActive) ? 15000 : 5 * 60 * 1000
       const delayMs = Math.min(3000 * Math.pow(2, fails - 1), maxBackoffMs)
       taskFetchBackoffUntilRef.current = Date.now() + delayMs
       console.error('[tasks] fetch failed:', error)

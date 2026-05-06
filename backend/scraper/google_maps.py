@@ -575,83 +575,86 @@ class GoogleMapsScraper:
             for idx in range(count):
                 if len(leads) >= max_results:
                     break
-
-                card = cards.nth(idx)
-                card_key = self._card_key(card, idx)
-                if card_key in seen_cards:
-                    continue
-
-                card_title = self._card_title(card)
-                logging.info("Scanned business candidate idx=%s title=%r", idx, card_title)
-
-                seen_cards.add(card_key)
-                scanned_count += 1
-                last_progress_at = time.monotonic()
-                if progress_callback is not None:
-                    try:
-                        progress_callback(len(leads), max_results, scanned_count, None)
-                    except Exception:
-                        logging.debug("Progress callback failed during card scan; continuing scrape.")
-                if not self._open_card(card):
-                    website_hint = self._click_result_website_fallback(card)
-                    fallback_lead = self._extract_business_from_global_html(
-                        keyword=keyword,
-                        card_title=card_title,
-                        website_hint=website_hint,
-                    )
-                    if fallback_lead:
-                        leads.append(fallback_lead)
-                        last_progress_at = time.monotonic()
-                        logging.warning(
-                            "Recovered lead via global HTML fallback idx=%s title=%r website=%r phone=%r",
-                            idx,
-                            card_title,
-                            fallback_lead.website_url,
-                            fallback_lead.phone_number,
-                        )
-                        if progress_callback is not None:
-                            try:
-                                progress_callback(len(leads), max_results, scanned_count, fallback_lead)
-                            except Exception:
-                                logging.debug("Progress callback failed after global fallback lead extraction.")
+                try:
+                    card = cards.nth(idx)
+                    card_key = self._card_key(card, idx)
+                    if card_key in seen_cards:
                         continue
 
-                    screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
-                    logging.warning(
-                        "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
-                        idx,
-                        card_title,
-                        str(self.page.url or ""),
-                        screenshot_path or "<none>",
-                    )
-                    self._log_card_preview(card, idx, reason="open_card_failed")
-                    continue
+                    card_title = self._card_title(card)
+                    logging.info("Scanned business candidate idx=%s title=%r", idx, card_title)
 
-                lead = self._extract_business(keyword)
-                if not lead:
-                    screenshot_path = self._capture_debug_screenshot(reason=f"scanned_no_data_{card_title or idx}")
-                    logging.warning(
-                        "Scanned business yielded no extractable data idx=%s title=%r url=%s screenshot=%s",
-                        idx,
-                        card_title,
-                        str(self.page.url or ""),
-                        screenshot_path or "<none>",
-                    )
-                    self._log_card_preview(card, idx, reason="extract_business_empty")
-                    self._dump_first_result_html(reason="extract_business_empty")
-                    continue
-
-                if lead.business_name and lead.address:
-                    leads.append(lead)
+                    seen_cards.add(card_key)
+                    scanned_count += 1
                     last_progress_at = time.monotonic()
                     if progress_callback is not None:
                         try:
-                            progress_callback(len(leads), max_results, scanned_count, lead)
+                            progress_callback(len(leads), max_results, scanned_count, None)
                         except Exception:
-                            logging.debug("Progress callback failed; continuing scrape.")
+                            logging.debug("Progress callback failed during card scan; continuing scrape.")
+                    if not self._open_card(card):
+                        website_hint = self._click_result_website_fallback(card)
+                        fallback_lead = self._extract_business_from_global_html(
+                            keyword=keyword,
+                            card_title=card_title,
+                            website_hint=website_hint,
+                        )
+                        if fallback_lead:
+                            leads.append(fallback_lead)
+                            last_progress_at = time.monotonic()
+                            logging.warning(
+                                "Recovered lead via global HTML fallback idx=%s title=%r website=%r phone=%r",
+                                idx,
+                                card_title,
+                                fallback_lead.website_url,
+                                fallback_lead.phone_number,
+                            )
+                            if progress_callback is not None:
+                                try:
+                                    progress_callback(len(leads), max_results, scanned_count, fallback_lead)
+                                except Exception:
+                                    logging.debug("Progress callback failed after global fallback lead extraction.")
+                            continue
 
-                random_mouse_movements(self.page, count=random.randint(2, 4))
-                random_delay(300, 900)
+                        screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
+                        logging.warning(
+                            "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
+                            idx,
+                            card_title,
+                            str(self.page.url or ""),
+                            screenshot_path or "<none>",
+                        )
+                        self._log_card_preview(card, idx, reason="open_card_failed")
+                        continue
+
+                    lead = self._extract_business(keyword)
+                    if not lead:
+                        screenshot_path = self._capture_debug_screenshot(reason=f"scanned_no_data_{card_title or idx}")
+                        logging.warning(
+                            "Scanned business yielded no extractable data idx=%s title=%r url=%s screenshot=%s",
+                            idx,
+                            card_title,
+                            str(self.page.url or ""),
+                            screenshot_path or "<none>",
+                        )
+                        self._log_card_preview(card, idx, reason="extract_business_empty")
+                        self._dump_first_result_html(reason="extract_business_empty")
+                        continue
+
+                    if lead.business_name and lead.address:
+                        leads.append(lead)
+                        last_progress_at = time.monotonic()
+                        if progress_callback is not None:
+                            try:
+                                progress_callback(len(leads), max_results, scanned_count, lead)
+                            except Exception:
+                                logging.debug("Progress callback failed; continuing scrape.")
+
+                    random_mouse_movements(self.page, count=random.randint(2, 4))
+                    random_delay(300, 900)
+                except Exception as lead_exc:
+                    logging.exception("Failed to process lead card idx=%s; continuing scrape: %s", idx, lead_exc)
+                    continue
 
             if len(seen_cards) == before_seen:
                 stalled_rounds += 1

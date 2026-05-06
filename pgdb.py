@@ -85,8 +85,19 @@ def _rewrite_schema_sql(sql_text: str) -> str:
     return rewritten
 
 
+def _rewrite_datetime_ordering_sql(sql_text: str) -> str:
+    # PostgreSQL does not support SQLite-style datetime(text) ordering helpers.
+    return re.sub(
+        r"ORDER\s+BY\s+datetime\(\s*([\w.\"]*occurred_at)\s*\)\s*(ASC|DESC)?",
+        lambda m: f"ORDER BY {m.group(1)} {(m.group(2) or 'DESC').upper()}",
+        sql_text,
+        flags=re.IGNORECASE,
+    )
+
+
 def _prepare_query(sql: Any, params: Optional[Sequence[Any] | dict[str, Any]] = None) -> _PreparedQuery:
     raw_sql = _coerce_sql(sql).strip().rstrip(";")
+    raw_sql = _rewrite_datetime_ordering_sql(raw_sql)
     if not raw_sql:
         return _PreparedQuery(sql="SELECT 1 WHERE 1=0", params={}, noop=True)
 

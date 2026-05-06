@@ -919,9 +919,24 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: Optional[str] = None, use
             session.commit()
         except Exception:
             session.rollback()
+            inserted_count = 0
             for idx, payload in enumerate(payloads, start=1):
-                _log_payload_types(f"batch_upsert_leads#{idx}", payload)
-            raise
+                try:
+                    fallback_stmt = _build_lead_upsert_statement(
+                        [payload],
+                        session.bind.dialect.name if session.bind is not None else "",
+                    )
+                    if fallback_stmt is None:
+                        session.merge(LeadRecord(**payload))
+                    else:
+                        session.execute(fallback_stmt)
+                    session.commit()
+                    inserted_count += 1
+                except Exception:
+                    session.rollback()
+                    _log_payload_types(f"batch_upsert_leads#{idx}", payload)
+                    logging.exception("Skipping invalid lead payload at batch index=%s", idx)
+            return inserted_count
         return len(payloads)
 
 
