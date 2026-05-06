@@ -546,6 +546,9 @@ class GoogleMapsScraper:
         started_at = time.monotonic()
         last_progress_at = started_at
         last_keep_alive_at = started_at
+        # Emit a progress heartbeat at least every 3 leads to keep the backend
+        # aware that the scrape is still alive (prevents orphan-task resets).
+        _last_heartbeat_lead_count = 0
 
         while len(leads) < max_results and stalled_rounds < 8:
             now = time.monotonic()
@@ -671,6 +674,14 @@ class GoogleMapsScraper:
                                 progress_callback(len(leads), max_results, scanned_count, lead)
                             except Exception:
                                 logging.debug("Progress callback failed; continuing scrape.")
+                        # Emit an extra heartbeat every 3 leads to ensure the backend
+                        # sees recent activity even if the per-lead callback is throttled.
+                        if progress_callback is not None and (len(leads) - _last_heartbeat_lead_count) >= 3:
+                            _last_heartbeat_lead_count = len(leads)
+                            try:
+                                progress_callback(len(leads), max_results, scanned_count, None)
+                            except Exception:
+                                logging.debug("Progress heartbeat callback failed; continuing scrape.")
 
                     random_mouse_movements(self.page, count=random.randint(2, 4))
                     random_delay(300, 900)

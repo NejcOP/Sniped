@@ -3251,7 +3251,12 @@ function App({ initialTab = 'leads' }) {
     const scannedCount = Number(result.scanned_count || 0)
     const inserted = Number(result.inserted || (status === 'completed' ? result.scraped || 0 : 0))
     const phase = String(result.phase || '')
-    const statusMessage = String(result.status_message || taskError || '').trim()
+    // When the backend orphan-resets a running task the error contains this phrase.
+    const isOrphanReset = taskError.toLowerCase().includes('worker not active in current process')
+    // Show a friendlier message for auto-reset; otherwise use the task's own message.
+    const statusMessage = isOrphanReset
+      ? `Reset by server — ${progressCurrent} lead${progressCurrent !== 1 ? 's' : ''} saved`
+      : String(result.status_message || taskError || '').trim()
     // isLoading = scraper launched but Maps hasn't returned any card yet
     const isLoading = (status === 'running' || status === 'queued' || status === 'processing' || status === 'pending') && currentFound === 0 && scannedCount === 0
 
@@ -3273,7 +3278,9 @@ function App({ initialTab = 'leads' }) {
       phase,
       statusMessage,
       isLoading,
-      isVisible: ['queued', 'running', 'processing', 'pending', 'completed', 'failed'].includes(status),
+      isOrphanReset,
+      // Keep bar visible on 'stopped' so progress is not lost if server reset the task.
+      isVisible: ['queued', 'running', 'processing', 'pending', 'completed', 'failed', 'stopped'].includes(status),
     }
   }, [scrapeTask, scrapeForm.results])
 

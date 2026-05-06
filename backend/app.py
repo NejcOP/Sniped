@@ -91,7 +91,7 @@ ACTIVE_TASK_STATUSES = {"queued", "running"}
 TASK_HISTORY_LIMIT = 25
 STALE_QUEUED_TASK_SECONDS = 180
 STALE_RUNNING_TASK_SECONDS = 7200
-ORPHAN_TASK_GRACE_SECONDS = 15
+ORPHAN_TASK_GRACE_SECONDS = 300
 SMTP_TEST_RECIPIENT = "opnjc06@gmail.com"
 TRACKING_PIXEL_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
 SYSTEM_SMTP_DEFAULT_SEND_LIMIT = max(1, int(os.environ.get("SNIPED_SYSTEM_SMTP_SEND_LIMIT", "50") or 50))
@@ -7832,7 +7832,21 @@ def launch_detached_task(executor: Callable[[FastAPI, dict], Any], app: FastAPI,
 
 
 def _task_reference_time(task: dict) -> Optional[datetime]:
-    return parse_iso_datetime(task.get("started_at")) or parse_iso_datetime(task.get("created_at"))
+    """Return the most recent known timestamp for a task.
+
+    Checks (in order of freshness): heartbeat_ts from result payload,
+    then started_at, then created_at.  Using the most recent value
+    prevents orphan-resets for tasks that are still producing heartbeats
+    but whose thread registry entry is missing (e.g. worker process).
+    """
+    candidates: list[Optional[datetime]] = []
+    result = task.get("result")
+    if isinstance(result, dict):
+        candidates.append(parse_iso_datetime(result.get("heartbeat_ts")))
+    candidates.append(parse_iso_datetime(task.get("started_at")))
+    candidates.append(parse_iso_datetime(task.get("created_at")))
+    valid = [t for t in candidates if t is not None]
+    return max(valid) if valid else None
 
 
 def _is_task_thread_alive(app: FastAPI, task_id: Optional[int]) -> bool:
@@ -8823,6 +8837,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     f"Scraped {int(current_found)}/{int(total_to_find or requested_total)}"
                     f" (scanned {int(scanned_count)})"
                 )
+                # Keep heartbeat_ts fresh on every progress update so orphan
+                # detection never fires while the scrape is actively running.
+                progress_state["heartbeat_ts"] = datetime.now(timezone.utc).isoformat()
                 _safe_update_progress()
                 logging.info(
                     "[scrape-task:%s] Progress | found=%s | target=%s | scanned=%s",
