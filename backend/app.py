@@ -25,7 +25,7 @@ from functools import wraps
 from pathlib import Path
 from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Callable, List, Optional
-from urllib.parse import quote_plus, unquote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
