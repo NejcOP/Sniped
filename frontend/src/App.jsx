@@ -1205,6 +1205,7 @@ async function fetchJson(path, options) {
   const isDynamicPollingEndpoint =
     method === 'GET' && (
       normalizedPath === '/api/tasks'
+      || normalizedPath.startsWith('/api/tasks/')
       || normalizedPath === '/api/task'
       || normalizedPath === '/api/stats'
     )
@@ -5558,8 +5559,14 @@ function App({ initialTab = 'leads' }) {
     if (!force && Date.now() < taskFetchBackoffUntilRef.current) return
     try {
       const trackedScrapeId = Number(activeScrapeTaskIdRef.current || 0)
+      let trackedTaskMissing = false
       const trackedTaskPromise = trackedScrapeId > 0
-        ? fetchJson(`/api/tasks/${trackedScrapeId}`).catch(() => null)
+        ? fetchJson(`/api/tasks/${trackedScrapeId}`).catch((error) => {
+          if (Number(error?.status || 0) === 404) {
+            trackedTaskMissing = true
+          }
+          return null
+        })
         : Promise.resolve(null)
       const data = await fetchJson('/api/tasks')
       const trackedTask = await trackedTaskPromise
@@ -5616,6 +5623,9 @@ function App({ initialTab = 'leads' }) {
         }
         return next
       })
+      if (trackedTaskMissing) {
+        setActiveScrapeTaskId(null)
+      }
       setTaskHistory(Array.isArray(data.history) ? data.history : [])
     } catch (error) {
       const fails = taskFetchFailCountRef.current + 1
