@@ -2704,6 +2704,8 @@ function App({ initialTab = 'leads' }) {
   const enrichTaskSnapshotRef = useRef(enrichTaskSnapshot)
   const tasksRef = useRef(tasks)
   const activeScrapeTaskIdRef = useRef(activeScrapeTaskId)
+  const scrapeStatusRef = useRef(String(tasks?.scrape?.status || 'idle').toLowerCase().trim())
+  const scrape500RetryTimerRef = useRef(null)
 
   useEffect(() => {
     enrichRunRequestedRef.current = enrichRunRequested
@@ -2715,6 +2717,10 @@ function App({ initialTab = 'leads' }) {
 
   useEffect(() => {
     tasksRef.current = tasks
+  }, [tasks])
+
+  useEffect(() => {
+    scrapeStatusRef.current = String(tasks?.scrape?.status || 'idle').toLowerCase().trim()
   }, [tasks])
 
   useEffect(() => {
@@ -2734,6 +2740,10 @@ function App({ initialTab = 'leads' }) {
     if (scrapeSuccessResetTimerRef.current) {
       window.clearTimeout(scrapeSuccessResetTimerRef.current)
       scrapeSuccessResetTimerRef.current = null
+    }
+    if (scrape500RetryTimerRef.current) {
+      window.clearTimeout(scrape500RetryTimerRef.current)
+      scrape500RetryTimerRef.current = null
     }
   }, [])
 
@@ -4058,7 +4068,7 @@ function App({ initialTab = 'leads' }) {
       setActiveScrapeTaskId(Number(scrapeTask.id))
     }
 
-    if (['completed', 'failed'].includes(currentStatus)) {
+    if (['completed', 'failed', 'cancelled', 'stopped'].includes(currentStatus)) {
       const tracked = Number(activeScrapeTaskIdRef.current || 0)
       if (tracked > 0 && tracked === Number(scrapeTask.id || 0)) {
         window.setTimeout(() => {
@@ -5630,6 +5640,7 @@ function App({ initialTab = 'leads' }) {
     } catch (error) {
       const fails = taskFetchFailCountRef.current + 1
       taskFetchFailCountRef.current = fails
+      const statusCode = Number(error?.status || 0)
       const liveScrapeStatus = String(tasksRef.current?.scrape?.status || '').toLowerCase().trim()
       const liveEnrichStatus = String(tasksRef.current?.enrich?.status || '').toLowerCase().trim()
       const snapshotEnrichStatus = String(enrichTaskSnapshotRef.current?.status || '').toLowerCase().trim()
@@ -5642,9 +5653,32 @@ function App({ initialTab = 'leads' }) {
       const maxBackoffMs = (scrapePossiblyActive || enrichPossiblyActive) ? 15000 : 5 * 60 * 1000
       const delayMs = Math.min(3000 * Math.pow(2, fails - 1), maxBackoffMs)
       taskFetchBackoffUntilRef.current = Date.now() + delayMs
+
+      // Transient backend hiccup: retry quickly without dropping progress UI state.
+      if (statusCode >= 500 && (scrapePossiblyActive || Number(activeScrapeTaskIdRef.current || 0) > 0)) {
+        if (scrape500RetryTimerRef.current) {
+          window.clearTimeout(scrape500RetryTimerRef.current)
+        }
+        scrape500RetryTimerRef.current = window.setTimeout(() => {
+          scrape500RetryTimerRef.current = null
+          void fetchTaskState(true)
+        }, 2000)
+      }
       console.error('[tasks] fetch failed:', error)
     }
   }, [])
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const trackedTaskId = Number(activeScrapeTaskIdRef.current || 0)
+      const status = String(scrapeStatusRef.current || 'idle').toLowerCase().trim()
+      const isTerminal = ['completed', 'failed', 'cancelled', 'stopped', 'idle'].includes(status)
+      if (trackedTaskId <= 0 && isTerminal) return
+      void fetchTaskState(true)
+    }, 2000)
+
+    return () => window.clearInterval(id)
+  }, [fetchTaskState])
 
   async function refreshSavedSegments({ silent = false } = {}) {
     if (!silent) {
