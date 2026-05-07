@@ -712,6 +712,15 @@ def _to_optional_float(value: Any) -> Optional[float]:
         return None
 
 
+def _safe_text(value: Any, max_len: Optional[int] = None) -> Optional[str]:
+    if value is None:
+        return None
+    text_value = str(value).replace("\x00", "").strip()
+    if max_len is not None and max_len > 0 and len(text_value) > max_len:
+        return text_value[:max_len]
+    return text_value
+
+
 def _log_payload_types(context: str, payload: dict[str, Any]) -> None:
     try:
         type_map = {k: type(v).__name__ for k, v in payload.items()}
@@ -734,18 +743,19 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
     normalized_user_id = _normalize_required_user_id(user_id)
     payload: dict[str, Any] = {
         "user_id": normalized_user_id,
-        "business_name": lead.business_name,
-        "website_url": lead.website_url,
-        "maps_url": getattr(lead, "maps_url", None),
-        "phone_number": lead.phone_number,
+        # Keep identity fields bounded to avoid oversized-index row failures.
+        "business_name": _safe_text(getattr(lead, "business_name", ""), 255) or "Unknown Business",
+        "website_url": _safe_text(getattr(lead, "website_url", None), 2048),
+        "maps_url": _safe_text(getattr(lead, "maps_url", None), 2048),
+        "phone_number": _safe_text(getattr(lead, "phone_number", None), 128),
         "google_claimed": _to_int_flag(lead.google_claimed),
-        "linkedin_url": lead.linkedin_url,
-        "instagram_url": lead.instagram_url,
-        "facebook_url": lead.facebook_url,
+        "linkedin_url": _safe_text(getattr(lead, "linkedin_url", None), 2048),
+        "instagram_url": _safe_text(getattr(lead, "instagram_url", None), 2048),
+        "facebook_url": _safe_text(getattr(lead, "facebook_url", None), 2048),
         "rating": lead.rating,
         "review_count": lead.review_count,
-        "address": _clean_address(lead.address),
-        "search_keyword": lead.search_keyword,
+        "address": _safe_text(_clean_address(getattr(lead, "address", None)), 512) or "Unknown Address",
+        "search_keyword": _safe_text(getattr(lead, "search_keyword", None), 255),
         "is_ads_client": _to_int_flag(getattr(lead, "is_ads_client", 0)),
         "is_website_client": _to_int_flag(getattr(lead, "is_website_client", 0)),
         "follow_up_count": _to_int_flag(getattr(lead, "follow_up_count", 0)),
@@ -754,15 +764,15 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
     }
 
     optional_fields = {
-        "tiktok_url": lead.tiktok_url,
-        "twitter_url": getattr(lead, "twitter_url", None),
-        "youtube_url": getattr(lead, "youtube_url", None),
-        "ig_link": lead.ig_link,
-        "fb_link": lead.fb_link,
+        "tiktok_url": _safe_text(getattr(lead, "tiktok_url", None), 2048),
+        "twitter_url": _safe_text(getattr(lead, "twitter_url", None), 2048),
+        "youtube_url": _safe_text(getattr(lead, "youtube_url", None), 2048),
+        "ig_link": _safe_text(getattr(lead, "ig_link", None), 2048),
+        "fb_link": _safe_text(getattr(lead, "fb_link", None), 2048),
         "has_pixel": _to_int_flag(lead.has_pixel),
         "insecure_site": _to_int_flag(getattr(lead, "insecure_site", None)),
-        "tech_stack": lead.tech_stack,
-        "email": lead.email,
+        "tech_stack": _safe_text(getattr(lead, "tech_stack", None), 4000),
+        "email": _safe_text(getattr(lead, "email", None), 320),
         "qualification_score": _to_optional_float(lead.qualification_score),
     }
     for key, value in optional_fields.items():

@@ -8855,8 +8855,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             except Exception:
                 logging.exception("[scrape-task:%s] Progress callback failed unexpectedly", task_id)
 
-            # Keep the Maps loop hot by default: per-lead persistence is opt-in.
-            progress_save_mode = str(os.environ.get("SCRAPE_PROGRESS_SAVE_MODE", "off") or "off").strip().lower()
+            # Save each discovered lead immediately by default so Lead Management updates live.
+            progress_save_mode = str(os.environ.get("SCRAPE_PROGRESS_SAVE_MODE", "local") or "local").strip().lower()
             if _lead is not None and task_user_id and progress_save_mode in {"local", "sync"}:
                 business_name_hint = str(getattr(_lead, "business_name", "") or "").strip() or "<unknown>"
                 print(f"DEBUG: Attempting to save {business_name_hint} to DB...", flush=True)
@@ -9220,6 +9220,48 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             },
         )
 
+        # Build explicit lead_id handoff for enrichment to avoid empty enrichment selection.
+        saved_lead_ids: list[int] = []
+        if task_user_id and leads:
+            try:
+                with pgdb.connect(db_path) as conn:
+                    conn.row_factory = pgdb.Row
+                    for lead in leads:
+                        business_name = str(getattr(lead, "business_name", "") or "").strip()
+                        address = str(getattr(lead, "address", "") or "").strip()
+                        if not business_name:
+                            continue
+                        row = conn.execute(
+                            """
+                            SELECT id
+                            FROM leads
+                            WHERE user_id = ? AND business_name = ? AND address = ?
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (task_user_id, business_name, address),
+                        ).fetchone()
+                        if row and row["id"] is not None:
+                            saved_lead_ids.append(int(row["id"]))
+
+                # Fallback: take latest rows for this keyword/user if identity matching returned nothing.
+                if not saved_lead_ids and inserted > 0:
+                    with pgdb.connect(db_path) as conn:
+                        conn.row_factory = pgdb.Row
+                        fallback_rows = conn.execute(
+                            """
+                            SELECT id
+                            FROM leads
+                            WHERE user_id = ? AND search_keyword = ?
+                            ORDER BY id DESC
+                            LIMIT ?
+                            """,
+                            (task_user_id, keyword, int(max(1, inserted))),
+                        ).fetchall()
+                        saved_lead_ids = [int(row["id"]) for row in fallback_rows if row and row["id"] is not None]
+            except Exception as lead_id_exc:
+                logging.warning("[scrape-task:%s] Could not resolve saved lead IDs for enrichment handoff: %s", task_id, lead_id_exc)
+
         auto_enrich_queued = False
         if inserted > 0 and deep_scan_mode == "async":
             try:
@@ -9227,6 +9269,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     "db_path": str(db_path),
                     "config_path": str(DEFAULT_CONFIG_PATH),
                     "limit": min(max(1, int(inserted)), int(requested_total or inserted or 1)),
+                    "lead_ids": saved_lead_ids[:500],
                     "user_id": task_user_id,
                     "headless": True,
                     "source": "scrape_auto_async_deep_scan",
