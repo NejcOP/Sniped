@@ -225,8 +225,8 @@ class GoogleMapsScraper:
                 lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
             )
         self.page = self._context.new_page()
-        self.page.set_default_timeout(max(5000, min(10000, int(nav_timeout_ms))))
-        self.page.set_default_navigation_timeout(max(5000, min(10000, int(nav_timeout_ms))))
+        self.page.set_default_timeout(max(5000, min(15000, int(nav_timeout_ms))))
+        self.page.set_default_navigation_timeout(max(5000, min(15000, int(nav_timeout_ms))))
         self._apply_stealth()
         self._prime_google_consent_state()
         self._dismiss_google_overlays()
@@ -289,12 +289,9 @@ class GoogleMapsScraper:
 
     def _compose_search_query(self, keyword: str) -> str:
         base = str(keyword or "").strip()
-        hint = self._country_hint()
-        if not base:
-            return hint
-        if hint.lower() in base.lower():
-            return base
-        return f"{base} in {hint}"
+        # Keep query canonical for Maps path URLs: /maps/search/{query}
+        # (avoid auto-appending country hints).
+        return base
 
     def __enter__(self):
         self.start()
@@ -313,6 +310,7 @@ class GoogleMapsScraper:
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
+            "--single-process",
             "--no-sandbox",
             "--disable-background-networking",
             "--disable-component-update",
@@ -343,7 +341,7 @@ class GoogleMapsScraper:
             self._playwright = sync_playwright().start()
             # Temporary diagnostic override: force a short launch timeout to detect hard crashes quickly.
             launch_timeout_ms = 10000
-            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "10000") or "10000"))
+            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "15000") or "15000"))
             launch_targets = proxy_candidates or [""]
             last_exc: Optional[Exception] = None
             for proxy_candidate in launch_targets:
@@ -373,7 +371,7 @@ class GoogleMapsScraper:
                 raise RuntimeError(f"Browser launch failed after trying {len(launch_targets)} proxy option(s): {last_exc}")
             self._using_shared_browser = False
         if self._browser is not None and self.page is None:
-            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "10000") or "10000")))
+            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "15000") or "15000")))
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
     def _seed_google_consent_cookies(self) -> None:
@@ -456,6 +454,7 @@ class GoogleMapsScraper:
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
+            "--single-process",
             "--disable-background-networking",
             "--disable-component-update",
             "--disable-sync",
@@ -765,13 +764,13 @@ class GoogleMapsScraper:
         url: str,
         wait_until: str = "domcontentloaded",
         max_retries: int = 1,
-        timeout_ms: int = 10000,
+        timeout_ms: int = 15000,
     ) -> None:
         """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
         assert self.page is not None
         for attempt in range(max_retries + 1):
             try:
-                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 10000)))
+                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 15000)))
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
@@ -871,6 +870,7 @@ class GoogleMapsScraper:
         cc = (self.country_code or "us").lower()
         encoded = quote_plus(keyword)
         url_candidates = [
+            f"https://www.google.com/maps/search/{encoded}",
             f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0&gl={cc}",
             f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0",
             f"https://www.google.com/maps?hl=en&authuser=0&gl={cc}&q={encoded}",

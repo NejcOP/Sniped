@@ -6,7 +6,7 @@
   },
   "deploy": {
     "healthcheckPath": "/api/health",
-    "healthcheckTimeout": 180,
+    "healthcheckTimeout": 120,
     "drainingSeconds": 20,
     "overlapSeconds": 30,
     "restartPolicyType": "ON_FAILURE",
