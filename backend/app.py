@@ -14657,13 +14657,15 @@ def create_app() -> FastAPI:
         requested_results = max(1, int(payload.results or 25))
         required_scrape_credits = requested_results * SCRAPE_CREDIT_COST_PER_LEAD
         if available_credits < required_scrape_credits:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Insufficient credits for scrape. Required: {required_scrape_credits}, "
-                    f"available: {available_credits}."
-                ),
+            # Cap to available credits rather than rejecting entirely.
+            capped_results = max(1, available_credits // SCRAPE_CREDIT_COST_PER_LEAD)
+            logging.info(
+                "[scrape] Capping results %s → %s to match available credits %s",
+                requested_results,
+                capped_results,
+                available_credits,
             )
+            requested_results = capped_results
         payload_data["country"] = normalize_country_value(payload.country, payload.country_code)
         payload_data["results"] = requested_results
         payload_data["_queue_priority"] = bool(access.get("queue_priority"))

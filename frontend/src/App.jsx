@@ -2366,6 +2366,10 @@ function App({ initialTab = 'leads' }) {
 
   const refreshLeads = useCallback(async (options = {}) => {
     const silent = options?.silent !== undefined ? options.silent : true
+    // Allow callers to explicitly override filter values (e.g. right after setState when
+    // the new state value hasn't propagated through the closure yet).
+    const effectiveQuickFilter = options?.quickFilter !== undefined ? options.quickFilter : leadQuickFilter
+    const effectiveStatusFilter = options?.statusFilter !== undefined ? options.statusFilter : leadStatusFilter
     if (!silent) {
       setLoadingLeads(true)
     }
@@ -2389,10 +2393,14 @@ function App({ initialTab = 'leads' }) {
         _ts: String(Date.now()),
       })
       if (leadStatusFilter !== 'all') {
-        params.set('status', leadStatusFilter)
+        if (effectiveStatusFilter !== 'all') {
+        params.set('status', effectiveStatusFilter)
+      }
       }
       if (leadQuickFilter !== 'all') {
-        params.set('quick_filter', leadQuickFilter)
+        if (effectiveQuickFilter !== 'all') {
+        params.set('quick_filter', effectiveQuickFilter)
+      }
       }
       if (debouncedLeadSearch.trim()) {
         params.set('search', debouncedLeadSearch.trim())
@@ -4313,11 +4321,13 @@ function App({ initialTab = 'leads' }) {
           }, 3000)
           if (inserted > 0) shootConfetti()
           if (inserted > 0) {
-            // Make newly scraped rows visible immediately.
+            // Clear any active filters so newly scraped rows are visible immediately,
+            // then fetch the fresh list from the server.
             setLeadStatusFilter('all')
             setLeadQuickFilter('all')
             setLeadSearch('')
             setLeadPage(0)
+            void refreshLeads({ silent: true, quickFilter: 'all', statusFilter: 'all' })
           }
           setLastResult('')
         } else if (cur.result) {
@@ -6845,7 +6855,7 @@ function App({ initialTab = 'leads' }) {
       return
     }
     if (!canRunScrape) {
-      toast.error(`Not enough credits for this scrape. Need ${requiredScrapeCreditsLabel}, available ${creditsBalanceLabel}.`)
+      toast.error('Out of credits. Please buy more to continue scraping.')
       void handleTopUpClick()
       return
     }
@@ -7277,11 +7287,10 @@ function App({ initialTab = 'leads' }) {
     millionDecimals: 2,
     millionMode: 'round',
   })
-  const requiredScrapeCreditsLabel = creditIntegerFormatter.format(requiredScrapeCredits)
   const requiredEnrichCreditsLabel = creditIntegerFormatter.format(requiredEnrichCredits)
   const isCreditsLoading = !hasCreditsValue && hasSessionToken && !profileLoadedFromApi
   const isOutOfCredits = hasCreditsValue && normalizedCreditsBalance === 0
-  const canRunScrape = !hasCreditsValue || normalizedCreditsBalance >= requiredScrapeCredits
+  const canRunScrape = !hasCreditsValue || normalizedCreditsBalance >= 1
   const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && (!hasCreditsValue || normalizedCreditsBalance >= requiredEnrichCredits)
   const isLowOnCredits = hasCreditsValue && normalizedCreditsBalance > 0 && normalizedCreditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
@@ -8093,7 +8102,14 @@ function App({ initialTab = 'leads' }) {
               </button>
               {!canRunScrape ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
-                  <span>Need {requiredScrapeCreditsLabel} credits for this scrape. You have {creditsBalanceLabel}.</span>
+                  <span>Out of credits. You need at least 1 credit to scrape.</span>
+                  <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
+                    <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
+                  </button>
+                </div>
+              ) : normalizedCreditsBalance < requiredScrapeCredits ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
+                  <span>Only {creditsBalanceLabel} credits available — scrape will run for up to {creditsBalanceLabel} leads.</span>
                   <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
                     <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
                   </button>
