@@ -17131,17 +17131,18 @@ def create_app() -> FastAPI:
             plan_key = str(billing.get("plan_key") or "free").strip().lower()
             is_subscribed = bool(billing.get("subscription_active"))
             access = get_plan_feature_access(plan_key)
+            credit_snapshot = _load_user_credit_snapshot(str(jwt_user_id or billing.get("id") or "").strip(), db_path=DEFAULT_DB_PATH)
             return {
                 "email": row_dict.get("email") or "",
                 "niche": row_dict.get("niche") or "",
                 "display_name": row_dict.get("display_name") or "",
                 "contact_name": row_dict.get("contact_name") or "",
                 "account_type": row_dict.get("account_type") or "entrepreneur",
-                "credits_balance": int(billing.get("credits_balance") or 0),
-                "credits_limit": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-                "monthly_limit": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-                "monthly_quota": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-                "topup_credits_balance": int(billing.get("topup_credits_balance") or 0),
+                "credits_balance": int(credit_snapshot.get("credits_balance") or 0),
+                "credits_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+                "monthly_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+                "monthly_quota": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+                "topup_credits_balance": int(credit_snapshot.get("topup_credits_balance") or 0),
                 "subscription_start_date": billing.get("subscription_start_date"),
                 "next_reset_at": billing.get("next_reset_at"),
                 "next_reset_in_days": billing.get("next_reset_in_days"),
@@ -17171,17 +17172,18 @@ def create_app() -> FastAPI:
         plan_key = str(billing.get("plan_key") or "free").strip().lower()
         is_subscribed = bool(billing.get("subscription_active"))
         access = get_plan_feature_access(plan_key)
+        credit_snapshot = _load_user_credit_snapshot(str(billing.get("id") or resolve_user_id_from_session_token(token) or "").strip(), db_path=DEFAULT_DB_PATH)
         return {
             "email": row["email"] or "",
             "niche": row["niche"] or "",
             "display_name": row["display_name"] or "",
             "contact_name": row["contact_name"] or "",
             "account_type": row["account_type"] or "entrepreneur",
-            "credits_balance": int(billing.get("credits_balance") or 0),
-            "credits_limit": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-            "monthly_limit": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-            "monthly_quota": int(billing.get("monthly_quota") or billing.get("monthly_limit") or billing.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
-            "topup_credits_balance": int(billing.get("topup_credits_balance") or 0),
+            "credits_balance": int(credit_snapshot.get("credits_balance") or 0),
+            "credits_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+            "monthly_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+            "monthly_quota": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+            "topup_credits_balance": int(credit_snapshot.get("topup_credits_balance") or 0),
             "subscription_start_date": billing.get("subscription_start_date"),
             "next_reset_at": billing.get("next_reset_at"),
             "next_reset_in_days": billing.get("next_reset_in_days"),
@@ -18187,6 +18189,10 @@ def create_app() -> FastAPI:
                     payload["subscription_cancel_at"] = cancel_effective_at
                     payload["subscription_cancel_at_period_end"] = True
                 else:
+                    payload["monthly_quota"] = next_monthly_limit
+                    payload["monthly_limit"] = next_monthly_limit
+                    payload["credits_limit"] = next_monthly_limit
+                    payload["credits_balance"] = next_monthly_limit + topup_balance
                     payload["plan_key"] = current_plan_key if current_plan_key != "free" else "pro"
                     payload["subscription_active"] = True
                     payload["subscription_status"] = subscription_status_event or "active"
@@ -18225,11 +18231,24 @@ def create_app() -> FastAPI:
                 },
             )
             if is_topup_event:
+                _append_credit_log(resolved_user_id, max(0, credits_delta), "stripe_topup", {
+                    "credits_after": final_credits_balance,
+                    "topup_credits_after": final_topup_balance,
+                    "event_type": event_type,
+                }, db_path=DEFAULT_DB_PATH)
                 mark_stripe_topup_payments_applied(
                     [str(event_obj.get("payment_intent") or event_obj.get("id") or "").strip()],
                     user_id=resolved_user_id,
                     credits_delta=max(0, credits_delta),
                 )
+            elif is_subscription_cycle_event or (is_subscription_state_event and final_subscription_active):
+                _append_credit_log(resolved_user_id, 0, "subscription_sync", {
+                    "credits_after": final_credits_balance,
+                    "credits_limit": final_monthly_limit,
+                    "topup_credits_after": final_topup_balance,
+                    "plan_key": final_plan_key,
+                    "event_type": event_type,
+                }, db_path=DEFAULT_DB_PATH)
             return {
                 "ok": True,
                 "user_id": resolved_user_id,
@@ -18314,6 +18333,9 @@ def create_app() -> FastAPI:
                     subscription_cancel_at_period_end_to_store = 1
                     plan_key_to_store = current_plan_key if current_plan_key != "free" else "pro"
                 else:
+                    monthly_limit_to_store = next_monthly_limit
+                    credits_limit_to_store = next_monthly_limit
+                    credits_balance_to_store = next_monthly_limit + topup_balance_to_store
                     subscription_active_to_store = 1
                     subscription_status_to_store = subscription_status_event or "active"
                     subscription_cancel_at_to_store = None
@@ -18358,10 +18380,35 @@ def create_app() -> FastAPI:
             conn.commit()
 
         if is_topup_event:
+            _append_credit_log(
+                resolved_user_id,
+                max(0, credits_delta),
+                "stripe_topup",
+                {
+                    "credits_after": credits_balance_to_store,
+                    "topup_credits_after": topup_balance_to_store,
+                    "event_type": event_type,
+                },
+                db_path=DEFAULT_DB_PATH,
+            )
             mark_stripe_topup_payments_applied(
                 [str(event_obj.get("payment_intent") or event_obj.get("id") or "").strip()],
                 user_id=resolved_user_id,
                 credits_delta=max(0, credits_delta),
+            )
+        elif is_subscription_cycle_event or (is_subscription_state_event and bool(subscription_active_to_store)):
+            _append_credit_log(
+                resolved_user_id,
+                0,
+                "subscription_sync",
+                {
+                    "credits_after": credits_balance_to_store,
+                    "credits_limit": monthly_limit_to_store,
+                    "topup_credits_after": topup_balance_to_store,
+                    "plan_key": plan_key_to_store,
+                    "event_type": event_type,
+                },
+                db_path=DEFAULT_DB_PATH,
             )
         return {
             "ok": True,

@@ -4095,6 +4095,10 @@ function App({ initialTab = 'leads' }) {
       void refreshLeads({ silent: false })
     }
 
+    if (['completed', 'failed', 'cancelled', 'stopped'].includes(currentStatus)) {
+      void refreshUserProfile()
+    }
+
     if (Number(scrapeTask.id || 0) > 0) {
       setActiveScrapeTaskId(Number(scrapeTask.id))
     }
@@ -4111,7 +4115,7 @@ function App({ initialTab = 'leads' }) {
     }
 
     scrapeTaskStateRef.current = { id: scrapeTask.id, status: currentStatus }
-  }, [scrapeTask.id, scrapeTask.status, refreshLeads])
+  }, [scrapeTask.id, scrapeTask.status, refreshLeads, refreshUserProfile])
 
   useEffect(() => {
     if (leadPage > 0 && leadPage >= leadsPageCount) {
@@ -4478,17 +4482,9 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  const refreshUserProfile = useCallback(async (options = {}) => {
+  const refreshUserProfile = useCallback(async () => {
     const token = getStoredValue('lf_token')
     if (!token) return null
-
-    const preservePlanKey = String(options?.preservePlanKey || '').trim().toLowerCase()
-    const preservePlanName = String(options?.preservePlanName || '').trim()
-    const preserveCreditsLimit = Math.max(0, Number(options?.preserveCreditsLimit || 0))
-    const preserveCreditsBalance = Math.max(0, Number(options?.preserveCreditsBalance || 0))
-    const preserveTopupBalance = Math.max(0, Number(options?.preserveTopupBalance || 0))
-    const enrichStatus = String(tasks?.enrich?.status || '').toLowerCase().trim()
-    const freezeEnrichmentCredits = ['queued', 'running'].includes(enrichStatus) || pendingRequest === 'enrich' || enrichRunRequested
 
     try {
       const data = await fetchJson('/api/auth/profile', {
@@ -4497,49 +4493,21 @@ function App({ initialTab = 'leads' }) {
         body: JSON.stringify({ token }),
       })
 
-      const resolvedPlanKey = String(data?.plan_key ?? '').toLowerCase().trim()
-      const resolvedCreditsLimit = Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? data?.creditLimit ?? 0)
-      const resolvedCreditsBalance = Number(data?.credits_balance ?? data?.credits ?? 0)
-      const resolvedTopupBalance = Number(data?.topup_credits_balance ?? 0)
-      const resolvedIsSubscribed = Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)
-      const shouldPreservePaidState = Boolean(
-        preservePlanKey
-        && preservePlanKey !== 'free'
-        && (!resolvedIsSubscribed || resolvedPlanKey === 'free')
-        && resolvedCreditsLimit < preserveCreditsLimit,
-      )
-      const shouldPreserveTopUpState = Boolean(
-        preserveCreditsBalance > 0
-        && (resolvedCreditsBalance < preserveCreditsBalance || resolvedTopupBalance < preserveTopupBalance),
-      )
-
       setUser((prev) => {
-        const prevCreditsBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
-        const incomingCreditsBalance = Number(data?.credits_balance ?? data?.credits ?? prevCreditsBalance)
-        const guardedCreditsBalance = freezeEnrichmentCredits
-          ? Math.max(prevCreditsBalance, incomingCreditsBalance)
-          : incomingCreditsBalance
-
-        const prevTopupBalance = Number(prev?.topup_credits_balance ?? 0)
-        const incomingTopupBalance = Number(data?.topup_credits_balance ?? prevTopupBalance)
-        const guardedTopupBalance = freezeEnrichmentCredits
-          ? Math.max(prevTopupBalance, incomingTopupBalance)
-          : incomingTopupBalance
-
         const resolvedFeatureAccess = resolveFeatureAccess(
           data?.plan_type ?? data?.plan_key ?? prev?.plan_type ?? prev?.plan_key ?? 'free',
           data?.feature_access ?? prev?.feature_access,
         )
-        const nextState = {
+        return {
           ...prev,
           ...data,
-          credits: guardedCreditsBalance,
-          creditLimit: Number(data?.creditLimit ?? data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? prev.creditLimit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          credits_balance: guardedCreditsBalance,
-          credits_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          monthly_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? prev.monthly_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          monthly_quota: Number(data?.monthly_quota ?? prev.monthly_quota ?? prev.monthly_limit ?? prev.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          topup_credits_balance: guardedTopupBalance,
+          credits: Number(data?.credits_balance ?? 0),
+          creditLimit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+          credits_balance: Number(data?.credits_balance ?? 0),
+          credits_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+          monthly_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+          monthly_quota: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+          topup_credits_balance: Number(data?.topup_credits_balance ?? 0),
           next_reset_at: data?.next_reset_at ?? prev.next_reset_at,
           next_reset_in_days: data?.next_reset_in_days ?? prev.next_reset_in_days,
           isSubscribed: Boolean(data?.isSubscribed ?? prev.isSubscribed ?? false),
@@ -4555,78 +4523,16 @@ function App({ initialTab = 'leads' }) {
           average_deal_value: Number(data?.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
           niche: String(data?.niche ?? prev.niche ?? '').trim(),
         }
-
-        if (!shouldPreservePaidState && !shouldPreserveTopUpState) {
-          return nextState
-        }
-
-        const protectedBalance = Math.max(
-          Number(nextState.credits_balance ?? nextState.credits ?? 0),
-          Number(prev?.credits_balance ?? prev?.credits ?? 0),
-          preserveCreditsLimit,
-          preserveCreditsBalance,
-        )
-        const protectedTopupBalance = Math.max(
-          Number(nextState.topup_credits_balance ?? 0),
-          Number(prev?.topup_credits_balance ?? 0),
-          preserveTopupBalance,
-        )
-        const protectedState = {
-          ...nextState,
-          credits: protectedBalance,
-          credits_balance: protectedBalance,
-          topup_credits_balance: protectedTopupBalance,
-        }
-
-        if (!shouldPreservePaidState) {
-          return protectedState
-        }
-
-        return {
-          ...protectedState,
-          isSubscribed: true,
-          subscription_active: true,
-          subscription_status: String(nextState.subscription_status || 'active').toLowerCase().trim() || 'active',
-          currentPlanName: preservePlanName || String(prev?.currentPlanName || 'Pro Plan').trim() || 'Pro Plan',
-          plan_key: preservePlanKey,
-          creditLimit: Math.max(Number(nextState.creditLimit || 0), preserveCreditsLimit),
-          credits_limit: Math.max(Number(nextState.credits_limit || 0), preserveCreditsLimit),
-          monthly_limit: Math.max(Number(nextState.monthly_limit || 0), preserveCreditsLimit),
-          monthly_quota: Math.max(Number(nextState.monthly_quota || 0), preserveCreditsLimit),
-        }
       })
-
-      if (shouldPreservePaidState || shouldPreserveTopUpState) {
-        localStorage.setItem('lf_credits', String(Math.max(resolvedCreditsBalance, preserveCreditsBalance, preserveCreditsLimit)))
-        localStorage.setItem('lf_credits_balance', String(Math.max(resolvedCreditsBalance, preserveCreditsBalance, preserveCreditsLimit)))
-        localStorage.setItem('lf_topup_credits_balance', String(Math.max(resolvedTopupBalance, preserveTopupBalance)))
-        if (shouldPreservePaidState) {
-          localStorage.setItem('lf_credits_limit', String(preserveCreditsLimit))
-          localStorage.setItem('lf_plan_key', preservePlanKey)
-          localStorage.setItem('lf_plan_name', preservePlanName || 'Pro Plan')
-          localStorage.setItem('lf_is_subscribed', 'true')
-        }
-        localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
-        localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
-      } else {
-        const currentStoredBalance = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
-        const currentStoredTopup = Number(getStoredValue('lf_topup_credits_balance') || 0)
-        const nextStoredBalance = freezeEnrichmentCredits
-          ? Math.max(currentStoredBalance, Number(data?.credits ?? data?.credits_balance ?? 0))
-          : Number(data?.credits ?? data?.credits_balance ?? 0)
-        const nextStoredTopup = freezeEnrichmentCredits
-          ? Math.max(currentStoredTopup, Number(data?.topup_credits_balance ?? 0))
-          : Number(data?.topup_credits_balance ?? 0)
-        localStorage.setItem('lf_credits', String(nextStoredBalance))
-        localStorage.setItem('lf_credits_balance', String(nextStoredBalance))
-        localStorage.setItem('lf_topup_credits_balance', String(nextStoredTopup))
-        localStorage.setItem('lf_credits_limit', String(Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? data?.creditLimit ?? DEFAULT_FREE_CREDIT_LIMIT)))
-        localStorage.setItem('lf_plan_key', String(data?.plan_key ?? 'free').toLowerCase().trim() || 'free')
-        localStorage.setItem('lf_plan_name', String(data?.currentPlanName ?? 'Free Plan').trim() || 'Free Plan')
-        localStorage.setItem('lf_is_subscribed', String(Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)))
-        localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
-        localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
-      }
+      localStorage.setItem('lf_credits', String(Number(data?.credits_balance ?? 0)))
+      localStorage.setItem('lf_credits_balance', String(Number(data?.credits_balance ?? 0)))
+      localStorage.setItem('lf_topup_credits_balance', String(Number(data?.topup_credits_balance ?? 0)))
+      localStorage.setItem('lf_credits_limit', String(Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT)))
+      localStorage.setItem('lf_plan_key', String(data?.plan_key ?? 'free').toLowerCase().trim() || 'free')
+      localStorage.setItem('lf_plan_name', String(data?.currentPlanName ?? 'Free Plan').trim() || 'Free Plan')
+      localStorage.setItem('lf_is_subscribed', String(Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)))
+      localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
+      localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
       setProfileLoadedFromApi(true)
       setProfileHydrated(true)
       return data
@@ -4639,7 +4545,7 @@ function App({ initialTab = 'leads' }) {
       setProfileHydrated(true)
       return null
     }
-  }, [tasks?.enrich?.status, pendingRequest, enrichRunRequested])
+  }, [])
 
   useEffect(() => {
     if (!hasSessionToken) return
@@ -4675,65 +4581,18 @@ function App({ initialTab = 'leads' }) {
     return () => window.clearInterval(profileId)
   }, [refreshUserProfile])
 
-  const applyOptimisticSubscriptionState = useCallback((rawPlanKey) => {
-    const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
-    const plan = SUBSCRIPTION_PLAN_DETAILS[normalizedPlanKey]
-    if (!plan || normalizedPlanKey === 'free') return
-
-    const nextLimit = Math.max(1, Number(plan.credits || DEFAULT_FREE_CREDIT_LIMIT))
-    setUser((prev) => {
-      const currentBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
-      const nextBalance = Math.max(currentBalance, nextLimit)
-      return {
-        ...prev,
-        isSubscribed: true,
-        subscription_active: true,
-        subscription_status: String(prev?.subscription_status || 'active').toLowerCase().trim() || 'active',
-        currentPlanName: plan.displayName,
-        plan_key: normalizedPlanKey,
-        plan_type: normalizedPlanKey,
-        feature_access: getDefaultFeatureAccess(normalizedPlanKey),
-        credits: nextBalance,
-        credits_balance: nextBalance,
-        creditLimit: nextLimit,
-        credits_limit: nextLimit,
-        monthly_limit: nextLimit,
-        monthly_quota: nextLimit,
-      }
-    })
-    localStorage.setItem('lf_plan_key', normalizedPlanKey)
-    localStorage.setItem('lf_plan_name', plan.displayName)
-    localStorage.setItem('lf_is_subscribed', 'true')
-    localStorage.setItem('lf_credits_limit', String(nextLimit))
-    localStorage.setItem('lf_credits', String(nextLimit))
-    localStorage.setItem('lf_credits_balance', String(nextLimit))
-  }, [])
-
-  const syncBillingStateAfterCheckout = useCallback(async (rawPlanKey = '', options = {}) => {
+  const syncBillingStateAfterCheckout = useCallback(async (rawPlanKey = '') => {
     const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
     const expectedPlan = SUBSCRIPTION_PLAN_DETAILS[normalizedPlanKey]
-    const preserveCreditsBalance = Math.max(0, Number(options?.preserveCreditsBalance || 0))
-    const preserveTopupBalance = Math.max(0, Number(options?.preserveTopupBalance || 0))
-    if (expectedPlan && normalizedPlanKey !== 'free') {
-      applyOptimisticSubscriptionState(normalizedPlanKey)
-    }
 
     const retryDelays = [0, 1500, 3500, 6000, 9000]
     for (const delayMs of retryDelays) {
       if (delayMs > 0) {
         await sleep(delayMs)
       }
-      const data = await refreshUserProfile({
-        preservePlanKey: normalizedPlanKey,
-        preservePlanName: expectedPlan?.displayName || '',
-        preserveCreditsLimit: Number(expectedPlan?.credits || 0),
-        preserveCreditsBalance,
-        preserveTopupBalance,
-      })
+      const data = await refreshUserProfile()
       if (!expectedPlan) {
-        const resolvedBalance = Number(data?.credits_balance ?? data?.credits ?? 0)
-        const resolvedTopup = Number(data?.topup_credits_balance ?? 0)
-        if (resolvedBalance >= preserveCreditsBalance && resolvedTopup >= preserveTopupBalance) {
+        if (data) {
           return
         }
         continue
@@ -4744,7 +4603,7 @@ function App({ initialTab = 'leads' }) {
         return
       }
     }
-  }, [applyOptimisticSubscriptionState, refreshUserProfile])
+  }, [refreshUserProfile])
 
   useEffect(() => {
     const checkoutStatus = String(searchParams.get('checkout') || '').trim().toLowerCase()
@@ -4811,9 +4670,6 @@ function App({ initialTab = 'leads' }) {
 
     const runCheckoutRedirectSync = async () => {
       if (resolvedCheckoutStatus === 'success') {
-        if (checkoutPlanKey) {
-          applyOptimisticSubscriptionState(checkoutPlanKey)
-        }
         const nextPlanName = SUBSCRIPTION_PLAN_DETAILS[checkoutPlanKey]?.displayName || 'your subscription'
         toast.success(`Payment successful — ${nextPlanName} is now active`)
         await syncBillingStateAfterCheckout(checkoutPlanKey)
@@ -4822,30 +4678,8 @@ function App({ initialTab = 'leads' }) {
       }
 
       if (resolvedTopupStatus === 'success') {
-        if (Number.isFinite(topupCreditsParam) && topupCreditsParam > 0) {
-          setUser((prev) => {
-            const currentBalance = Number(prev?.credits_balance ?? prev?.credits ?? 0)
-            const currentTopup = Number(prev?.topup_credits_balance ?? 0)
-            const nextBalance = currentBalance + topupCreditsParam
-            const nextTopup = currentTopup + topupCreditsParam
-            localStorage.setItem('lf_credits', String(nextBalance))
-            localStorage.setItem('lf_credits_balance', String(nextBalance))
-            return {
-              ...prev,
-              credits: nextBalance,
-              credits_balance: nextBalance,
-              topup_credits_balance: nextTopup,
-            }
-          })
-        }
         toast.success('Top-up payment received')
-        const optimisticTopupDelta = Number.isFinite(topupCreditsParam) ? Math.max(0, topupCreditsParam) : 0
-        const currentBalance = Number(getStoredValue('lf_credits_balance') || getStoredValue('lf_credits') || 0)
-        const currentTopup = Number(getStoredValue('lf_topup_credits_balance') || 0)
-        await syncBillingStateAfterCheckout('', {
-          preserveCreditsBalance: currentBalance + optimisticTopupDelta,
-          preserveTopupBalance: currentTopup + optimisticTopupDelta,
-        })
+        await syncBillingStateAfterCheckout('')
       } else if (resolvedTopupStatus === 'cancel') {
         toast('Top-up checkout cancelled', { icon: 'ℹ️' })
       }
@@ -4870,7 +4704,6 @@ function App({ initialTab = 'leads' }) {
       cancelled = true
     }
   }, [
-    applyOptimisticSubscriptionState,
     searchParams,
     setSearchParams,
     syncBillingStateAfterCheckout,
@@ -6901,7 +6734,7 @@ function App({ initialTab = 'leads' }) {
         },
       }))
       toast('Scrape started', { icon: '⏳' })
-      void Promise.allSettled([fetchTaskState(true), refreshStats()])
+      void Promise.allSettled([fetchTaskState(true), refreshStats(), refreshUserProfile()])
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown API error'
       const normalizedMessage = String(message || '').toLowerCase()
@@ -7269,14 +7102,14 @@ function App({ initialTab = 'leads' }) {
     () => TOP_UP_PACKAGES.find((pkg) => pkg.id === selectedTopUpPackageId) || TOP_UP_PACKAGES[0],
     [selectedTopUpPackageId],
   )
-  const rawCredits = user?.credits ?? user?.credits_balance
-  const rawCreditLimit = user?.monthly_quota ?? user?.monthly_limit ?? user?.creditLimit ?? user?.credits_limit
+  const rawCredits = user?.credits_balance
+  const rawCreditLimit = user?.monthly_quota ?? user?.monthly_limit ?? user?.credits_limit
   const hasCreditsValue = rawCredits !== null && rawCredits !== undefined && Number.isFinite(Number(rawCredits))
   const creditsBalance = hasCreditsValue ? Math.max(0, Number(rawCredits)) : undefined
   const baseCreditsLimit = Math.max(1, Number(rawCreditLimit ?? DEFAULT_FREE_CREDIT_LIMIT))
   const topupCreditsBalance = Math.max(0, Number(user?.topup_credits_balance ?? 0))
   const normalizedCreditsBalance = hasCreditsValue ? Number(creditsBalance) : 0
-  const creditsLimit = Math.max(baseCreditsLimit, normalizedCreditsBalance, baseCreditsLimit + topupCreditsBalance)
+  const creditsLimit = baseCreditsLimit
   const creditsPercent = hasCreditsValue
     ? Math.max(0, Math.min(100, Math.round((normalizedCreditsBalance / creditsLimit) * 100)))
     : 0
