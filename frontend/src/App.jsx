@@ -6741,7 +6741,8 @@ function App({ initialTab = 'leads' }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown API error'
       const normalizedMessage = String(message || '').toLowerCase()
-      if (normalizedMessage.includes('credit') || normalizedMessage.includes('out of credits') || normalizedMessage.includes('insufficient credits')) {
+      const status = error?.status ?? error?.statusCode ?? 0
+      if (Number(status) === 403 && (normalizedMessage.includes('out of credits') || normalizedMessage.includes('insufficient credits'))) {
         setShowLowCreditsModal(true)
       }
       setLastError(message)
