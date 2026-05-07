@@ -61,9 +61,11 @@ class GoogleMapsScraper:
         user_data_dir: str = "profiles/maps_profile",
         proxy_url: Optional[str] = None,
         proxy_urls: Optional[List[str]] = None,
+        speed_mode: bool = False,
     ) -> None:
         self.headless = headless
         self.user_agent = user_agent
+        self.speed_mode = bool(speed_mode)
         self.country_code = normalize_country_code(country or country_code)
         self.google_domain = google_domain_for_country(self.country_code)
         self.locale = locale_for_country(self.country_code)
@@ -547,8 +549,9 @@ class GoogleMapsScraper:
         logging.info("Navigating to URL | keyword=%r country=%s headless=%s", keyword, self.country_code, bool(self.headless))
         self._open_maps_and_search(keyword)
         logging.info("Waiting for results | keyword=%r", keyword)
-        # Small human-like idle before first interaction/scroll.
-        random_delay(1000, 3000)
+        if not self.speed_mode:
+            # Small human-like idle before first interaction/scroll.
+            random_delay(1000, 3000)
         leads: List[Lead] = []
         seen_cards = set()
         stalled_rounds = 0
@@ -692,8 +695,9 @@ class GoogleMapsScraper:
                                 _last_heartbeat_lead_count = len(leads)
                                 _emit_progress(len(leads), max_results, scanned_count, None)
 
-                        random_mouse_movements(self.page, count=random.randint(2, 4))
-                        random_delay(300, 900)
+                        if not self.speed_mode:
+                            random_mouse_movements(self.page, count=random.randint(2, 4))
+                            random_delay(300, 900)
                     except Exception as lead_exc:
                         logging.exception("Failed to process lead card idx=%s; continuing scrape: %s", idx, lead_exc)
                         continue
@@ -728,7 +732,10 @@ class GoogleMapsScraper:
                 if len(leads) < max_results:
                     panel = self.page.locator("div[role='feed']").first
                     try:
-                        human_like_scroll(panel, steps=random.randint(2, 4))
+                        if self.speed_mode:
+                            panel.evaluate("el => { el.scrollBy(0, Math.max(1400, Math.floor(el.clientHeight * 1.8))); }")
+                        else:
+                            human_like_scroll(panel, steps=random.randint(2, 4))
                     except PlaywrightTimeoutError:
                         logging.warning("Could not scroll results panel in this round.")
 

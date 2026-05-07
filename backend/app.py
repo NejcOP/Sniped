@@ -8902,6 +8902,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 user_data_dir=str(user_data_dir),
                 proxy_url=_proxy_url,
                 proxy_urls=_proxy_urls or None,
+                speed_mode=bool(payload_data.get("speed_mode", False)),
             ) as scraper:
                 progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
                 _safe_update_progress()
