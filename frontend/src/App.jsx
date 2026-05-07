@@ -2546,6 +2546,7 @@ function App({ initialTab = 'leads' }) {
   const [blacklistEntries, setBlacklistEntries] = useState([])
   const [blacklistForm, setBlacklistForm] = useState({ kind: 'email', value: '', reason: 'Manual dashboard block' })
   const [submittingBlacklistEntry, setSubmittingBlacklistEntry] = useState(false)
+  const [showLowCreditsModal, setShowLowCreditsModal] = useState(false)
   const [showTopUpModal, setShowTopUpModal] = useState(false)
   const [topUpLoadingPackageId, setTopUpLoadingPackageId] = useState('')
   const [topUpPreparingPackageId, setTopUpPreparingPackageId] = useState('')
@@ -6856,9 +6857,8 @@ function App({ initialTab = 'leads' }) {
       toast.error('Keyword required (min 2 chars)')
       return
     }
-    if (!canRunScrape) {
-      toast.error('Out of credits. Please buy more to continue scraping.')
-      void handleTopUpClick()
+    if (hasCreditsValue && normalizedCreditsBalance < requiredScrapeCredits) {
+      setShowLowCreditsModal(true)
       return
     }
     if (exportTargets && !canBulkExport) {
@@ -6904,6 +6904,10 @@ function App({ initialTab = 'leads' }) {
       void Promise.allSettled([fetchTaskState(true), refreshStats()])
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown API error'
+      const normalizedMessage = String(message || '').toLowerCase()
+      if (normalizedMessage.includes('credit') || normalizedMessage.includes('out of credits') || normalizedMessage.includes('insufficient credits')) {
+        setShowLowCreditsModal(true)
+      }
       setLastError(message)
       toast.error(message)
     } finally {
@@ -7292,7 +7296,7 @@ function App({ initialTab = 'leads' }) {
   const requiredEnrichCreditsLabel = creditIntegerFormatter.format(requiredEnrichCredits)
   const isCreditsLoading = !hasCreditsValue && hasSessionToken && !profileLoadedFromApi
   const isOutOfCredits = hasCreditsValue && normalizedCreditsBalance === 0
-  const canRunScrape = !hasCreditsValue || normalizedCreditsBalance >= 1
+  const scrapeHasInsufficientCredits = hasCreditsValue && normalizedCreditsBalance < requiredScrapeCredits
   const canRunEnrich = enrichmentEligibleLeadIds.length > 0 && (!hasCreditsValue || normalizedCreditsBalance >= requiredEnrichCredits)
   const isLowOnCredits = hasCreditsValue && normalizedCreditsBalance > 0 && normalizedCreditsBalance <= LOW_CREDITS_THRESHOLD
   const topupLabel = topupCreditsBalance > 0
@@ -8087,7 +8091,7 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               </div>
-              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked || !canRunScrape} onClick={onScrapeSubmit}>
+              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked} onClick={onScrapeSubmit}>
                 {scrapeSuccessLeadsFound ? (
                   <>
                     <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
@@ -8102,18 +8106,18 @@ function App({ initialTab = 'leads' }) {
                   </>
                 )}
               </button>
-              {!canRunScrape ? (
+              {isOutOfCredits ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
                   <span>Out of credits. You need at least 1 credit to scrape.</span>
                   <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
                     <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
                   </button>
                 </div>
-              ) : normalizedCreditsBalance < requiredScrapeCredits ? (
+              ) : scrapeHasInsufficientCredits ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
-                  <span>Only {creditsBalanceLabel} credits available — scrape will run for up to {creditsBalanceLabel} leads.</span>
-                  <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={handleTopUpClick}>
-                    <PlusCircle className="h-3.5 w-3.5" /> Buy Credits
+                  <span>Need {creditIntegerFormatter.format(requiredScrapeCredits)} credits for this scrape. You currently have {creditsBalanceLabel}.</span>
+                  <button type="button" className="btn-ghost px-2.5 py-1.5 text-xs" onClick={() => setShowLowCreditsModal(true)}>
+                    <Rocket className="h-3.5 w-3.5" /> View options
                   </button>
                 </div>
               ) : null}
@@ -11485,6 +11489,63 @@ function App({ initialTab = 'leads' }) {
           )}
         </section>
       </div>
+
+      {showLowCreditsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(2,6,23,0.82)', backdropFilter: 'blur(8px)' }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowLowCreditsModal(false) }}
+        >
+          <div className="w-full max-w-lg overflow-hidden rounded-[28px] border border-emerald-400/20 bg-slate-950 shadow-2xl shadow-emerald-950/40">
+            <div className="bg-gradient-to-r from-emerald-500/15 via-sky-500/10 to-slate-950 px-6 py-5">
+              <div className="flex items-start gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-500/10 text-emerald-300">
+                  <Rocket className="h-6 w-6" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">Credits Required</p>
+                  <h3 className="mt-1 text-2xl font-semibold text-white">Zmanjkalo vam je kreditov! 🚀</h3>
+                  <p className="mt-2 text-sm leading-6 text-slate-300">
+                    Za ta scrape potrebujete {creditIntegerFormatter.format(requiredScrapeCredits)} kreditov, na racunu jih imate samo {creditsBalanceLabel}. Nadgradite svoj plan za neomejeno iskanje.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-5">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+                  onClick={() => {
+                    setShowLowCreditsModal(false)
+                    void handleTopUpClick()
+                  }}
+                >
+                  <PlusCircle className="h-4 w-4" /> Kupi kredite
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
+                  onClick={() => {
+                    setShowLowCreditsModal(false)
+                    openPricingSection()
+                  }}
+                >
+                  <ExternalLink className="h-4 w-4" /> Poglej plane
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:border-slate-700 hover:text-white"
+                  onClick={() => setShowLowCreditsModal(false)}
+                >
+                  Preklici
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Top Up Credits Modal ── */}
       <TopUpCreditsModal
