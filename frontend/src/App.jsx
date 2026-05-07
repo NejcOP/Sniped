@@ -11513,9 +11513,9 @@ function App({ initialTab = 'leads' }) {
                     <Rocket className="h-5 w-5" />
                   </div>
                   <p className="label-overline text-emerald-300">Credits Required</p>
-                  <h3 className="mt-1.5 text-2xl font-semibold text-white">You&apos;re out of credits</h3>
+                  <h3 className="mt-1.5 text-2xl font-semibold text-white">Need More Credits to Launch This Scrape</h3>
                   <p className="mt-2 max-w-xl text-sm leading-6 text-slate-300">
-                    This scrape needs {creditIntegerFormatter.format(requiredScrapeCredits)} credits, but your account currently has only {creditsBalanceLabel}. Upgrade your plan for unlimited searching or top up credits to continue.
+                    This scrape needs {creditIntegerFormatter.format(requiredScrapeCredits)} credits, but your account currently has only {creditsBalanceLabel}. Top up credits or upgrade your plan to keep searching without limits.
                   </p>
                 </div>
                 <button
