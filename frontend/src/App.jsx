@@ -2715,6 +2715,7 @@ function App({ initialTab = 'leads' }) {
   const activeScrapeTaskIdRef = useRef(activeScrapeTaskId)
   const scrapeStatusRef = useRef(String(tasks?.scrape?.status || 'idle').toLowerCase().trim())
   const scrape500RetryTimerRef = useRef(null)
+  const refreshUserProfileRef = useRef(null)
 
   useEffect(() => {
     enrichRunRequestedRef.current = enrichRunRequested
@@ -4096,7 +4097,7 @@ function App({ initialTab = 'leads' }) {
     }
 
     if (['completed', 'failed', 'cancelled', 'stopped'].includes(currentStatus)) {
-      void refreshUserProfile()
+      void refreshUserProfileRef.current?.()
     }
 
     if (Number(scrapeTask.id || 0) > 0) {
@@ -4115,7 +4116,7 @@ function App({ initialTab = 'leads' }) {
     }
 
     scrapeTaskStateRef.current = { id: scrapeTask.id, status: currentStatus }
-  }, [scrapeTask.id, scrapeTask.status, refreshLeads, refreshUserProfile])
+  }, [scrapeTask.id, scrapeTask.status, refreshLeads])
 
   useEffect(() => {
     if (leadPage > 0 && leadPage >= leadsPageCount) {
@@ -4546,6 +4547,8 @@ function App({ initialTab = 'leads' }) {
       return null
     }
   }, [])
+
+  refreshUserProfileRef.current = refreshUserProfile
 
   useEffect(() => {
     if (!hasSessionToken) return
