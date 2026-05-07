@@ -4312,6 +4312,8 @@ function App({ initialTab = 'leads' }) {
           const inserted = Number(cur.result?.inserted || 0)
           const leadsFound = Number(cur.result?.scraped || cur.result?.current_found || inserted || 0)
           setScrapeSuccessLeadsFound(Math.max(0, leadsFound))
+          // Re-fetch immediately when success state appears so Lead Management reflects latest DB rows.
+          void refreshLeads({ silent: true, quickFilter: 'all', statusFilter: 'all' })
           if (scrapeSuccessResetTimerRef.current) {
             window.clearTimeout(scrapeSuccessResetTimerRef.current)
           }

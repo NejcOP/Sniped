@@ -8863,9 +8863,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 print(f"DEBUG: Attempting to save {business_name_hint} to DB...", flush=True)
                 logging.info("[scrape-task:%s] Immediate save: %s", task_id, business_name_hint)
                 try:
-                    _immediate_count = batch_upsert_leads([_lead], db_path=str(db_path), user_id=task_user_id)
-                    if _immediate_count > 0:
-                        progress_state["inserted"] = progress_state.get("inserted", 0) + _immediate_count
+                    # Force single-row upsert so each discovered lead is committed immediately.
+                    _immediate_saved = upsert_lead(_lead, db_path=str(db_path), user_id=task_user_id)
+                    if _immediate_saved:
+                        progress_state["inserted"] = progress_state.get("inserted", 0) + 1
                         _safe_update_progress()
                         if progress_save_mode == "sync" and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
                             try:
@@ -8873,7 +8874,13 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                             except Exception as _sync_exc:
                                 logging.warning("[scrape-task:%s] Immediate Supabase sync failed: %s", task_id, _sync_exc)
                 except Exception as _imm_exc:
-                    logging.warning("[scrape-task:%s] Immediate lead save failed for %s: %s", task_id, business_name_hint, _imm_exc)
+                    logging.exception(
+                        "[scrape-task:%s] Immediate lead save failed | user_id=%s | business=%s | error=%s",
+                        task_id,
+                        task_user_id,
+                        business_name_hint,
+                        _imm_exc,
+                    )
 
         scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
         scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
@@ -14654,6 +14661,8 @@ def create_app() -> FastAPI:
             require_feature_access(access.get("plan_key"), "bulk_export")
 
         payload_data = payload.model_dump()
+        # Hard-lock task ownership to authenticated user from request context.
+        payload_data["user_id"] = user_id
         requested_results = max(1, int(payload.results or 25))
         required_scrape_credits = requested_results * SCRAPE_CREDIT_COST_PER_LEAD
         if available_credits < required_scrape_credits:

@@ -914,6 +914,12 @@ def upsert_lead(lead: Lead, db_path: Optional[str] = None, user_id: str = "") ->
         except Exception as exc:
             session.rollback()
             _log_payload_types("upsert_lead", payload)
+            logging.exception(
+                "[upsert_lead] failed | user_id=%s | business_name=%s | error=%s",
+                normalized_user_id,
+                payload.get("business_name"),
+                exc,
+            )
             raise
         return True
 
@@ -949,8 +955,14 @@ def batch_upsert_leads(leads: Sequence[Lead], db_path: Optional[str] = None, use
             else:
                 session.execute(statement)
             session.commit()
-        except Exception:
+        except Exception as exc:
             session.rollback()
+            logging.exception(
+                "[batch_upsert_leads] bulk upsert failed; switching to row-by-row fallback | user_id=%s | leads=%s | error=%s",
+                normalized_user_id,
+                len(payloads),
+                exc,
+            )
             inserted_count = 0
             for idx, payload in enumerate(payloads, start=1):
                 try:
