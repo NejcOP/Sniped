@@ -11490,62 +11490,78 @@ function App({ initialTab = 'leads' }) {
         </section>
       </div>
 
-      {showLowCreditsModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: 'rgba(2,6,23,0.82)', backdropFilter: 'blur(8px)' }}
-          onClick={(e) => { if (e.target === e.currentTarget) setShowLowCreditsModal(false) }}
-        >
-          <div className="w-full max-w-lg overflow-hidden rounded-[28px] border border-emerald-400/20 bg-slate-950 shadow-2xl shadow-emerald-950/40">
-            <div className="bg-gradient-to-r from-emerald-500/15 via-sky-500/10 to-slate-950 px-6 py-5">
-              <div className="flex items-start gap-4">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-500/10 text-emerald-300">
-                  <Rocket className="h-6 w-6" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">Credits Required</p>
-                  <h3 className="mt-1 text-2xl font-semibold text-white">Zmanjkalo vam je kreditov! 🚀</h3>
-                  <p className="mt-2 text-sm leading-6 text-slate-300">
-                    Za ta scrape potrebujete {creditIntegerFormatter.format(requiredScrapeCredits)} kreditov, na racunu jih imate samo {creditsBalanceLabel}. Nadgradite svoj plan za neomejeno iskanje.
+      <AnimatePresence>
+        {showLowCreditsModal && (
+          <Motion.div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(2,6,23,0.82)] p-3 backdrop-blur-sm sm:p-5"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowLowCreditsModal(false) }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <Motion.div
+              className="glass-card w-full max-w-xl rounded-3xl p-6 shadow-2xl"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.98 }}
+              transition={{ duration: 0.2 }}
+            >
+              <div className="mb-6 flex items-start justify-between gap-4">
+                <div>
+                  <div className="mb-2 inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/25">
+                    <Rocket className="h-5 w-5" />
+                  </div>
+                  <p className="label-overline text-emerald-300">Credits Required</p>
+                  <h3 className="mt-1.5 text-2xl font-semibold text-white">You&apos;re out of credits</h3>
+                  <p className="mt-2 max-w-xl text-sm leading-6 text-slate-300">
+                    This scrape needs {creditIntegerFormatter.format(requiredScrapeCredits)} credits, but your account currently has only {creditsBalanceLabel}. Upgrade your plan for unlimited searching or top up credits to continue.
                   </p>
                 </div>
+                <button
+                  type="button"
+                  className="rounded-xl p-2 text-slate-400 transition-all duration-200 hover:bg-white/10 hover:text-white"
+                  onClick={() => setShowLowCreditsModal(false)}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
               </div>
-            </div>
 
-            <div className="px-6 py-5">
               <div className="grid gap-3 sm:grid-cols-3">
                 <button
                   type="button"
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+                  className="btn-primary w-full justify-center"
                   onClick={() => {
                     setShowLowCreditsModal(false)
                     void handleTopUpClick()
                   }}
                 >
-                  <PlusCircle className="h-4 w-4" /> Kupi kredite
+                  <PlusCircle className="h-4 w-4" /> Buy Credits
                 </button>
                 <button
                   type="button"
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
+                  className="workflow-btn w-full justify-center"
+                  style={{ background: 'linear-gradient(135deg,#0ea5e9,#2563eb)' }}
                   onClick={() => {
                     setShowLowCreditsModal(false)
                     openPricingSection()
                   }}
                 >
-                  <ExternalLink className="h-4 w-4" /> Poglej plane
+                  <ExternalLink className="h-4 w-4" /> View Plans
                 </button>
                 <button
                   type="button"
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:border-slate-700 hover:text-white"
+                  className="btn-ghost w-full justify-center"
                   onClick={() => setShowLowCreditsModal(false)}
                 >
-                  Preklici
+                  Cancel
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
+            </Motion.div>
+          </Motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ── Top Up Credits Modal ── */}
       <TopUpCreditsModal
