@@ -4,6 +4,7 @@ import random
 import re
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -313,6 +314,12 @@ class GoogleMapsScraper:
             "--disable-extensions",
             "--disable-gpu",
             "--no-sandbox",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-sync",
+            "--mute-audio",
+            "--disable-dev-shm-usage",
+            "--blink-settings=imagesEnabled=false",
         ]
         proxy_candidates = [candidate for candidate in [self.proxy_url, *self._proxy_pool] if str(candidate or "").strip()]
         if proxy_candidates:
@@ -403,7 +410,7 @@ class GoogleMapsScraper:
         ]
         for warmup_url in warmup_urls:
             try:
-                self.page.goto(warmup_url, wait_until="domcontentloaded", timeout=15000)
+                self.page.goto(warmup_url, wait_until="domcontentloaded", timeout=8000)
                 self._accept_consent_if_present()
                 random_delay(350, 900)
                 if not self._is_consent_page():
@@ -449,6 +456,12 @@ class GoogleMapsScraper:
             "--no-default-browser-check",
             "--disable-extensions",
             "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-sync",
+            "--mute-audio",
+            "--disable-dev-shm-usage",
+            "--blink-settings=imagesEnabled=false",
         ]
         cls._acquire_shared_browser(headless=headless, launch_args=launch_args)
 
@@ -549,185 +562,184 @@ class GoogleMapsScraper:
         # Emit a progress heartbeat at least every 3 leads to keep the backend
         # aware that the scrape is still alive (prevents orphan-task resets).
         _last_heartbeat_lead_count = 0
+        progress_executor = ThreadPoolExecutor(max_workers=1) if progress_callback is not None else None
 
-        while len(leads) < max_results and stalled_rounds < 8:
-            now = time.monotonic()
-            if now - last_keep_alive_at >= 5.0:
-                keepalive = (
-                    f"KEEP_ALIVE maps-scrape found={len(leads)} target={max_results} "
-                    f"scanned={scanned_count} elapsed={int(now - started_at)}s"
-                )
-                print(keepalive, flush=True)
-                logging.info(keepalive)
-                last_keep_alive_at = now
+        def _emit_progress(current_found: int, total_to_find: int, current_scanned: int, lead: Optional[Lead]) -> None:
+            if progress_callback is None:
+                return
+            try:
+                if progress_executor is not None:
+                    progress_executor.submit(progress_callback, current_found, total_to_find, current_scanned, lead)
+                else:
+                    progress_callback(current_found, total_to_find, current_scanned, lead)
+            except Exception:
+                logging.debug("Progress callback dispatch failed; continuing scrape.")
 
-            elapsed_seconds = time.monotonic() - started_at
-            if elapsed_seconds >= max(30, int(max_runtime_seconds or 0)):
-                logging.warning(
-                    "Stopping Maps scrape after runtime limit: found=%s target=%s scanned=%s elapsed=%ss",
-                    len(leads),
-                    max_results,
-                    scanned_count,
-                    int(elapsed_seconds),
-                )
-                break
+        try:
+            while len(leads) < max_results and stalled_rounds < 8:
+                now = time.monotonic()
+                if now - last_keep_alive_at >= 5.0:
+                    keepalive = (
+                        f"KEEP_ALIVE maps-scrape found={len(leads)} target={max_results} "
+                        f"scanned={scanned_count} elapsed={int(now - started_at)}s"
+                    )
+                    print(keepalive, flush=True)
+                    logging.info(keepalive)
+                    last_keep_alive_at = now
 
-            if scanned_count == 0:
-                self._log_results_container_preview()
-
-            cards = self.page.locator("a[href*='/maps/place/']")
-            count = cards.count()
-            before_seen = len(seen_cards)
-
-            if count > 0 and not results_found_logged:
-                logging.info("Results found | cards=%s keyword=%r", count, keyword)
-                results_found_logged = True
-            elif count == 0:
-                logging.info("Waiting for results | cards=0 elapsed=%ss", int(elapsed_seconds))
-
-            if self.headless and count == 0 and scanned_count == 0 and elapsed_seconds >= 10 and not headless_no_results_snapshot_taken:
-                screenshot_path = self._capture_debug_screenshot(reason="headless_no_results_10s")
-                logging.warning(
-                    "No results found after 10s in headless mode. Saved debug screenshot=%s url=%s",
-                    screenshot_path or "<none>",
-                    str(self.page.url or ""),
-                )
-                headless_no_results_snapshot_taken = True
-
-            if count > 0:
-                logging.info("Starting extraction | cards=%s found=%s scanned=%s", count, len(leads), scanned_count)
-
-            for idx in range(count):
-                if len(leads) >= max_results:
+                elapsed_seconds = time.monotonic() - started_at
+                if elapsed_seconds >= max(30, int(max_runtime_seconds or 0)):
+                    logging.warning(
+                        "Stopping Maps scrape after runtime limit: found=%s target=%s scanned=%s elapsed=%ss",
+                        len(leads),
+                        max_results,
+                        scanned_count,
+                        int(elapsed_seconds),
+                    )
                     break
-                try:
-                    card = cards.nth(idx)
-                    card_key = self._card_key(card, idx)
-                    if card_key in seen_cards:
-                        continue
 
-                    card_title = self._card_title(card)
-                    logging.info("Scanned business candidate idx=%s title=%r", idx, card_title)
+                if scanned_count == 0:
+                    self._log_results_container_preview()
+                cards = self.page.locator("a[href*='/maps/place/']")
+                count = cards.count()
+                before_seen = len(seen_cards)
 
-                    seen_cards.add(card_key)
-                    scanned_count += 1
-                    last_progress_at = time.monotonic()
-                    if progress_callback is not None:
-                        try:
-                            progress_callback(len(leads), max_results, scanned_count, None)
-                        except Exception:
-                            logging.debug("Progress callback failed during card scan; continuing scrape.")
-                    if not self._open_card(card):
-                        website_hint = self._click_result_website_fallback(card)
-                        fallback_lead = self._extract_business_from_global_html(
-                            keyword=keyword,
-                            card_title=card_title,
-                            website_hint=website_hint,
-                        )
-                        if fallback_lead:
-                            leads.append(fallback_lead)
-                            last_progress_at = time.monotonic()
-                            logging.warning(
-                                "Recovered lead via global HTML fallback idx=%s title=%r website=%r phone=%r",
-                                idx,
-                                card_title,
-                                fallback_lead.website_url,
-                                fallback_lead.phone_number,
-                            )
-                            if progress_callback is not None:
-                                try:
-                                    progress_callback(len(leads), max_results, scanned_count, fallback_lead)
-                                except Exception:
-                                    logging.debug("Progress callback failed after global fallback lead extraction.")
+                if count > 0 and not results_found_logged:
+                    logging.info("Results found | cards=%s keyword=%r", count, keyword)
+                    results_found_logged = True
+                elif count == 0:
+                    logging.info("Waiting for results | cards=0 elapsed=%ss", int(elapsed_seconds))
+
+                if self.headless and count == 0 and scanned_count == 0 and elapsed_seconds >= 10 and not headless_no_results_snapshot_taken:
+                    screenshot_path = self._capture_debug_screenshot(reason="headless_no_results_10s")
+                    logging.warning(
+                        "No results found after 10s in headless mode. Saved debug screenshot=%s url=%s",
+                        screenshot_path or "<none>",
+                        str(self.page.url or ""),
+                    )
+                    headless_no_results_snapshot_taken = True
+
+                if count > 0:
+                    logging.info("Starting extraction | cards=%s found=%s scanned=%s", count, len(leads), scanned_count)
+
+                for idx in range(count):
+                    if len(leads) >= max_results:
+                        break
+                    try:
+                        card = cards.nth(idx)
+                        card_key = self._card_key(card, idx)
+                        if card_key in seen_cards:
                             continue
 
-                        screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
-                        logging.warning(
-                            "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
-                            idx,
-                            card_title,
-                            str(self.page.url or ""),
-                            screenshot_path or "<none>",
-                        )
-                        self._log_card_preview(card, idx, reason="open_card_failed")
-                        continue
+                        card_title = self._card_title(card)
+                        logging.info("Scanned business candidate idx=%s title=%r", idx, card_title)
 
-                    lead = self._extract_business(keyword)
-                    if not lead:
-                        screenshot_path = self._capture_debug_screenshot(reason=f"scanned_no_data_{card_title or idx}")
-                        logging.warning(
-                            "Scanned business yielded no extractable data idx=%s title=%r url=%s screenshot=%s",
-                            idx,
-                            card_title,
-                            str(self.page.url or ""),
-                            screenshot_path or "<none>",
-                        )
-                        self._log_card_preview(card, idx, reason="extract_business_empty")
-                        self._dump_first_result_html(reason="extract_business_empty")
-                        continue
-
-                    if lead.business_name and lead.address:
-                        leads.append(lead)
+                        seen_cards.add(card_key)
+                        scanned_count += 1
                         last_progress_at = time.monotonic()
-                        if progress_callback is not None:
-                            try:
-                                progress_callback(len(leads), max_results, scanned_count, lead)
-                            except Exception:
-                                logging.debug("Progress callback failed; continuing scrape.")
-                        # Emit an extra heartbeat every 3 leads to ensure the backend
-                        # sees recent activity even if the per-lead callback is throttled.
-                        if progress_callback is not None and (len(leads) - _last_heartbeat_lead_count) >= 3:
-                            _last_heartbeat_lead_count = len(leads)
-                            try:
-                                progress_callback(len(leads), max_results, scanned_count, None)
-                            except Exception:
-                                logging.debug("Progress heartbeat callback failed; continuing scrape.")
+                        _emit_progress(len(leads), max_results, scanned_count, None)
+                        if not self._open_card(card):
+                            website_hint = self._click_result_website_fallback(card)
+                            fallback_lead = self._extract_business_from_global_html(
+                                keyword=keyword,
+                                card_title=card_title,
+                                website_hint=website_hint,
+                            )
+                            if fallback_lead:
+                                leads.append(fallback_lead)
+                                last_progress_at = time.monotonic()
+                                logging.warning(
+                                    "Recovered lead via global HTML fallback idx=%s title=%r website=%r phone=%r",
+                                    idx,
+                                    card_title,
+                                    fallback_lead.website_url,
+                                    fallback_lead.phone_number,
+                                )
+                                _emit_progress(len(leads), max_results, scanned_count, fallback_lead)
+                                continue
 
-                    random_mouse_movements(self.page, count=random.randint(2, 4))
-                    random_delay(300, 900)
-                except Exception as lead_exc:
-                    logging.exception("Failed to process lead card idx=%s; continuing scrape: %s", idx, lead_exc)
-                    continue
+                            screenshot_path = self._capture_debug_screenshot(reason=f"open_card_failed_{card_title or idx}")
+                            logging.warning(
+                                "Open-card failed after click idx=%s title=%r url=%s screenshot=%s",
+                                idx,
+                                card_title,
+                                str(self.page.url or ""),
+                                screenshot_path or "<none>",
+                            )
+                            self._log_card_preview(card, idx, reason="open_card_failed")
+                            continue
 
-            if len(seen_cards) == before_seen:
-                stalled_rounds += 1
-                stall_elapsed = time.monotonic() - last_progress_at
-                logging.info(
-                    "Maps scrape stalled round=%s/%s found=%s target=%s scanned=%s idle=%ss",
-                    stalled_rounds,
-                    8,
-                    len(leads),
-                    max_results,
-                    scanned_count,
-                    int(stall_elapsed),
-                )
+                        lead = self._extract_business(keyword)
+                        if not lead:
+                            screenshot_path = self._capture_debug_screenshot(reason=f"scanned_no_data_{card_title or idx}")
+                            logging.warning(
+                                "Scanned business yielded no extractable data idx=%s title=%r url=%s screenshot=%s",
+                                idx,
+                                card_title,
+                                str(self.page.url or ""),
+                                screenshot_path or "<none>",
+                            )
+                            self._log_card_preview(card, idx, reason="extract_business_empty")
+                            self._dump_first_result_html(reason="extract_business_empty")
+                            continue
 
-                if progress_callback is not None:
-                    try:
-                        progress_callback(len(leads), max_results, scanned_count, None)
-                    except Exception:
-                        logging.debug("Progress callback failed during stalled round heartbeat.")
+                        if lead.business_name and lead.address:
+                            leads.append(lead)
+                            last_progress_at = time.monotonic()
+                            _emit_progress(len(leads), max_results, scanned_count, lead)
+                            # Emit an extra heartbeat every 3 leads to ensure the backend
+                            # sees recent activity even if the per-lead callback is throttled.
+                            if (len(leads) - _last_heartbeat_lead_count) >= 3:
+                                _last_heartbeat_lead_count = len(leads)
+                                _emit_progress(len(leads), max_results, scanned_count, None)
 
-                if stall_elapsed >= max(10, int(stall_timeout_seconds or 0)):
-                    logging.warning(
-                        "Stopping Maps scrape after stall timeout: found=%s target=%s scanned=%s idle=%ss",
+                        random_mouse_movements(self.page, count=random.randint(2, 4))
+                        random_delay(300, 900)
+                    except Exception as lead_exc:
+                        logging.exception("Failed to process lead card idx=%s; continuing scrape: %s", idx, lead_exc)
+                        continue
+
+                if len(seen_cards) == before_seen:
+                    stalled_rounds += 1
+                    stall_elapsed = time.monotonic() - last_progress_at
+                    logging.info(
+                        "Maps scrape stalled round=%s/%s found=%s target=%s scanned=%s idle=%ss",
+                        stalled_rounds,
+                        8,
                         len(leads),
                         max_results,
                         scanned_count,
                         int(stall_elapsed),
                     )
-                    break
-            else:
-                stalled_rounds = 0
 
-            if len(leads) < max_results:
-                panel = self.page.locator("div[role='feed']").first
+                    _emit_progress(len(leads), max_results, scanned_count, None)
+
+                    if stall_elapsed >= max(10, int(stall_timeout_seconds or 0)):
+                        logging.warning(
+                            "Stopping Maps scrape after stall timeout: found=%s target=%s scanned=%s idle=%ss",
+                            len(leads),
+                            max_results,
+                            scanned_count,
+                            int(stall_elapsed),
+                        )
+                        break
+                else:
+                    stalled_rounds = 0
+
+                if len(leads) < max_results:
+                    panel = self.page.locator("div[role='feed']").first
+                    try:
+                        human_like_scroll(panel, steps=random.randint(2, 4))
+                    except PlaywrightTimeoutError:
+                        logging.warning("Could not scroll results panel in this round.")
+
+            return leads[:max_results]
+        finally:
+            if progress_executor is not None:
                 try:
-                    human_like_scroll(panel, steps=random.randint(2, 4))
-                except PlaywrightTimeoutError:
-                    logging.warning("Could not scroll results panel in this round.")
-
-        return leads[:max_results]
+                    progress_executor.shutdown(wait=False)
+                except Exception:
+                    pass
 
     def _is_blocked_page(self) -> bool:
         """Return True if Google is showing a CAPTCHA, 403, or rate-limit page."""
@@ -820,7 +832,7 @@ class GoogleMapsScraper:
             continue_url = self._extract_consent_continue_url() or str(fallback_url or "").strip()
             if continue_url:
                 try:
-                    self.page.goto(continue_url, wait_until="domcontentloaded", timeout=25000)
+                    self.page.goto(continue_url, wait_until="domcontentloaded", timeout=8000)
                     random_delay(350, 1000)
                 except Exception:
                     pass
@@ -876,7 +888,7 @@ class GoogleMapsScraper:
                     pass
                 random_delay(900, 1700)
                 logging.info("Waiting for results | candidate=%s", url)
-                if self._wait_for_any_result_signal(timeout_ms=20000):
+                if self._wait_for_any_result_signal(timeout_ms=9000):
                     logging.info("Results found | candidate=%s", url)
                     return True
             except Exception as exc:
@@ -912,7 +924,7 @@ class GoogleMapsScraper:
                 self._accept_consent_if_present()
 
                 logging.info("Waiting for results | searchbox_base=%s", base_url)
-                if self._wait_for_any_result_signal(timeout_ms=20000):
+                if self._wait_for_any_result_signal(timeout_ms=9000):
                     logging.info("Results found | searchbox_base=%s", base_url)
                     return True
             except Exception as exc:
@@ -934,7 +946,7 @@ class GoogleMapsScraper:
         except Exception:
             pass
 
-        return self._wait_for_any_result_signal(timeout_ms=20000)
+        return self._wait_for_any_result_signal(timeout_ms=9000)
 
     def _build_page_diagnostic(self) -> str:
         assert self.page is not None
@@ -965,12 +977,12 @@ class GoogleMapsScraper:
             logging.error("Failed to save scraper debug screenshot (%s): %s", target_path, exc)
             return ""
 
-    def _wait_for_any_result_signal(self, timeout_ms: int = 20000) -> bool:
+    def _wait_for_any_result_signal(self, timeout_ms: int = 9000) -> bool:
         """Wait for robust Maps result signals and fail fast on challenge pages."""
         assert self.page is not None
 
         started = time.monotonic()
-        timeout_seconds = max(10.0, float(timeout_ms) / 1000.0)
+        timeout_seconds = max(5.0, float(timeout_ms) / 1000.0)
         results_selectors = [
             "div[role='article']",
             "div[role='feed'] a[href*='/maps/place/']",
@@ -1328,7 +1340,7 @@ class GoogleMapsScraper:
 
             # Mandatory post-click wait for the details panel root.
             try:
-                self.page.wait_for_selector("[role='main']", timeout=10000)
+                self.page.wait_for_selector("[role='main']", timeout=7000)
             except PlaywrightTimeoutError:
                 logging.warning("Main details panel did not appear after card click attempt=%s", attempt)
                 if attempt == 1:
@@ -1337,17 +1349,17 @@ class GoogleMapsScraper:
 
             # Emergency force-wait: proxy/Hobby environments need extra time for panel hydration.
             try:
-                self.page.wait_for_timeout(5000)
+                self.page.wait_for_timeout(max(600, int(os.environ.get("SCRAPE_PANEL_HYDRATE_WAIT_MS", "1200") or "1200")))
             except Exception:
-                random_delay(4500, 5200)
+                random_delay(900, 1400)
 
             random_mouse_movements(self.page, count=random.randint(1, 2))
 
             # Explicit fallback wait: panel should expose at least one basic signal.
-            self._wait_for_basic_panel_signals(timeout_ms=12000)
+            self._wait_for_basic_panel_signals(timeout_ms=8000)
 
             # Step 3: Wait for a real panel state change, not just any visible main container.
-            if self._wait_for_business_panel_ready(url_before, heading_before, panel_before, timeout_ms=12000):
+            if self._wait_for_business_panel_ready(url_before, heading_before, panel_before, timeout_ms=8000):
                 return True
 
             logging.warning("Business panel not ready after click attempt=%s url=%s", attempt, self.page.url)

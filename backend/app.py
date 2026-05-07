@@ -4510,6 +4510,10 @@ def load_config_health(config_path: Path) -> dict:
     try:
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
+    except FileNotFoundError:
+        # Config file is optional in hosted environments that use env vars.
+        config = {}
+        file_error = None
     except Exception as exc:
         # In production we rely primarily on env vars; missing local settings file
         # should not hard-fail health checks.
@@ -9684,6 +9688,9 @@ def run_weekly_report_digest(_app: FastAPI) -> None:
     try:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
+    except FileNotFoundError:
+        # Optional file can be absent in production; treat as default settings.
+        cfg = {}
     except Exception as exc:
         logging.warning("Weekly report: could not read environment settings â€” %s", exc)
         return
@@ -9713,6 +9720,9 @@ def run_monthly_report_digest(_app: FastAPI) -> None:
     try:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
+    except FileNotFoundError:
+        # Optional file can be absent in production; treat as default settings.
+        cfg = {}
     except Exception as exc:
         logging.warning("Monthly report: could not read environment settings â€” %s", exc)
         return
@@ -9745,6 +9755,9 @@ def run_daily_digest(_app: FastAPI) -> None:
     try:
         with config_path.open("r", encoding="utf-8") as fh:
             cfg = json.load(fh)
+    except FileNotFoundError:
+        # Optional file can be absent in production; treat as default settings.
+        cfg = {}
     except Exception as exc:
         logging.warning("Daily digest: could not read environment settings - %s", exc)
         return
