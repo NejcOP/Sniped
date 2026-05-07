@@ -3536,6 +3536,7 @@ def update_task_progress(db_path: Path, task_id: int, result_payload: dict) -> N
                 client.table("system_tasks").update(
                     {
                         "result_payload": serialize_json(result_payload),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
                     }
                 ).eq("id", task_id).execute()
                 return
@@ -8863,11 +8864,14 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 logging.info("[scrape-task:%s] Immediate save: %s", task_id, business_name_hint)
                 try:
                     _immediate_count = batch_upsert_leads([_lead], db_path=str(db_path), user_id=task_user_id)
-                    if _immediate_count > 0 and progress_save_mode == "sync" and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
-                        try:
-                            maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
-                        except Exception as _sync_exc:
-                            logging.warning("[scrape-task:%s] Immediate Supabase sync failed: %s", task_id, _sync_exc)
+                    if _immediate_count > 0:
+                        progress_state["inserted"] = progress_state.get("inserted", 0) + _immediate_count
+                        _safe_update_progress()
+                        if progress_save_mode == "sync" and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+                            try:
+                                maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
+                            except Exception as _sync_exc:
+                                logging.warning("[scrape-task:%s] Immediate Supabase sync failed: %s", task_id, _sync_exc)
                 except Exception as _imm_exc:
                     logging.warning("[scrape-task:%s] Immediate lead save failed for %s: %s", task_id, business_name_hint, _imm_exc)
 

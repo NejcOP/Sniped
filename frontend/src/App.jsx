@@ -3284,6 +3284,21 @@ function App({ initialTab = 'leads' }) {
     }
   }, [scrapeTask, scrapeForm.results])
 
+  // Auto-refresh leads table whenever the backend saves a new lead during a live scrape.
+  const scrapeInsertedCountRef = useRef(0)
+  useEffect(() => {
+    const status = String(scrapeTask.status || 'idle').toLowerCase()
+    const isActive = ['queued', 'running', 'processing', 'pending'].includes(status)
+    const insertedNow = Number(scrapeTask.result?.inserted || 0)
+    if (isActive && insertedNow > scrapeInsertedCountRef.current) {
+      scrapeInsertedCountRef.current = insertedNow
+      void refreshLeads({ silent: true })
+    }
+    if (!isActive) {
+      scrapeInsertedCountRef.current = 0
+    }
+  }, [scrapeTask.status, scrapeTask.result?.inserted, refreshLeads])
+
   const scrapeRuntimeStatus = String(scrapeTask.status || 'idle').toLowerCase().trim()
   const scrapeIsActive = ['queued', 'running', 'processing', 'pending'].includes(scrapeRuntimeStatus)
   const scrapeCardStatusLabel = scrapeIsActive

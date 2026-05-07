@@ -721,6 +721,28 @@ def _safe_text(value: Any, max_len: Optional[int] = None) -> Optional[str]:
     return text_value
 
 
+_URL_BLOCKLIST_PREFIXES = (
+    "http://schema.org",
+    "https://schema.org",
+    "http://www.schema.org",
+    "https://www.schema.org",
+)
+
+
+def _safe_url(value: Any, max_len: Optional[int] = None) -> Optional[str]:
+    """Return a sanitised URL string, or None if invalid/schema.org/non-http(s)."""
+    text = _safe_text(value, max_len)
+    if not text:
+        return None
+    lower = text.lower()
+    for prefix in _URL_BLOCKLIST_PREFIXES:
+        if lower.startswith(prefix):
+            return None
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        return None
+    return text
+
+
 def _log_payload_types(context: str, payload: dict[str, Any]) -> None:
     try:
         type_map = {k: type(v).__name__ for k, v in payload.items()}
@@ -745,8 +767,8 @@ def _lead_to_create_payload(lead: Lead, user_id: str) -> dict[str, Any]:
         "user_id": normalized_user_id,
         # Keep identity fields bounded to avoid oversized-index row failures.
         "business_name": _safe_text(getattr(lead, "business_name", ""), 255) or "Unknown Business",
-        "website_url": _safe_text(getattr(lead, "website_url", None), 2048),
-        "maps_url": _safe_text(getattr(lead, "maps_url", None), 2048),
+        "website_url": _safe_url(getattr(lead, "website_url", None), 2048),
+        "maps_url": _safe_url(getattr(lead, "maps_url", None), 2048),
         "phone_number": _safe_text(getattr(lead, "phone_number", None), 128),
         "google_claimed": _to_int_flag(lead.google_claimed),
         "linkedin_url": _safe_text(getattr(lead, "linkedin_url", None), 2048),
