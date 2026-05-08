@@ -12232,17 +12232,33 @@ def create_app() -> FastAPI:
             recommendations = payload.get("recommendations") if isinstance(payload, dict) else []
             if not isinstance(recommendations, list):
                 recommendations = []
+            normalized_country = normalize_country_value(
+                payload.get("selected_country_code") if isinstance(payload, dict) else None,
+                selected_country,
+            )
             usable = [
                 item for item in recommendations
                 if isinstance(item, dict) and str(item.get("keyword") or "").strip()
             ]
             if not usable:
-                usable = default_market_recommendations(selected_country)
+                usable = default_market_recommendations(normalized_country)
+            else:
+                normalized_usable: list[dict[str, Any]] = []
+                for item in usable:
+                    normalized_item = dict(item)
+                    normalized_item["country_code"] = normalize_country_value(
+                        item.get("country_code"),
+                        normalized_country,
+                    )
+                    if not str(normalized_item.get("location") or "").strip():
+                        normalized_item["location"] = normalized_country
+                    normalized_usable.append(normalized_item)
+                usable = normalized_usable
             payload["recommendations"] = usable[:3]
             top_pick = payload.get("top_pick") if isinstance(payload, dict) else None
             if not isinstance(top_pick, dict) or not str(top_pick.get("keyword") or "").strip():
                 payload["top_pick"] = usable[0]
-            payload.setdefault("selected_country_code", selected_country)
+            payload["selected_country_code"] = normalized_country
             payload.setdefault("generated_at", utc_now_iso())
             return payload
 

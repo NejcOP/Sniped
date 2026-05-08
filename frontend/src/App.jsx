@@ -6284,13 +6284,15 @@ function App({ initialTab = 'leads' }) {
       }
     }).filter(Boolean)
 
-    const pool = [...recommendations, ...fromPerformance].filter((candidate) => {
+    const basePool = [...recommendations, ...fromPerformance]
+    const pool = basePool.filter((candidate) => {
       const candidateCode = String(candidate?.country_code || selectedSignalCountryCode).toUpperCase()
       return candidateCode === selectedSignalCountryCode
     })
+    const effectivePool = pool.length > 0 ? pool : basePool
     const dedup = new Map()
 
-    pool.forEach((candidate) => {
+    effectivePool.forEach((candidate) => {
       const keyword = String(candidate?.keyword || '').trim()
       if (!keyword) return
       const location = String(candidate?.location || '').trim() || 'US'
