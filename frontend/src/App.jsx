@@ -50,6 +50,7 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useDraggable,
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion as Motion } from 'framer-motion'
+import { useQueryClient } from '@tanstack/react-query'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
@@ -79,6 +80,8 @@ const CREDITS_SWR_CACHE_KEY = 'lf_credits_swr_cache_v1'
 const SCRAPE_ACTIVE_TASK_ID_KEY = 'lf_active_scrape_task_id_v1'
 const BYPASS_LEAD_FILTERS = false
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
+const LEADS_QUERY_STALE_TIME_MS = 0
+const LEADS_QUERY_GC_TIME_MS = 10 * 60_000
 
 const AI_QUICK_FILTERS = [
   { key: 'high_priority', label: '🚀 High Priority', prompt: 'Show high priority leads with score above 8' },
@@ -2225,6 +2228,7 @@ function TaskManagerCard({
 }
 
 function App({ initialTab = 'leads' }) {
+  const queryClient = useQueryClient()
   const sessionToken = getStoredValue('lf_token')
   const hasSessionToken = Boolean(sessionToken)
   const displayName = getStoredValue('lf_display_name') || getStoredValue('lf_email') || 'there'
@@ -2373,39 +2377,8 @@ function App({ initialTab = 'leads' }) {
     if (!silent) {
       setLoadingLeads(true)
     }
-    try {
-      if (!hardcodedUserRepairAttemptedRef.current) {
-        hardcodedUserRepairAttemptedRef.current = true
-        try {
-          await fetchJson('/api/leads/repair-hardcoded-user', {
-            method: 'POST',
-          })
-        } catch {
-          // Non-blocking: continue loading leads even if repair endpoint is unavailable.
-        }
-      }
 
-      const params = new URLSearchParams({
-        limit: String(LEADS_PAGE_SIZE),
-        page: String(leadPage + 1),
-        sort: String(leadSortMode || 'recent'),
-        include_blacklisted: showBlacklisted ? '1' : '0',
-        _ts: String(Date.now()),
-      })
-      if (leadStatusFilter !== 'all') {
-        if (effectiveStatusFilter !== 'all') {
-        params.set('status', effectiveStatusFilter)
-      }
-      }
-      if (leadQuickFilter !== 'all') {
-        if (effectiveQuickFilter !== 'all') {
-        params.set('quick_filter', effectiveQuickFilter)
-      }
-      }
-      if (debouncedLeadSearch.trim()) {
-        params.set('search', debouncedLeadSearch.trim())
-      }
-      const data = await fetchJson(`/api/leads?${params.toString()}`)
+    const applyLeadsPayload = (data) => {
       const rawItems = Array.isArray(data)
         ? data
         : Array.isArray(data?.items)
@@ -2426,6 +2399,38 @@ function App({ initialTab = 'leads' }) {
       setLastLeadsApiPayload(data)
       setLeads(items)
       setLeadServerTotal(Number(data?.total || data?.count || data?.total_count || items.length || 0))
+    }
+
+    try {
+      const params = new URLSearchParams({
+        limit: String(LEADS_PAGE_SIZE),
+        page: String(leadPage + 1),
+        sort: String(leadSortMode || 'recent'),
+        include_blacklisted: showBlacklisted ? '1' : '0',
+        _ts: String(Date.now()),
+      })
+      if (effectiveStatusFilter !== 'all') {
+        params.set('status', effectiveStatusFilter)
+      }
+      if (effectiveQuickFilter !== 'all') {
+        params.set('quick_filter', effectiveQuickFilter)
+      }
+      if (debouncedLeadSearch.trim()) {
+        params.set('search', debouncedLeadSearch.trim())
+      }
+      const queryKey = ['leads-list', params.toString()]
+      const cachedData = queryClient.getQueryData(queryKey)
+      if (cachedData) {
+        applyLeadsPayload(cachedData)
+      }
+
+      const data = await queryClient.fetchQuery({
+        queryKey,
+        queryFn: () => fetchJson(`/api/leads?${params.toString()}`),
+        staleTime: LEADS_QUERY_STALE_TIME_MS,
+        gcTime: LEADS_QUERY_GC_TIME_MS,
+      })
+      applyLeadsPayload(data)
     } catch (error) {
       if (error?.name === 'AbortError') return
       console.error('[leads] fetch failed:', error)
@@ -2434,7 +2439,7 @@ function App({ initialTab = 'leads' }) {
         setLoadingLeads(false)
       }
     }
-  }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, showBlacklisted])
+  }, [debouncedLeadSearch, leadPage, leadQuickFilter, leadSortMode, leadStatusFilter, queryClient, showBlacklisted])
 
   useEffect(() => {
     const nextSnapshot = new Map()
@@ -2796,7 +2801,6 @@ function App({ initialTab = 'leads' }) {
     }
   }, [enrichTask, enrichTaskSnapshot])
   const scrapeTaskStateRef = useRef({ id: null, status: 'idle' })
-  const hardcodedUserRepairAttemptedRef = useRef(false)
 
   useEffect(() => {
     if (!mailerTask.running) {

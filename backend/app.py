@@ -63,7 +63,6 @@ from backend.check_access import get_plan_feature_access, normalize_plan_key, re
 from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, record_pool_saturation_event, upsert_lead
 from backend.scraper.exporter import export_target_leads
 from backend.scraper.full_enrichment import enrich_leads_full_data
-from backend.scraper.google_maps import GoogleMapsScraper
 from backend.scraper.phone_extractor import PhoneExtractor
 from backend.services.ai_mailer_service import (
     AIMailer,
@@ -76,9 +75,20 @@ from backend.services.ai_mailer_service import (
     DEFAULT_SPEED_BODY_TEMPLATE,
     DEFAULT_SPEED_SUBJECT_TEMPLATE,
 )
-from backend.services.enrichment_service import LeadEnricher
 from backend.services.prompt_service import PromptFactory
 from backend.stripe_webhook import extract_payment_refresh_payload
+
+
+def _get_google_maps_scraper_class():
+    from backend.scraper.google_maps import GoogleMapsScraper
+
+    return GoogleMapsScraper
+
+
+def _create_lead_enricher(*, db_path: str, headless: bool, config_path: str, **kwargs):
+    from backend.services.enrichment_service import LeadEnricher
+
+    return LeadEnricher(db_path=db_path, headless=headless, config_path=config_path, **kwargs)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = ROOT_DIR / "runtime-db"
@@ -8896,6 +8906,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 scrape_runtime_limit,
                 scrape_stall_limit,
             )
+            GoogleMapsScraper = _get_google_maps_scraper_class()
             with GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
@@ -9364,7 +9375,7 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
             maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
 
-        enricher = LeadEnricher(
+        enricher = _create_lead_enricher(
             db_path=str(db_path),
             headless=bool(payload_data.get("headless", True)),
             config_path=str(config_path),
@@ -11280,6 +11291,14 @@ def create_app() -> FastAPI:
             "db_port": parsed_port,
         }
 
+    @app.get("/api/heartbeat")
+    def heartbeat() -> dict:
+        return {
+            "ok": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "service": "leadgen-api",
+        }
+
     @app.get("/api/system-status")
     def system_status() -> dict:
         health_ok = True
@@ -13047,18 +13066,40 @@ def create_app() -> FastAPI:
         return {"status": "deleted", "deleted": int(cursor.rowcount or 0), "requested": len(lead_ids)}
 
     @app.post("/api/leads/repair-hardcoded-user")
-    def repair_hardcoded_user_leads(request: Request) -> dict:
+    def repair_hardcoded_user_leads(
+        request: Request,
+        apply: bool = Query(default=False),
+        lookback_minutes: int = Query(default=180, ge=5, le=24 * 60),
+    ) -> dict:
         user_id = require_current_user_id(request)
+        now_utc = datetime.now(timezone.utc)
+        cutoff_iso = (now_utc - timedelta(minutes=int(lookback_minutes))).isoformat()
         repaired_supabase = 0
         repaired_local = 0
+        candidate_supabase = 0
+        candidate_local = 0
 
         if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
             try:
                 admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
                 if admin_client is not None:
-                    # Update all historic rows accidentally written with hardcoded user_id='1'.
-                    response = admin_client.table("leads").update({"user_id": str(user_id)}).eq("user_id", "1").execute()
-                    repaired_supabase = len(getattr(response, "data", None) or [])
+                    supabase_query = (
+                        admin_client.table("leads")
+                        .select("id", count="exact")
+                        .eq("user_id", "1")
+                        .gte("created_at", cutoff_iso)
+                    )
+                    candidate_response = supabase_query.execute()
+                    candidate_supabase = int(getattr(candidate_response, "count", 0) or 0)
+                    if apply:
+                        response = (
+                            admin_client.table("leads")
+                            .update({"user_id": str(user_id)})
+                            .eq("user_id", "1")
+                            .gte("created_at", cutoff_iso)
+                            .execute()
+                        )
+                        repaired_supabase = len(getattr(response, "data", None) or [])
             except Exception as exc:
                 logging.warning("Failed to repair hardcoded Supabase user_id rows: %s", exc)
 
@@ -13066,19 +13107,52 @@ def create_app() -> FastAPI:
             db_path = DEFAULT_DB_PATH
             ensure_system_tables(db_path)
             with pgdb.connect(db_path) as conn:
-                repaired_local = conn.execute(
-                    "UPDATE leads SET user_id = ? WHERE CAST(user_id AS TEXT) = '1'",
-                    (str(user_id),),
-                ).rowcount or 0
+                candidate_local = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM leads
+                        WHERE CAST(user_id AS TEXT) = '1'
+                          AND COALESCE(created_at, scraped_at, '') >= ?
+                        """,
+                        (cutoff_iso,),
+                    ).fetchone()[0]
+                    or 0
+                )
+                if apply:
+                    repaired_local = conn.execute(
+                        """
+                        UPDATE leads
+                        SET user_id = ?
+                        WHERE CAST(user_id AS TEXT) = '1'
+                          AND COALESCE(created_at, scraped_at, '') >= ?
+                        """,
+                        (str(user_id), cutoff_iso),
+                    ).rowcount or 0
                 conn.commit()
         except Exception as exc:
             logging.warning("Failed to repair hardcoded local user_id rows: %s", exc)
 
-        _invalidate_leads_cache()
-        print(f"Repaired hardcoded leads for user_id {user_id}: supabase={repaired_supabase}, local={repaired_local}")
+        if apply:
+            _invalidate_leads_cache()
+        logging.info(
+            "Hardcoded lead owner check for user_id=%s apply=%s lookback_minutes=%s candidates_supabase=%s candidates_local=%s repaired_supabase=%s repaired_local=%s",
+            user_id,
+            apply,
+            lookback_minutes,
+            candidate_supabase,
+            candidate_local,
+            repaired_supabase,
+            repaired_local,
+        )
         return {
             "status": "ok",
             "user_id": str(user_id),
+            "dry_run": not bool(apply),
+            "lookback_minutes": int(lookback_minutes),
+            "cutoff_iso": cutoff_iso,
+            "candidates_supabase": int(candidate_supabase),
+            "candidates_local": int(candidate_local),
             "repaired_supabase": int(repaired_supabase),
             "repaired_local": int(repaired_local),
         }
@@ -16006,7 +16080,7 @@ def create_app() -> FastAPI:
         ensure_system_tables(db_path)
 
         output_path = resolve_path(payload.output_csv, DEFAULT_AI_EXPORT)
-        enricher = LeadEnricher(
+        enricher = _create_lead_enricher(
             db_path=str(db_path),
             headless=True,
             config_path=str(DEFAULT_CONFIG_PATH),

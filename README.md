@@ -42,6 +42,7 @@ Services:
 ## API endpoints
 
 - GET /api/health
+- GET /api/heartbeat
 - GET /api/auth/me
 - GET /api/leads?limit=250
 - POST /api/scrape
@@ -86,6 +87,12 @@ The backend now starts in Supabase-only mode. If Supabase credentials are missin
 ## Stripe Production Webhook
 
 If the backend is deployed on Railway, configure Stripe to call the hosted webhook endpoint instead of a local CLI tunnel.
+
+## Railway keep-alive and cold starts
+
+- Use GET /api/heartbeat for uptime checks (UptimeRobot, Better Stack, or similar).
+- App-level heartbeat helps keep a running container warm, but it cannot prevent sleep on plans that enforce sleeping.
+- If you need near-instant dashboard load after idle time, use a Railway plan that keeps containers always-on.
 
 Production webhook URL:
 
