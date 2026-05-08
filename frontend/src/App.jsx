@@ -2321,12 +2321,6 @@ function App({ initialTab = 'leads' }) {
   })
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminSection, setAdminSection] = useState('users')
-  const [adminCreditForm, setAdminCreditForm] = useState({
-    email: '',
-    action: 'add',
-    amount: '100',
-    note: '',
-  })
   const [adminPlanForm, setAdminPlanForm] = useState({ userId: '', planKey: 'growth' })
   const [globalNoticeForm, setGlobalNoticeForm] = useState({ message: '', active: true })
   const [globalBanner, setGlobalBanner] = useState({ active: false, message: '', updated_at: null })
@@ -4674,44 +4668,6 @@ function App({ initialTab = 'leads' }) {
       if (!silent) setAdminLoading(false)
     }
   }, [isAdminUser])
-
-  const submitAdminCreditUpdate = useCallback(async (event) => {
-    event.preventDefault()
-    if (!isAdminUser) {
-      toast.error('Admin access required')
-      return
-    }
-    const payload = {
-      email: String(adminCreditForm.email || '').trim().toLowerCase(),
-      action: String(adminCreditForm.action || 'add').trim().toLowerCase(),
-      amount: Number(adminCreditForm.amount || 0),
-      note: String(adminCreditForm.note || '').trim(),
-    }
-    if (!payload.email) {
-      toast.error('Target user email is required')
-      return
-    }
-
-    if (payload.action !== 'reset' && !Number.isFinite(payload.amount)) {
-      toast.error('Enter a valid credits amount')
-      return
-    }
-
-    setAdminLoading(true)
-    try {
-      await fetchJson('/api/admin/credits', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      toast.success('Credits updated')
-      await refreshAdminOverview({ silent: true })
-    } catch (error) {
-      toast.error(error?.message || 'Failed to update credits')
-    } finally {
-      setAdminLoading(false)
-    }
-  }, [adminCreditForm, isAdminUser, refreshAdminOverview])
 
   const adminToggleBlock = useCallback(async (userRow, blocked) => {
     if (!isAdminUser) return
@@ -10837,43 +10793,6 @@ function App({ initialTab = 'leads' }) {
 
               {adminSection === 'users' ? (
                 <>
-                  <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={submitAdminCreditUpdate}>
-                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Credit Management</p>
-                    <div className="mt-3 grid gap-3 md:grid-cols-4">
-                      <label className="field-label md:col-span-2">
-                        <span className="mb-1.5 block">User Email</span>
-                        <input
-                          className="glass-input"
-                          type="email"
-                          value={adminCreditForm.email}
-                          onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, email: e.target.value }))}
-                          placeholder="user@email.com"
-                          required
-                        />
-                      </label>
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Action</span>
-                        <select className="glass-input" value={adminCreditForm.action} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, action: e.target.value }))}>
-                          <option value="add">Add</option>
-                          <option value="set">Set Exact</option>
-                          <option value="reset">Reset to Plan Limit</option>
-                        </select>
-                      </label>
-                      <label className="field-label">
-                        <span className="mb-1.5 block">Amount</span>
-                        <input className="glass-input" type="number" value={adminCreditForm.amount} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, amount: e.target.value }))} disabled={adminCreditForm.action === 'reset'} />
-                      </label>
-                    </div>
-                    <label className="field-label mt-3 block">
-                      <span className="mb-1.5 block">Note</span>
-                      <input className="glass-input" type="text" value={adminCreditForm.note} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Optional audit note" />
-                    </label>
-                    <div className="mt-3 flex items-center gap-3">
-                      <button className="btn-primary" type="submit" disabled={adminLoading}>{adminLoading ? 'Updating…' : 'Apply Credit Change'}</button>
-                      <button className="rounded-xl border border-white/15 bg-white/[0.02] px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.08]" type="button" onClick={() => void refreshAdminOverview()}>Refresh</button>
-                    </div>
-                  </form>
-
                   <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                     <div className="mb-3 flex items-center justify-between">
                       <p className="text-sm font-semibold text-white">Users</p>
