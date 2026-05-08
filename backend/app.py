@@ -11400,19 +11400,29 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def admin_api_guard(request: Request, call_next):
         path = str(request.url.path or "")
+        # Always let OPTIONS (CORS preflight) through — CORSMiddleware handles it.
+        if request.method == "OPTIONS":
+            return await call_next(request)
         if path.startswith("/api/admin/"):
+            origin = request.headers.get("origin", "")
+            cors_headers = {
+                "Access-Control-Allow-Origin": origin or "*",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, Origin",
+            }
             try:
                 token = require_authenticated_session(request)
                 billing = load_user_billing_context(token, allow_stripe_recovery=False)
                 requester_email = str(billing.get("email") or "").strip().lower()
                 if requester_email not in DEFAULT_ADMIN_EMAILS:
-                    return JSONResponse(status_code=403, content={"detail": "Admin access required."})
+                    return JSONResponse(status_code=403, content={"detail": "Admin access required."}, headers=cors_headers)
                 request.state.current_user_email = requester_email
                 request.state.is_admin = True
             except HTTPException as exc:
-                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=cors_headers)
             except Exception:
-                return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+                return JSONResponse(status_code=401, content={"detail": "Authentication required."}, headers=cors_headers)
         return await call_next(request)
 
     async def _log_playwright_runtime_diagnostics() -> None:
