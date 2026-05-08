@@ -117,11 +117,6 @@ export default function Footer() {
                 </Link>
               </li>
               <li>
-                <Link to="/docs" className="text-slate-400 hover:text-yellow-400 transition-colors">
-                  API Docs
-                </Link>
-              </li>
-              <li>
                 <Link to="/redeem" className="text-slate-400 hover:text-yellow-400 transition-colors">
                   AppSumo Redemption
                 </Link>

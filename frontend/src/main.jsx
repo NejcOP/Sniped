@@ -21,7 +21,6 @@ import ForgotPasswordPage from './ForgotPasswordPage.jsx'
 import ResetPasswordPage from './ResetPasswordPage.jsx'
 import BlogPage from './BlogPage.jsx'
 import HelpCenterPage from './HelpCenterPage.jsx'
-import ApiDocsPage from './ApiDocsPage.jsx'
 import AppSumoRedemptionPage from './AppSumoRedemptionPage.jsx'
 import SystemStatusPage from './SystemStatusPage.jsx'
 
@@ -80,7 +79,6 @@ createRoot(document.getElementById('root')).render(
           <Route path="/legal/gdpr" element={<GDPRCompliancePage />} />
           <Route path="/blog" element={<BlogPage />} />
           <Route path="/help" element={<HelpCenterPage />} />
-          <Route path="/docs" element={<ApiDocsPage />} />
           <Route path="/redeem" element={<AppSumoRedemptionPage />} />
           <Route path="/status" element={<SystemStatusPage />} />
 

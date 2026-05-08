@@ -207,7 +207,7 @@ export default function HelpCenterPage() {
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search guides, API docs, billing answers, AppSumo help..."
+                  placeholder="Search guides, API, billing answers, AppSumo help..."
                   className="w-full bg-transparent text-sm md:text-base text-slate-100 placeholder:text-slate-500 outline-none"
                 />
               </div>

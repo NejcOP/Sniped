@@ -5,7 +5,6 @@ import { FEATURE_PAGES } from './featurePagesData'
 const DEV_LINKS = [
   { label: 'Blog', href: '/blog' },
   { label: 'Help Center', href: '/help' },
-  { label: 'API Docs', href: '/docs' },
   { label: 'AppSumo Redemption', href: '/redeem' },
   { label: 'System Status', href: '/status' },
 ]
@@ -131,7 +130,7 @@ export default function MarketingNavbar() {
           </div>
           <a href="/?stay=1#pricing" onClick={() => setMenuOpen(false)} className="text-sm text-slate-300 hover:text-white">Pricing</a>
           <a href="/faq" onClick={() => setMenuOpen(false)} className="text-sm text-slate-300 hover:text-white">FAQ</a>
-          <div className="text-sm text-slate-400 font-medium uppercase tracking-wide text-xs mt-1">Developers</div>
+          <div className="text-slate-400 font-medium uppercase tracking-wide text-xs mt-1">Developers</div>
           <div className="ml-3 flex flex-col gap-2 border-l border-white/10 pl-3">
             {DEV_LINKS.map((item) => (
               <a
