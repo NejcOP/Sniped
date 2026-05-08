@@ -231,6 +231,10 @@ DEFAULT_PROXY_LIST_PATH = ROOT_DIR / "backend" / "proxies.txt"
 # Per-user AI usage guardrail (units/day). Enrichment consumes units ~= lead limit.
 AI_DAILY_USAGE_LIMIT = int(os.environ.get("SNIPED_AI_DAILY_USAGE_LIMIT", os.environ.get("LEADFLOW_AI_DAILY_USAGE_LIMIT", "1000")))
 _AI_USAGE_LOCK = Lock()
+_DASHBOARD_SCHEMA_READY = False
+_SCHEMA_INIT_LOCK = Lock()
+_SYSTEM_SCHEMA_READY = False
+_USERS_SCHEMA_READY = False
 ENRICH_CONCURRENCY_LIMIT = _read_env_int("ENRICH_CONCURRENCY_LIMIT", 2)
 ENRICH_SEMAPHORE_TIMEOUT_SECONDS = 30
 ENRICH_CAPACITY_ERROR_MESSAGE = "Server is currently at capacity. Please try again in a few minutes."
@@ -1077,6 +1081,9 @@ def parse_task_row(row: pgdb.Row) -> dict:
 
 
 def ensure_dashboard_columns(db_path: Path) -> None:
+    global _DASHBOARD_SCHEMA_READY
+    if _DASHBOARD_SCHEMA_READY:
+        return
     init_db(db_path=str(db_path))
 
     optional_columns = {
@@ -1169,12 +1176,8 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                 WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
                 """
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_id ON leads(user_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_created_at ON leads(user_id, created_at DESC, id DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)")
             conn.commit()
+            _DASHBOARD_SCHEMA_READY = True
         except Exception:
             try:
                 conn.rollback()
@@ -2176,8 +2179,10 @@ def ensure_credit_logs_table(db_path: Path) -> None:
 
 
 def ensure_users_table(db_path: Path) -> None:
+    global _USERS_SCHEMA_READY
+    if _USERS_SCHEMA_READY:
+        return
     try:
-        ensure_dashboard_columns(db_path)
         ensure_blacklist_table(db_path)
     except Exception:
         logging.exception("ensure_users_table prerequisites failed")
@@ -2344,6 +2349,7 @@ def ensure_users_table(db_path: Path) -> None:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)")
             conn.commit()
+            _USERS_SCHEMA_READY = True
         except Exception:
             try:
                 conn.rollback()
@@ -2713,21 +2719,28 @@ def _hash_password(password: str, salt: str) -> str:
 
 
 def ensure_system_tables(db_path: Path) -> None:
-    ensure_dashboard_columns(db_path)
-    ensure_system_task_table(db_path)
-    ensure_runtime_table(db_path)
-    ensure_blacklist_table(db_path)
-    ensure_revenue_log_table(db_path)
-    ensure_revenue_logs_table(db_path)
-    ensure_workers_table(db_path)
-    ensure_worker_audit_table(db_path)
-    ensure_delivery_tasks_table(db_path)
-    ensure_users_table(db_path)
-    ensure_credit_logs_table(db_path)
-    ensure_mailer_campaign_tables(db_path)
-    ensure_client_success_tables(db_path)
-    ensure_lead_history_table(db_path)
-    ensure_lead_report_table(db_path)
+    global _SYSTEM_SCHEMA_READY
+    if _SYSTEM_SCHEMA_READY:
+        return
+    with _SCHEMA_INIT_LOCK:
+        if _SYSTEM_SCHEMA_READY:
+            return
+        ensure_dashboard_columns(db_path)
+        ensure_system_task_table(db_path)
+        ensure_runtime_table(db_path)
+        ensure_blacklist_table(db_path)
+        ensure_revenue_log_table(db_path)
+        ensure_revenue_logs_table(db_path)
+        ensure_workers_table(db_path)
+        ensure_worker_audit_table(db_path)
+        ensure_delivery_tasks_table(db_path)
+        ensure_users_table(db_path)
+        ensure_credit_logs_table(db_path)
+        ensure_mailer_campaign_tables(db_path)
+        ensure_client_success_tables(db_path)
+        ensure_lead_history_table(db_path)
+        ensure_lead_report_table(db_path)
+        _SYSTEM_SCHEMA_READY = True
 
 
 def ensure_scrape_tables(db_path: Path) -> None:
@@ -2738,6 +2751,33 @@ def ensure_scrape_tables(db_path: Path) -> None:
     ensure_system_task_table(db_path)
     ensure_runtime_table(db_path)
     ensure_blacklist_table(db_path)
+
+
+def ensure_dashboard_indexes_startup(db_path: Path) -> None:
+    lead_index_sql = [
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_user_id ON leads(user_id)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_user_created_at ON leads(user_id, created_at DESC, id DESC)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)",
+    ]
+
+    if _is_postgres_task_store_enabled():
+        engine = pg_get_engine()
+        # CREATE INDEX CONCURRENTLY must run outside transaction blocks.
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for ddl in lead_index_sql:
+                conn.execute(text(ddl))
+        return
+
+    # Local sqlite fallback for dev runs.
+    with pgdb.connect(db_path) as conn:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_id ON leads(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_created_at ON leads(user_id, created_at DESC, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)")
+        conn.commit()
 
 
 def ensure_client_success_tables(db_path: Path) -> None:
@@ -11446,6 +11486,18 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logging.warning("[startup] Supabase table init skipped (non-fatal): %s", exc)
             print(f"[startup] WARNING: Supabase table init skipped: {exc}")
+        try:
+            await run_in_threadpool(ensure_system_tables, DEFAULT_DB_PATH)
+            print("[startup] Core system tables OK")
+        except Exception as exc:
+            logging.warning("[startup] System table init skipped (non-fatal): %s", exc)
+            print(f"[startup] WARNING: System table init skipped: {exc}")
+        try:
+            await run_in_threadpool(ensure_dashboard_indexes_startup, DEFAULT_DB_PATH)
+            print("[startup] Dashboard indexes OK")
+        except Exception as exc:
+            logging.warning("[startup] Dashboard index init skipped (non-fatal): %s", exc)
+            print(f"[startup] WARNING: Dashboard index init skipped: {exc}")
         start_scheduler(app)
         if RUN_STARTUP_JOBS:
             launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
