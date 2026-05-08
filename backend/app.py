@@ -12101,6 +12101,35 @@ def create_app() -> FastAPI:
 
     @app.get("/api/recommend-niche")
     def recommend_niche(request: Request) -> dict:
+        def _has_usable_recommendations(payload: Any) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            recs = payload.get("recommendations")
+            if not isinstance(recs, list):
+                return False
+            for item in recs:
+                if isinstance(item, dict) and str(item.get("keyword") or "").strip():
+                    return True
+            return False
+
+        def _ensure_recommendation_shape(payload: dict[str, Any], selected_country: str) -> dict[str, Any]:
+            recommendations = payload.get("recommendations") if isinstance(payload, dict) else []
+            if not isinstance(recommendations, list):
+                recommendations = []
+            usable = [
+                item for item in recommendations
+                if isinstance(item, dict) and str(item.get("keyword") or "").strip()
+            ]
+            if not usable:
+                usable = default_market_recommendations(selected_country)
+            payload["recommendations"] = usable[:3]
+            top_pick = payload.get("top_pick") if isinstance(payload, dict) else None
+            if not isinstance(top_pick, dict) or not str(top_pick.get("keyword") or "").strip():
+                payload["top_pick"] = usable[0]
+            payload.setdefault("selected_country_code", selected_country)
+            payload.setdefault("generated_at", utc_now_iso())
+            return payload
+
         session_token = ""
         user_id = "anonymous"
         billing_context: dict[str, Any] = {}
@@ -12144,7 +12173,8 @@ def create_app() -> FastAPI:
 
         if not force_refresh:
             cached_result = _get_cached_niche_recommendation(user_id, selected_country_code)
-            if cached_result:
+            if _has_usable_recommendations(cached_result):
+                cached_result = _ensure_recommendation_shape(dict(cached_result), selected_country_code)
                 response = {
                     **cached_result,
                     "cached": True,
@@ -12168,7 +12198,8 @@ def create_app() -> FastAPI:
             country_code=selected_country_code,
             max_age_seconds=refresh_window_seconds,
         )
-        if stored_result and (is_free_plan or not force_refresh):
+        if _has_usable_recommendations(stored_result) and (is_free_plan or not force_refresh):
+            stored_result = _ensure_recommendation_shape(dict(stored_result), selected_country_code)
             _set_cached_niche_recommendation(user_id, stored_result, ttl_seconds=refresh_window_seconds, country_code=selected_country_code)
             response = {
                 **stored_result,
@@ -12201,6 +12232,7 @@ def create_app() -> FastAPI:
                 "top_pick": {},
                 "selected_country_code": selected_country_code,
             }
+        result = _ensure_recommendation_shape(result, selected_country_code)
         if force_refresh and not is_free_plan and stored_result:
             result = _promote_alternate_niche_choice(result, stored_result)
         if not str(result.get("generated_at") or "").strip():

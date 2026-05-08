@@ -4300,41 +4300,49 @@ function App({ initialTab = 'leads' }) {
   }, [enrichRetrySeconds])
 
   const fetchNicheAdvice = useCallback(async ({ silent = false, forceRefresh = false, countryCode = null } = {}) => {
-    const selectedCountry = String(countryCode || scrapeForm.country || 'US').toUpperCase()
-    setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
-    const params = new URLSearchParams({ country: selectedCountry })
-    if (forceRefresh) params.set('refresh', '1')
-    const contextKeyword = String(scrapeForm.keyword || '').trim()
-    if (contextKeyword) params.set('context_keyword', contextKeyword)
+    try {
+      const selectedCountry = String(countryCode || scrapeForm.country || 'US').toUpperCase()
+      setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
+      const params = new URLSearchParams({ country: selectedCountry })
+      if (forceRefresh) params.set('refresh', '1')
+      const contextKeyword = String(scrapeForm.keyword || '').trim()
+      if (contextKeyword) params.set('context_keyword', contextKeyword)
 
-    let data = null
-    const retryDelays = [0, 900, 1800]
-    for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
-      try {
-        if (retryDelays[attempt] > 0) {
-          await sleep(retryDelays[attempt])
+      let data = null
+      const retryDelays = [0, 900, 1800]
+      for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+        try {
+          if (retryDelays[attempt] > 0) {
+            await sleep(retryDelays[attempt])
+          }
+          data = await fetchJson(`/api/ai/market-intelligence?${params.toString()}`, {
+            abortKey: 'market-intelligence',
+            bypassCache: forceRefresh,
+            timeoutMs: 35000,
+          })
+          break
+        } catch {
+          // Retry below.
         }
-        data = await fetchJson(`/api/ai/market-intelligence?${params.toString()}`, {
-          abortKey: 'market-intelligence',
-          bypassCache: forceRefresh,
-          timeoutMs: 35000,
-        })
-        break
-      } catch {
-        // Retry below.
       }
-    }
 
-    if (!data) throw new Error('Could not load market intelligence')
+      if (!data) throw new Error('Could not load market intelligence')
 
-    setNicheAdvice({ loading: false, data, error: '' })
-    const recommendationCount = Array.isArray(data?.recommendations) ? data.recommendations.length : 0
-    setMarketPickIndex(forceRefresh && recommendationCount > 1 ? 1 : 0)
-    if (forceRefresh) {
-      setLastManualRefreshAt(data?.generated_at || new Date().toISOString())
-    }
-    if (!silent) {
-      toast.success('AI strategy refreshed')
+      setNicheAdvice({ loading: false, data, error: '' })
+      const recommendationCount = Array.isArray(data?.recommendations) ? data.recommendations.length : 0
+      setMarketPickIndex(forceRefresh && recommendationCount > 1 ? 1 : 0)
+      if (forceRefresh) {
+        setLastManualRefreshAt(data?.generated_at || new Date().toISOString())
+      }
+      if (!silent) {
+        toast.success('AI strategy refreshed')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not load market intelligence'
+      setNicheAdvice((prev) => ({ loading: false, data: prev.data || null, error: message }))
+      if (!silent) {
+        toast.error(message)
+      }
     }
   }, [scrapeForm.country, scrapeForm.keyword])
 
