@@ -673,6 +673,10 @@ class AdminGlobalNotificationRequest(BaseModel):
     active: bool = True
 
 
+class AdminAiSignalsToggleRequest(BaseModel):
+    enabled: bool = True
+
+
 NICHES = [
     "Paid Ads Agency",
     "Web Design & Dev",
@@ -4116,6 +4120,41 @@ def set_runtime_value(db_path: Path, key: str, value: str) -> None:
         conn.commit()
 
 
+AI_SIGNALS_RUNTIME_KEY = "global_ai_signals_state"
+
+
+def load_ai_signals_runtime_state(db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
+    default_state: dict[str, Any] = {
+        "enabled": True,
+        "updated_at": None,
+        "updated_by": "",
+    }
+    raw_state = get_runtime_value(db_path, AI_SIGNALS_RUNTIME_KEY)
+    if not raw_state:
+        return default_state
+    try:
+        parsed = json.loads(str(raw_state))
+    except Exception:
+        return default_state
+    if not isinstance(parsed, dict):
+        return default_state
+    return {
+        "enabled": bool(parsed.get("enabled", True)),
+        "updated_at": parsed.get("updated_at"),
+        "updated_by": str(parsed.get("updated_by") or "").strip().lower(),
+    }
+
+
+def save_ai_signals_runtime_state(enabled: bool, updated_by: str = "", db_path: Path = DEFAULT_DB_PATH) -> dict[str, Any]:
+    state = {
+        "enabled": bool(enabled),
+        "updated_at": utc_now_iso(),
+        "updated_by": str(updated_by or "").strip().lower(),
+    }
+    set_runtime_value(db_path, AI_SIGNALS_RUNTIME_KEY, json.dumps(state, ensure_ascii=False))
+    return state
+
+
 def _billing_runtime_keys(user_id: Optional[str] = None, user_email: Optional[str] = None) -> list[str]:
     keys: list[str] = []
     normalized_user_id = str(user_id or "").strip()
@@ -6805,6 +6844,58 @@ def heuristic_recommendations_from_performance(performance: list[dict], country_
         seen.add(str(fallback["keyword"]).lower())
 
     return recs[:3]
+
+
+def build_market_intelligence_mock_response(
+    country_code: str = "US",
+    *,
+    maintenance: bool = False,
+    maintenance_message: str = "",
+) -> dict[str, Any]:
+    selected_country = normalize_country_value(country_code)
+    country_labels = {
+        "US": "United States",
+        "DE": "Germany",
+        "AT": "Austria",
+        "SI": "Slovenia",
+    }
+    selected_country_label = country_labels.get(selected_country, selected_country)
+    recommendations = [
+        {
+            "keyword": "Roofing in Miami, FL",
+            "location": "Miami, FL",
+            "country_code": "US",
+            "reason": "High growth detected in Miami roofing sector.",
+            "expected_reply_rate": 6.9,
+        },
+        {
+            "keyword": "HVAC Services in Las Vegas, NV",
+            "location": "Las Vegas, NV",
+            "country_code": "US",
+            "reason": "Low competition in HVAC Nevada.",
+            "expected_reply_rate": 6.3,
+        },
+        {
+            "keyword": "Solar Installation in Austin, TX",
+            "location": "Austin, TX",
+            "country_code": "US",
+            "reason": "Rising local demand and high-ticket project sizes sustain strong margin potential.",
+            "expected_reply_rate": 5.8,
+        },
+    ]
+    maintenance_text = str(maintenance_message or "").strip()
+    return {
+        "source": "mock",
+        "generated_at": utc_now_iso(),
+        "recommendations": recommendations,
+        "top_pick": recommendations[0],
+        "top_pick_index": 0,
+        "performance_snapshot": [],
+        "selected_country_code": selected_country,
+        "selected_country_label": selected_country_label,
+        "maintenance": bool(maintenance),
+        "maintenance_message": maintenance_text,
+    }
 
 
 def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str = "US", user_id: Optional[str] = None) -> dict:
@@ -12115,6 +12206,67 @@ def create_app() -> FastAPI:
                 "free_plan_niche_limit": FREE_PLAN_NICHE_RECOMMENDATIONS_PER_MONTH,
             })
         return response
+
+    @app.get("/api/ai/market-intelligence")
+    def ai_market_intelligence(request: Request) -> dict:
+        selected_country_code = normalize_country_value(
+            request.query_params.get("country") or request.query_params.get("country_code"),
+            None,
+        )
+        ai_signals_state = load_ai_signals_runtime_state(DEFAULT_DB_PATH)
+        ai_key_configured = has_any_ai_api_key(DEFAULT_CONFIG_PATH)
+
+        if not bool(ai_signals_state.get("enabled", True)):
+            disabled_payload = build_market_intelligence_mock_response(
+                selected_country_code,
+                maintenance=True,
+                maintenance_message="System Maintenance: AI Signals are temporarily disabled by admin.",
+            )
+            disabled_payload.update(
+                {
+                    "ai_signals_enabled": False,
+                    "ai_key_configured": ai_key_configured,
+                }
+            )
+            return disabled_payload
+
+        if not ai_key_configured:
+            mock_payload = build_market_intelligence_mock_response(
+                selected_country_code,
+                maintenance=False,
+                maintenance_message="",
+            )
+            mock_payload.update(
+                {
+                    "ai_signals_enabled": True,
+                    "ai_key_configured": False,
+                    "source": "mock",
+                }
+            )
+            return mock_payload
+
+        try:
+            response = recommend_niche(request)
+            if isinstance(response, dict):
+                response["ai_signals_enabled"] = True
+                response["ai_key_configured"] = True
+                response.setdefault("maintenance", False)
+                response.setdefault("maintenance_message", "")
+            return response
+        except Exception as exc:
+            logging.warning("Market intelligence endpoint fallback to mock: %s", exc)
+            maintenance_payload = build_market_intelligence_mock_response(
+                selected_country_code,
+                maintenance=True,
+                maintenance_message="System Maintenance: AI signal service temporarily unavailable, using mock insights.",
+            )
+            maintenance_payload.update(
+                {
+                    "ai_signals_enabled": True,
+                    "ai_key_configured": ai_key_configured,
+                }
+            )
+            return maintenance_payload
 
     def auth_required(func: Callable) -> Callable:
         signature = inspect.signature(func)
@@ -17780,6 +17932,7 @@ def create_app() -> FastAPI:
             key=lambda row: str(row.get("created_at") or ""),
             reverse=True,
         )[:80]
+        ai_signals_state = load_ai_signals_runtime_state(DEFAULT_DB_PATH)
 
         return {
             "stats": {
@@ -17801,6 +17954,7 @@ def create_app() -> FastAPI:
             "lead_quality": lead_quality,
             "logs": logs,
             "notification": notification_payload,
+            "ai_signals": ai_signals_state,
         }
 
     @app.post("/api/admin/credits")
@@ -18285,6 +18439,15 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "notification": notification_payload,
+        }
+
+    @app.post("/api/admin/ai-signals")
+    def admin_set_ai_signals(payload: AdminAiSignalsToggleRequest, request: Request) -> dict:
+        admin_email = str(getattr(request.state, "current_user_email", "") or "").strip().lower()
+        state = save_ai_signals_runtime_state(bool(payload.enabled), admin_email, db_path=DEFAULT_DB_PATH)
+        return {
+            "status": "ok",
+            "ai_signals": state,
         }
 
     @app.get("/api/system/notification")

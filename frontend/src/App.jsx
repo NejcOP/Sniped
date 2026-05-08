@@ -1311,6 +1311,7 @@ function isAiEndpoint(path) {
     || endpoint.includes('/api/mailer/cold-outreach')
     || endpoint.includes('/api/mailer/preview')
     || endpoint.includes('/api/recommend-niche')
+    || endpoint.includes('/api/ai/market-intelligence')
 }
 
 function getFriendlyAiError(path, status, detail) {
@@ -2318,11 +2319,13 @@ function App({ initialTab = 'leads' }) {
     lead_quality: { success_rate: 0, successful: 0, attempted: 0 },
     logs: [],
     notification: { active: false, message: '', updated_at: null },
+    ai_signals: { enabled: true, updated_at: null, updated_by: '' },
   })
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminSection, setAdminSection] = useState('users')
   const [adminPlanForm, setAdminPlanForm] = useState({ userId: '', planKey: 'growth' })
   const [globalNoticeForm, setGlobalNoticeForm] = useState({ message: '', active: true })
+  const [aiSignalsEnabledForm, setAiSignalsEnabledForm] = useState(true)
   const [globalBanner, setGlobalBanner] = useState({ active: false, message: '', updated_at: null })
   const [scrapeForm, setScrapeForm] = useState(defaultScrape)
   const [enrichForm, setEnrichForm] = useState(defaultEnrich)
@@ -4297,30 +4300,94 @@ function App({ initialTab = 'leads' }) {
   }, [enrichRetrySeconds])
 
   const fetchNicheAdvice = useCallback(async ({ silent = false, forceRefresh = false, countryCode = null } = {}) => {
-    try {
-      setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
-      const selectedCountry = String(countryCode || scrapeForm.country || 'US').toUpperCase()
-      const params = new URLSearchParams({ country: selectedCountry })
-      if (forceRefresh) params.set('refresh', '1')
-      const data = await fetchJson(`/api/recommend-niche?${params.toString()}`)
-      setNicheAdvice({ loading: false, data, error: '' })
-      const recommendationCount = Array.isArray(data?.recommendations) ? data.recommendations.length : 0
-      setMarketPickIndex(forceRefresh && recommendationCount > 1 ? 1 : 0)
-      if (forceRefresh) {
-        setLastManualRefreshAt(data?.generated_at || new Date().toISOString())
+    const selectedCountry = String(countryCode || scrapeForm.country || 'US').toUpperCase()
+    const buildMockSignals = (maintenance = false, maintenanceMessage = '') => ({
+      source: 'mock',
+      generated_at: new Date().toISOString(),
+      recommendations: [
+        {
+          keyword: 'Roofing in Miami, FL',
+          location: 'Miami, FL',
+          country_code: 'US',
+          reason: 'High growth detected in Miami roofing sector.',
+          expected_reply_rate: 6.9,
+        },
+        {
+          keyword: 'HVAC Services in Las Vegas, NV',
+          location: 'Las Vegas, NV',
+          country_code: 'US',
+          reason: 'Low competition in HVAC Nevada.',
+          expected_reply_rate: 6.3,
+        },
+        {
+          keyword: 'Solar Installation in Austin, TX',
+          location: 'Austin, TX',
+          country_code: 'US',
+          reason: 'Rising local demand and high-ticket project sizes sustain strong margin potential.',
+          expected_reply_rate: 5.8,
+        },
+      ],
+      top_pick_index: 0,
+      top_pick: {
+        keyword: 'Roofing in Miami, FL',
+        location: 'Miami, FL',
+        country_code: 'US',
+        reason: 'High growth detected in Miami roofing sector.',
+        expected_reply_rate: 6.9,
+      },
+      performance_snapshot: [],
+      selected_country_code: selectedCountry,
+      maintenance,
+      maintenance_message: maintenanceMessage,
+      ai_signals_enabled: !maintenance,
+      ai_key_configured: false,
+    })
+
+    setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
+    const params = new URLSearchParams({ country: selectedCountry })
+    if (forceRefresh) params.set('refresh', '1')
+
+    let data = null
+    const retryDelays = [0, 900, 1800]
+    for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+      try {
+        if (retryDelays[attempt] > 0) {
+          await sleep(retryDelays[attempt])
+        }
+        data = await fetchJson(`/api/ai/market-intelligence?${params.toString()}`, {
+          abortKey: 'market-intelligence',
+          bypassCache: forceRefresh,
+          timeoutMs: 35000,
+        })
+        break
+      } catch {
+        // Retry below.
       }
+    }
+
+    if (!data) {
+      const fallbackData = buildMockSignals(true, 'System Maintenance: AI signal service temporarily unavailable, using mock insights.')
+      setNicheAdvice({ loading: false, data: fallbackData, error: '' })
+      setMarketPickIndex(0)
       if (!silent) {
+        toast.error('AI Signal is in maintenance mode. Showing mock insights.')
+      }
+      return
+    }
+
+    setNicheAdvice({ loading: false, data, error: '' })
+    const recommendationCount = Array.isArray(data?.recommendations) ? data.recommendations.length : 0
+    setMarketPickIndex(forceRefresh && recommendationCount > 1 ? 1 : 0)
+    if (forceRefresh) {
+      setLastManualRefreshAt(data?.generated_at || new Date().toISOString())
+    }
+    if (!silent) {
+      if (data?.maintenance) {
+        toast.error(String(data?.maintenance_message || 'System Maintenance: AI Signal is temporarily unavailable.'))
+      } else if (data?.source === 'mock' || data?.ai_key_configured === false) {
+        toast('Mock AI signals loaded')
+      } else {
         toast.success('AI strategy refreshed')
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not load niche recommendation'
-      setNicheAdvice({
-        loading: false,
-        data: null,
-        error: message,
-      })
-      if (!silent) {
-        toast.error(message)
       }
     }
   }, [scrapeForm.country])
@@ -4653,11 +4720,17 @@ function App({ initialTab = 'leads' }) {
           message: String(data?.notification?.message || ''),
           updated_at: data?.notification?.updated_at || null,
         },
+        ai_signals: {
+          enabled: Boolean(data?.ai_signals?.enabled ?? true),
+          updated_at: data?.ai_signals?.updated_at || null,
+          updated_by: String(data?.ai_signals?.updated_by || ''),
+        },
       })
       setGlobalNoticeForm({
         message: String(data?.notification?.message || ''),
         active: Boolean(data?.notification?.active),
       })
+      setAiSignalsEnabledForm(Boolean(data?.ai_signals?.enabled ?? true))
       return data
     } catch (error) {
       if (!silent) {
@@ -4786,6 +4859,25 @@ function App({ initialTab = 'leads' }) {
       setAdminLoading(false)
     }
   }, [globalNoticeForm, isAdminUser, refreshAdminOverview])
+
+  const adminSaveAiSignalsToggle = useCallback(async (event) => {
+    event.preventDefault()
+    if (!isAdminUser) return
+    setAdminLoading(true)
+    try {
+      await fetchJson('/api/admin/ai-signals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: Boolean(aiSignalsEnabledForm) }),
+      })
+      toast.success(`AI Signals ${aiSignalsEnabledForm ? 'enabled' : 'disabled'} globally`)
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to update AI signals toggle')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [aiSignalsEnabledForm, isAdminUser, refreshAdminOverview])
 
   const refreshGlobalNotification = useCallback(async () => {
     try {
@@ -8005,6 +8097,17 @@ function App({ initialTab = 'leads' }) {
                 </div>
               ) : (
                 <>
+                  {nicheAdvice.data?.maintenance ? (
+                    <div className="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                      <p className="font-semibold uppercase tracking-[0.12em]">System Maintenance</p>
+                      <p className="mt-1 text-amber-100/90">{String(nicheAdvice.data?.maintenance_message || 'AI Signal is temporarily unavailable. Showing mock insights.')}</p>
+                    </div>
+                  ) : nicheAdvice.data?.source === 'mock' || nicheAdvice.data?.ai_key_configured === false ? (
+                    <div className="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                      Mock mode active: live AI key is not configured yet, showing development signals.
+                    </div>
+                  ) : null}
+
                   <div className="mt-3 grid gap-3 sm:grid-cols-3">
                     <div className="rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2">
                       <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Niche</p>
@@ -10941,6 +11044,21 @@ function App({ initialTab = 'leads' }) {
                     </div>
                     {adminOverview.scraper.last_error ? <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">{adminOverview.scraper.last_error}</p> : null}
                   </div>
+
+                  <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={adminSaveAiSignalsToggle}>
+                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">AI Signals Global Switch</p>
+                    <p className="mt-1 text-xs text-slate-500">Toggle market intelligence engine for all users.</p>
+                    <label className="mt-3 inline-flex items-center gap-2 text-sm text-slate-300">
+                      <input type="checkbox" checked={aiSignalsEnabledForm} onChange={(e) => setAiSignalsEnabledForm(e.target.checked)} /> Enable AI Signals platform-wide
+                    </label>
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      Last update: {adminOverview.ai_signals?.updated_at || 'n/a'}
+                      {adminOverview.ai_signals?.updated_by ? ` by ${adminOverview.ai_signals.updated_by}` : ''}
+                    </p>
+                    <div className="mt-3 flex items-center gap-3">
+                      <button className="btn-primary" type="submit" disabled={adminLoading}>Save AI Signal Toggle</button>
+                    </div>
+                  </form>
 
                   <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={adminSaveGlobalNotification}>
                     <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Global Notification</p>
