@@ -6898,7 +6898,13 @@ def build_market_intelligence_mock_response(
     }
 
 
-def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str = "US", user_id: Optional[str] = None) -> dict:
+def get_niche_recommendation(
+    db_path: Path,
+    config_path: Path,
+    country_code: str = "US",
+    user_id: Optional[str] = None,
+    search_context: Optional[str] = None,
+) -> dict:
     ensure_system_tables(db_path)
     selected_country = normalize_country_value(country_code)
     country_labels = {
@@ -6908,6 +6914,7 @@ def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str
         "SI": "Slovenia",
     }
     selected_country_label = country_labels.get(selected_country, selected_country)
+    normalized_search_context = str(search_context or "").strip()
     performance = extract_keyword_performance(db_path, user_id=user_id)
     heuristic = heuristic_recommendations_from_performance(performance, selected_country)
 
@@ -6921,6 +6928,7 @@ def get_niche_recommendation(db_path: Path, config_path: Path, country_code: str
             "performance_snapshot": performance,
             "selected_country_code": selected_country,
             "selected_country_label": selected_country_label,
+            "search_context": normalized_search_context,
         }
 
     perf_lines = "\n".join(
@@ -6969,6 +6977,9 @@ Rules:
 - All 3 locations must be in country {selected_country}.
 - country_code must always be '{selected_country}'.
 - expected_reply_rate must be a realistic number between 1.0 and 15.0.
+- If search_context is provided, prioritize niches close to this context and avoid generic defaults.
+
+search_context: {normalized_search_context or 'none'}
 """.strip()
 
     try:
@@ -7054,6 +7065,7 @@ Rules:
             "performance_snapshot": performance,
             "selected_country_code": selected_country,
             "selected_country_label": selected_country_label,
+            "search_context": normalized_search_context,
         }
     except Exception as exc:
         logging.warning("Niche recommendation fallback to heuristic: %s", exc)
@@ -7065,6 +7077,7 @@ Rules:
             "performance_snapshot": performance,
             "selected_country_code": selected_country,
             "selected_country_label": selected_country_label,
+            "search_context": normalized_search_context,
         }
 
 
@@ -12119,6 +12132,11 @@ def create_app() -> FastAPI:
             request.query_params.get("country") or request.query_params.get("country_code"),
             None,
         )
+        search_context = str(
+            request.query_params.get("context_keyword")
+            or request.query_params.get("keyword")
+            or ""
+        ).strip()
         force_refresh = str(request.query_params.get("refresh") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
         refresh_window_days = _niche_recommendation_refresh_window_days(is_free_plan)
         refresh_window_seconds = _niche_recommendation_refresh_window_seconds(is_free_plan)
@@ -12174,6 +12192,7 @@ def create_app() -> FastAPI:
             DEFAULT_CONFIG_PATH,
             country_code=selected_country_code,
             user_id=user_id,
+            search_context=search_context,
         )
         if not isinstance(result, dict):
             result = {
@@ -12231,19 +12250,13 @@ def create_app() -> FastAPI:
             return disabled_payload
 
         if not ai_key_configured:
-            mock_payload = build_market_intelligence_mock_response(
-                selected_country_code,
-                maintenance=False,
-                maintenance_message="",
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "OPENAI_API_KEY is not configured for Market Intelligence. "
+                    "Set it in Railway environment variables."
+                ),
             )
-            mock_payload.update(
-                {
-                    "ai_signals_enabled": True,
-                    "ai_key_configured": False,
-                    "source": "mock",
-                }
-            )
-            return mock_payload
 
         try:
             response = recommend_niche(request)
@@ -12255,18 +12268,13 @@ def create_app() -> FastAPI:
             return response
         except Exception as exc:
             logging.warning("Market intelligence endpoint fallback to mock: %s", exc)
-            maintenance_payload = build_market_intelligence_mock_response(
-                selected_country_code,
-                maintenance=True,
-                maintenance_message="System Maintenance: AI signal service temporarily unavailable, using mock insights.",
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Market intelligence upstream failed. Check Railway logs for "
+                    "'Market intelligence endpoint fallback to mock'."
+                ),
             )
-            maintenance_payload.update(
-                {
-                    "ai_signals_enabled": True,
-                    "ai_key_configured": ai_key_configured,
-                }
-            )
-            return maintenance_payload
 
     def auth_required(func: Callable) -> Callable:
         signature = inspect.signature(func)
@@ -17933,6 +17941,7 @@ def create_app() -> FastAPI:
             reverse=True,
         )[:80]
         ai_signals_state = load_ai_signals_runtime_state(DEFAULT_DB_PATH)
+        ai_signals_state["ai_key_configured"] = has_any_ai_api_key(DEFAULT_CONFIG_PATH)
 
         return {
             "stats": {

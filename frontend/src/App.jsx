@@ -4301,51 +4301,11 @@ function App({ initialTab = 'leads' }) {
 
   const fetchNicheAdvice = useCallback(async ({ silent = false, forceRefresh = false, countryCode = null } = {}) => {
     const selectedCountry = String(countryCode || scrapeForm.country || 'US').toUpperCase()
-    const buildMockSignals = (maintenance = false, maintenanceMessage = '') => ({
-      source: 'mock',
-      generated_at: new Date().toISOString(),
-      recommendations: [
-        {
-          keyword: 'Roofing in Miami, FL',
-          location: 'Miami, FL',
-          country_code: 'US',
-          reason: 'High growth detected in Miami roofing sector.',
-          expected_reply_rate: 6.9,
-        },
-        {
-          keyword: 'HVAC Services in Las Vegas, NV',
-          location: 'Las Vegas, NV',
-          country_code: 'US',
-          reason: 'Low competition in HVAC Nevada.',
-          expected_reply_rate: 6.3,
-        },
-        {
-          keyword: 'Solar Installation in Austin, TX',
-          location: 'Austin, TX',
-          country_code: 'US',
-          reason: 'Rising local demand and high-ticket project sizes sustain strong margin potential.',
-          expected_reply_rate: 5.8,
-        },
-      ],
-      top_pick_index: 0,
-      top_pick: {
-        keyword: 'Roofing in Miami, FL',
-        location: 'Miami, FL',
-        country_code: 'US',
-        reason: 'High growth detected in Miami roofing sector.',
-        expected_reply_rate: 6.9,
-      },
-      performance_snapshot: [],
-      selected_country_code: selectedCountry,
-      maintenance,
-      maintenance_message: maintenanceMessage,
-      ai_signals_enabled: !maintenance,
-      ai_key_configured: false,
-    })
-
     setNicheAdvice((prev) => ({ ...prev, loading: true, error: '' }))
     const params = new URLSearchParams({ country: selectedCountry })
     if (forceRefresh) params.set('refresh', '1')
+    const contextKeyword = String(scrapeForm.keyword || '').trim()
+    if (contextKeyword) params.set('context_keyword', contextKeyword)
 
     let data = null
     const retryDelays = [0, 900, 1800]
@@ -4365,15 +4325,7 @@ function App({ initialTab = 'leads' }) {
       }
     }
 
-    if (!data) {
-      const fallbackData = buildMockSignals(true, 'System Maintenance: AI signal service temporarily unavailable, using mock insights.')
-      setNicheAdvice({ loading: false, data: fallbackData, error: '' })
-      setMarketPickIndex(0)
-      if (!silent) {
-        toast.error('AI Signal is in maintenance mode. Showing mock insights.')
-      }
-      return
-    }
+    if (!data) throw new Error('Could not load market intelligence')
 
     setNicheAdvice({ loading: false, data, error: '' })
     const recommendationCount = Array.isArray(data?.recommendations) ? data.recommendations.length : 0
@@ -4382,15 +4334,9 @@ function App({ initialTab = 'leads' }) {
       setLastManualRefreshAt(data?.generated_at || new Date().toISOString())
     }
     if (!silent) {
-      if (data?.maintenance) {
-        toast.error(String(data?.maintenance_message || 'System Maintenance: AI Signal is temporarily unavailable.'))
-      } else if (data?.source === 'mock' || data?.ai_key_configured === false) {
-        toast('Mock AI signals loaded')
-      } else {
-        toast.success('AI strategy refreshed')
-      }
+      toast.success('AI strategy refreshed')
     }
-  }, [scrapeForm.country])
+  }, [scrapeForm.country, scrapeForm.keyword])
 
   useEffect(() => {
     if (activeTab !== 'leads') return undefined
@@ -4402,6 +4348,15 @@ function App({ initialTab = 'leads' }) {
     }, intervalMs)
     return () => window.clearInterval(nicheRefreshId)
   }, [activeTab, fetchNicheAdvice, scrapeForm.country, user?.isSubscribed, user?.subscription_active, user?.plan_key])
+
+  useEffect(() => {
+    if (activeTab !== 'leads') return undefined
+    if (!nicheAdvice.error) return undefined
+    const retryId = window.setTimeout(() => {
+      void fetchNicheAdvice({ silent: true, countryCode: scrapeForm.country })
+    }, 12000)
+    return () => window.clearTimeout(retryId)
+  }, [activeTab, nicheAdvice.error, fetchNicheAdvice, scrapeForm.country])
 
   useEffect(() => {
     const previousTasks = previousTasksRef.current
@@ -8083,10 +8038,11 @@ function App({ initialTab = 'leads' }) {
                 <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
                   <p className="text-sm font-semibold text-amber-300">AI Signal unavailable</p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {nicheAdvice.error.toLowerCase().includes('backend') || nicheAdvice.error.toLowerCase().includes('503')
-                      ? 'The AI signal service is temporarily offline. Showing heuristic fallback data when available.'
+                    {nicheAdvice.error.toLowerCase().includes('openai_api_key')
+                      ? 'OpenAI key is missing on Railway. Set OPENAI_API_KEY and refresh.'
                       : nicheAdvice.error}
                   </p>
+                  <p className="mt-1 text-[11px] text-slate-500">Auto-retry will run in the background every few minutes.</p>
                   <button
                     className="mt-2 text-xs text-cyan-400 hover:text-cyan-300 underline"
                     type="button"
@@ -8097,17 +8053,6 @@ function App({ initialTab = 'leads' }) {
                 </div>
               ) : (
                 <>
-                  {nicheAdvice.data?.maintenance ? (
-                    <div className="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                      <p className="font-semibold uppercase tracking-[0.12em]">System Maintenance</p>
-                      <p className="mt-1 text-amber-100/90">{String(nicheAdvice.data?.maintenance_message || 'AI Signal is temporarily unavailable. Showing mock insights.')}</p>
-                    </div>
-                  ) : nicheAdvice.data?.source === 'mock' || nicheAdvice.data?.ai_key_configured === false ? (
-                    <div className="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
-                      Mock mode active: live AI key is not configured yet, showing development signals.
-                    </div>
-                  ) : null}
-
                   <div className="mt-3 grid gap-3 sm:grid-cols-3">
                     <div className="rounded-xl border border-white/10 bg-slate-900/70 px-3 py-2">
                       <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Niche</p>
