@@ -5336,6 +5336,52 @@ def set_supabase_primary_mode(config_path: Path, enabled: bool) -> None:
         json.dump(cfg, handle, indent=2)
 
 
+_SUPABASE_TABLE_NAME_CACHE: dict[str, str] = {}
+
+
+def _is_supabase_missing_table_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        "pgrst205" in message
+        or "could not find the table" in message
+        or "does not exist" in message
+    )
+
+
+def _supabase_table_candidates(table_name: str) -> list[str]:
+    raw = str(table_name or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    lowered = raw.lower()
+    if lowered not in candidates:
+        candidates.append(lowered)
+    return candidates
+
+
+def resolve_supabase_table_name(client: Any, table_name: str) -> str:
+    raw = str(table_name or "").strip()
+    if not raw:
+        return raw
+
+    cache_key = raw.lower()
+    cached = _SUPABASE_TABLE_NAME_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    for candidate in _supabase_table_candidates(raw):
+        try:
+            client.table(candidate).select("*").limit(1).execute()
+            _SUPABASE_TABLE_NAME_CACHE[cache_key] = candidate
+            return candidate
+        except Exception as exc:
+            if _is_supabase_missing_table_error(exc):
+                continue
+            return raw
+
+    return raw
+
+
 def supabase_select_rows(
     client: Any,
     table_name: str,
@@ -5347,7 +5393,8 @@ def supabase_select_rows(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
 ) -> list[dict]:
-    query = client.table(table_name).select(columns)
+    resolved_table_name = resolve_supabase_table_name(client, table_name)
+    query = client.table(resolved_table_name).select(columns)
     if filters:
         for key, value in filters.items():
             query = query.eq(key, value)
@@ -5365,11 +5412,18 @@ def supabase_table_available(config_path: Path, table_name: str) -> bool:
     client = get_supabase_client(config_path)
     if client is None:
         return False
-    try:
-        client.table(table_name).select("*").limit(1).execute()
-        return True
-    except Exception:
-        return False
+    cache_key = str(table_name or "").strip().lower()
+    for candidate in _supabase_table_candidates(table_name):
+        try:
+            client.table(candidate).select("*").limit(1).execute()
+            if cache_key:
+                _SUPABASE_TABLE_NAME_CACHE[cache_key] = candidate
+            return True
+        except Exception as exc:
+            if _is_supabase_missing_table_error(exc):
+                continue
+            return False
+    return False
 
 
 def is_supabase_auth_enabled(config_path: Path) -> bool:
@@ -14006,16 +14060,17 @@ def create_app() -> FastAPI:
                 client = get_supabase_client(DEFAULT_CONFIG_PATH)
                 if client is None:
                     raise HTTPException(status_code=500, detail="Supabase not configured")
+                saved_segments_table = resolve_supabase_table_name(client, "SavedSegments")
                 now_iso = utc_now_iso()
                 name = payload.name.strip()
                 filters_json = json.dumps(payload.filters or {}, ensure_ascii=False)
-                existing_rows = client.table("SavedSegments").select("id").eq("user_id", user_id).eq("name", name).limit(1).execute().data or []
+                existing_rows = client.table(saved_segments_table).select("id").eq("user_id", user_id).eq("name", name).limit(1).execute().data or []
                 if existing_rows:
                     segment_id = int(existing_rows[0].get("id"))
-                    client.table("SavedSegments").update({"filters_json": filters_json, "updated_at": now_iso}).eq("id", segment_id).eq("user_id", user_id).execute()
-                    saved_rows = client.table("SavedSegments").select("id,user_id,name,filters_json,created_at,updated_at").eq("id", segment_id).limit(1).execute().data or []
+                    client.table(saved_segments_table).update({"filters_json": filters_json, "updated_at": now_iso}).eq("id", segment_id).eq("user_id", user_id).execute()
+                    saved_rows = client.table(saved_segments_table).select("id,user_id,name,filters_json,created_at,updated_at").eq("id", segment_id).limit(1).execute().data or []
                 else:
-                    saved_rows = client.table("SavedSegments").insert({
+                    saved_rows = client.table(saved_segments_table).insert({
                         "user_id": user_id,
                         "name": name,
                         "filters_json": filters_json,
@@ -14041,10 +14096,11 @@ def create_app() -> FastAPI:
                 client = get_supabase_client(DEFAULT_CONFIG_PATH)
                 if client is None:
                     raise HTTPException(status_code=500, detail="Supabase not configured")
-                existing_rows = client.table("SavedSegments").select("id").eq("id", int(segment_id)).eq("user_id", user_id).limit(1).execute().data or []
+                saved_segments_table = resolve_supabase_table_name(client, "SavedSegments")
+                existing_rows = client.table(saved_segments_table).select("id").eq("id", int(segment_id)).eq("user_id", user_id).limit(1).execute().data or []
                 if not existing_rows:
                     raise HTTPException(status_code=404, detail="Saved segment not found")
-                client.table("SavedSegments").delete().eq("id", int(segment_id)).eq("user_id", user_id).execute()
+                client.table(saved_segments_table).delete().eq("id", int(segment_id)).eq("user_id", user_id).execute()
                 return {"status": "deleted", "id": int(segment_id)}
 
             return delete_saved_segment(DEFAULT_DB_PATH, user_id, segment_id)
@@ -14092,8 +14148,9 @@ def create_app() -> FastAPI:
             client = get_supabase_client(DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
+            client_folders_table = resolve_supabase_table_name(client, "ClientFolders")
             now_iso = utc_now_iso()
-            inserted = client.table("ClientFolders").insert(
+            inserted = client.table(client_folders_table).insert(
                 {
                     "user_id": user_id,
                     "name": payload.name.strip(),
@@ -14124,6 +14181,7 @@ def create_app() -> FastAPI:
             client = get_supabase_client(DEFAULT_CONFIG_PATH)
             if client is None:
                 raise HTTPException(status_code=500, detail="Supabase not configured")
+            client_folders_table = resolve_supabase_table_name(client, "ClientFolders")
             lead_rows = client.table("leads").select("id,user_id,business_name").eq("id", lead_id).limit(1).execute().data or []
             if not lead_rows:
                 raise HTTPException(status_code=404, detail="Lead not found")
@@ -14131,7 +14189,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="Forbidden")
             folder_name = None
             if normalized_folder_id is not None:
-                folder_rows = client.table("ClientFolders").select("id,name,user_id").eq("id", normalized_folder_id).limit(1).execute().data or []
+                folder_rows = client.table(client_folders_table).select("id,name,user_id").eq("id", normalized_folder_id).limit(1).execute().data or []
                 if not folder_rows or str(folder_rows[0].get("user_id") or "") != user_id:
                     raise HTTPException(status_code=404, detail="Client folder not found")
                 folder_name = str(folder_rows[0].get("name") or "").strip() or None
