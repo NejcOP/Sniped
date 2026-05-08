@@ -2,7 +2,9 @@ import confetti from 'canvas-confetti'
 import axios from 'axios'
 import {
   Activity,
+  AlertTriangle,
   Ban,
+  Bell,
   Briefcase,
   Building2,
   CheckCircle2,
@@ -28,11 +30,16 @@ import {
   Phone,
   PlusCircle,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Send,
   Settings,
   Shield,
+  UserCheck,
+  UserX,
+  KeyRound,
+  LogIn,
   Sparkles,
   Rocket,
   Star,
@@ -2306,14 +2313,23 @@ function App({ initialTab = 'leads' }) {
     stats: { total_users: 0, total_revenue: 0, total_leads: 0 },
     scraper: { health: 'unknown', last_status: 'unknown', last_error: '', last_updated_at: null },
     users: [],
+    transactions: [],
+    top_scrapers: [],
+    lead_quality: { success_rate: 0, successful: 0, attempted: 0 },
+    logs: [],
+    notification: { active: false, message: '', updated_at: null },
   })
   const [adminLoading, setAdminLoading] = useState(false)
+  const [adminSection, setAdminSection] = useState('users')
   const [adminCreditForm, setAdminCreditForm] = useState({
     email: '',
     action: 'add',
     amount: '100',
     note: '',
   })
+  const [adminPlanForm, setAdminPlanForm] = useState({ userId: '', planKey: 'growth' })
+  const [globalNoticeForm, setGlobalNoticeForm] = useState({ message: '', active: true })
+  const [globalBanner, setGlobalBanner] = useState({ active: false, message: '', updated_at: null })
   const [scrapeForm, setScrapeForm] = useState(defaultScrape)
   const [enrichForm, setEnrichForm] = useState(defaultEnrich)
   const [mailerForm, setMailerForm] = useState(defaultMailer)
@@ -4630,6 +4646,23 @@ function App({ initialTab = 'leads' }) {
           last_updated_at: data?.scraper?.last_updated_at || null,
         },
         users: Array.isArray(data?.users) ? data.users : [],
+        transactions: Array.isArray(data?.transactions) ? data.transactions : [],
+        top_scrapers: Array.isArray(data?.top_scrapers) ? data.top_scrapers : [],
+        lead_quality: {
+          success_rate: Number(data?.lead_quality?.success_rate || 0),
+          successful: Number(data?.lead_quality?.successful || 0),
+          attempted: Number(data?.lead_quality?.attempted || 0),
+        },
+        logs: Array.isArray(data?.logs) ? data.logs : [],
+        notification: {
+          active: Boolean(data?.notification?.active),
+          message: String(data?.notification?.message || ''),
+          updated_at: data?.notification?.updated_at || null,
+        },
+      })
+      setGlobalNoticeForm({
+        message: String(data?.notification?.message || ''),
+        active: Boolean(data?.notification?.active),
       })
       return data
     } catch (error) {
@@ -4679,6 +4712,145 @@ function App({ initialTab = 'leads' }) {
       setAdminLoading(false)
     }
   }, [adminCreditForm, isAdminUser, refreshAdminOverview])
+
+  const adminToggleBlock = useCallback(async (userRow, blocked) => {
+    if (!isAdminUser) return
+    const reason = blocked ? window.prompt('Reason for block (optional):', userRow?.blocked_reason || '') || '' : ''
+    setAdminLoading(true)
+    try {
+      await fetchJson(`/api/admin/users/${encodeURIComponent(userRow.id)}/block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocked, reason }),
+      })
+      toast.success(blocked ? 'User blocked' : 'User unblocked')
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to update block state')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [isAdminUser, refreshAdminOverview])
+
+  const adminImpersonate = useCallback(async (userRow) => {
+    if (!isAdminUser) return
+    const confirmed = window.confirm(`Impersonate ${userRow?.email || 'this user'}?`)
+    if (!confirmed) return
+    setAdminLoading(true)
+    try {
+      const data = await fetchJson(`/api/admin/users/${encodeURIComponent(userRow.id)}/impersonate`, {
+        method: 'POST',
+      })
+      localStorage.setItem('lf_token', String(data?.token || ''))
+      localStorage.setItem('lf_email', String(data?.email || ''))
+      toast.success(`Now impersonating ${String(data?.email || '')}`)
+      window.location.assign('/app')
+    } catch (error) {
+      toast.error(error?.message || 'Impersonation failed')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [isAdminUser])
+
+  const adminResetPassword = useCallback(async (userRow) => {
+    if (!isAdminUser) return
+    const confirmed = window.confirm(`Send password reset email to ${userRow?.email || 'user'}?`)
+    if (!confirmed) return
+    setAdminLoading(true)
+    try {
+      await fetchJson(`/api/admin/users/${encodeURIComponent(userRow.id)}/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      toast.success('Password reset email sent')
+    } catch (error) {
+      toast.error(error?.message || 'Failed to send reset email')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [isAdminUser])
+
+  const adminUpdatePlan = useCallback(async (event) => {
+    event.preventDefault()
+    if (!isAdminUser) return
+    if (!adminPlanForm.userId) {
+      toast.error('Select a user')
+      return
+    }
+    setAdminLoading(true)
+    try {
+      await fetchJson(`/api/admin/users/${encodeURIComponent(adminPlanForm.userId)}/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_key: adminPlanForm.planKey }),
+      })
+      toast.success('Plan updated')
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to update plan')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [adminPlanForm, isAdminUser, refreshAdminOverview])
+
+  const adminRestartScrapers = useCallback(async () => {
+    if (!isAdminUser) return
+    setAdminLoading(true)
+    try {
+      await fetchJson('/api/admin/scrapers/restart', { method: 'POST' })
+      toast.success('Scraper restart signal sent')
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to restart scrapers')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [isAdminUser, refreshAdminOverview])
+
+  const adminSaveGlobalNotification = useCallback(async (event) => {
+    event.preventDefault()
+    if (!isAdminUser) return
+    setAdminLoading(true)
+    try {
+      const data = await fetchJson('/api/admin/notification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: String(globalNoticeForm.message || '').trim(),
+          active: Boolean(globalNoticeForm.active),
+        }),
+      })
+      setGlobalBanner(data?.notification || { active: false, message: '', updated_at: null })
+      toast.success('Global notification updated')
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to update notification')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [globalNoticeForm, isAdminUser, refreshAdminOverview])
+
+  const refreshGlobalNotification = useCallback(async () => {
+    try {
+      const data = await fetchJson('/api/system/notification')
+      setGlobalBanner({
+        active: Boolean(data?.active),
+        message: String(data?.message || ''),
+        updated_at: data?.updated_at || null,
+      })
+    } catch {
+      // Keep quiet for non-critical banner polling.
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshGlobalNotification()
+    const timer = window.setInterval(() => {
+      void refreshGlobalNotification()
+    }, 30000)
+    return () => window.clearInterval(timer)
+  }, [refreshGlobalNotification])
 
   const syncBillingStateAfterCheckout = useCallback(async (rawPlanKey = '') => {
     const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
@@ -7445,6 +7617,14 @@ function App({ initialTab = 'leads' }) {
   return (
     <div className="app-root">
       <Toaster {...appToasterProps} />
+      {globalBanner.active && globalBanner.message ? (
+        <div className="fixed inset-x-0 top-0 z-[80] border-b border-amber-400/40 bg-amber-500/20 px-4 py-2 text-center text-sm font-semibold text-amber-100 backdrop-blur">
+          <span className="inline-flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            {globalBanner.message}
+          </span>
+        </div>
+      ) : null}
 
       <aside className="dashboard-sidebar hidden xl:flex">
         <div className="dashboard-sidebar-shell">
@@ -10648,129 +10828,275 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Scraper Health</p>
-                    <p className="mt-1 text-sm text-slate-300">Latest task status: <span className="font-semibold text-white">{adminOverview.scraper.last_status || 'unknown'}</span></p>
+              <div className="inline-flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] p-1">
+                <button type="button" className={`rounded-xl px-3 py-2 text-xs font-semibold ${adminSection === 'users' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-300 hover:text-white'}`} onClick={() => setAdminSection('users')}>Users</button>
+                <button type="button" className={`rounded-xl px-3 py-2 text-xs font-semibold ${adminSection === 'payments' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-300 hover:text-white'}`} onClick={() => setAdminSection('payments')}>Payments</button>
+                <button type="button" className={`rounded-xl px-3 py-2 text-xs font-semibold ${adminSection === 'system' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-300 hover:text-white'}`} onClick={() => setAdminSection('system')}>System Health</button>
+                <button type="button" className={`rounded-xl px-3 py-2 text-xs font-semibold ${adminSection === 'logs' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-300 hover:text-white'}`} onClick={() => setAdminSection('logs')}>Logs</button>
+              </div>
+
+              {adminSection === 'users' ? (
+                <>
+                  <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={submitAdminCreditUpdate}>
+                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Credit Management</p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-4">
+                      <label className="field-label md:col-span-2">
+                        <span className="mb-1.5 block">User Email</span>
+                        <input
+                          className="glass-input"
+                          type="email"
+                          value={adminCreditForm.email}
+                          onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, email: e.target.value }))}
+                          placeholder="user@email.com"
+                          required
+                        />
+                      </label>
+                      <label className="field-label">
+                        <span className="mb-1.5 block">Action</span>
+                        <select className="glass-input" value={adminCreditForm.action} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, action: e.target.value }))}>
+                          <option value="add">Add</option>
+                          <option value="set">Set Exact</option>
+                          <option value="reset">Reset to Plan Limit</option>
+                        </select>
+                      </label>
+                      <label className="field-label">
+                        <span className="mb-1.5 block">Amount</span>
+                        <input className="glass-input" type="number" value={adminCreditForm.amount} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, amount: e.target.value }))} disabled={adminCreditForm.action === 'reset'} />
+                      </label>
+                    </div>
+                    <label className="field-label mt-3 block">
+                      <span className="mb-1.5 block">Note</span>
+                      <input className="glass-input" type="text" value={adminCreditForm.note} onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, note: e.target.value }))} placeholder="Optional audit note" />
+                    </label>
+                    <div className="mt-3 flex items-center gap-3">
+                      <button className="btn-primary" type="submit" disabled={adminLoading}>{adminLoading ? 'Updating…' : 'Apply Credit Change'}</button>
+                      <button className="rounded-xl border border-white/15 bg-white/[0.02] px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.08]" type="button" onClick={() => void refreshAdminOverview()}>Refresh</button>
+                    </div>
+                  </form>
+
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-sm font-semibold text-white">Users</p>
+                      <p className="text-xs text-slate-400">{adminOverview.users.length} rows</p>
+                    </div>
+                    <div className="max-h-[460px] overflow-auto rounded-xl border border-white/10">
+                      <table className="min-w-full divide-y divide-white/10 text-sm">
+                        <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.1em] text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">Email</th>
+                            <th className="px-3 py-2">Last Login</th>
+                            <th className="px-3 py-2">Plan</th>
+                            <th className="px-3 py-2">Subscription</th>
+                            <th className="px-3 py-2">Status</th>
+                            <th className="px-3 py-2">Credits</th>
+                            <th className="px-3 py-2">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {adminOverview.users.map((row) => (
+                            <tr key={row.id || row.email} className="hover:bg-white/[0.03]">
+                              <td className="px-3 py-2 text-slate-200">{row.email || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.last_login_at || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.plan_name || row.plan_key || 'free'}</td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${row.subscription_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-500/20 text-slate-300'}`}>
+                                  {row.subscription_active ? 'active' : 'inactive'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${row.is_blocked ? 'bg-rose-500/20 text-rose-200' : 'bg-emerald-500/20 text-emerald-200'}`}>
+                                  {row.is_blocked ? 'blocked' : 'ok'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-slate-300">{Number(row.credits_balance || 0).toLocaleString('en-US')} / {Number(row.credits_limit || 0).toLocaleString('en-US')}</td>
+                              <td className="px-3 py-2">
+                                <div className="flex flex-wrap gap-1.5">
+                                  <button type="button" className={`rounded-lg px-2 py-1 text-xs font-semibold ${row.is_blocked ? 'bg-emerald-500/20 text-emerald-100' : 'bg-rose-500/20 text-rose-100'}`} onClick={() => adminToggleBlock(row, !row.is_blocked)}>
+                                    {row.is_blocked ? <UserCheck className="inline h-3.5 w-3.5 mr-1" /> : <UserX className="inline h-3.5 w-3.5 mr-1" />}
+                                    {row.is_blocked ? 'Unblock' : 'BAN/BLOCK'}
+                                  </button>
+                                  <button type="button" className="rounded-lg bg-violet-500/20 px-2 py-1 text-xs font-semibold text-violet-100" onClick={() => adminImpersonate(row)}>
+                                    <LogIn className="inline h-3.5 w-3.5 mr-1" />IMPERSONATE
+                                  </button>
+                                  <button type="button" className="rounded-lg bg-cyan-500/20 px-2 py-1 text-xs font-semibold text-cyan-100" onClick={() => adminResetPassword(row)}>
+                                    <KeyRound className="inline h-3.5 w-3.5 mr-1" />RESET PASSWORD
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                          {!adminOverview.users.length ? (
+                            <tr>
+                              <td className="px-3 py-6 text-center text-slate-500" colSpan={7}>{adminLoading ? 'Loading users…' : 'No users found.'}</td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                  <span
-                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
-                      adminOverview.scraper.health === 'running'
-                        ? 'bg-amber-500/20 text-amber-200'
-                        : adminOverview.scraper.health === 'failing'
-                          ? 'bg-rose-500/20 text-rose-200'
-                          : 'bg-emerald-500/20 text-emerald-200'
-                    }`}
-                  >
-                    <span className="h-2 w-2 rounded-full bg-current" />
-                    {adminOverview.scraper.health || 'healthy'}
-                  </span>
-                </div>
-                {adminOverview.scraper.last_error ? (
-                  <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
-                    {adminOverview.scraper.last_error}
-                  </p>
-                ) : null}
-                <p className="mt-2 text-[11px] text-slate-500">Updated: {adminOverview.scraper.last_updated_at || 'n/a'}</p>
-              </div>
+                </>
+              ) : null}
 
-              <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={submitAdminCreditUpdate}>
-                <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Credit Management</p>
-                <div className="mt-3 grid gap-3 md:grid-cols-4">
-                  <label className="field-label md:col-span-2">
-                    <span className="mb-1.5 block">User Email</span>
-                    <input
-                      className="glass-input"
-                      type="email"
-                      value={adminCreditForm.email}
-                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, email: e.target.value }))}
-                      placeholder="user@email.com"
-                      required
-                    />
-                  </label>
-                  <label className="field-label">
-                    <span className="mb-1.5 block">Action</span>
-                    <select
-                      className="glass-input"
-                      value={adminCreditForm.action}
-                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, action: e.target.value }))}
-                    >
-                      <option value="add">Add</option>
-                      <option value="set">Set Exact</option>
-                      <option value="reset">Reset to Plan Limit</option>
-                    </select>
-                  </label>
-                  <label className="field-label">
-                    <span className="mb-1.5 block">Amount</span>
-                    <input
-                      className="glass-input"
-                      type="number"
-                      value={adminCreditForm.amount}
-                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, amount: e.target.value }))}
-                      disabled={adminCreditForm.action === 'reset'}
-                    />
-                  </label>
-                </div>
-                <label className="field-label mt-3 block">
-                  <span className="mb-1.5 block">Note</span>
-                  <input
-                    className="glass-input"
-                    type="text"
-                    value={adminCreditForm.note}
-                    onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, note: e.target.value }))}
-                    placeholder="Optional audit note"
-                  />
-                </label>
-                <div className="mt-3 flex items-center gap-3">
-                  <button className="btn-primary" type="submit" disabled={adminLoading}>
-                    {adminLoading ? 'Updating…' : 'Apply Credit Change'}
-                  </button>
-                  <button className="rounded-xl border border-white/15 bg-white/[0.02] px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.08]" type="button" onClick={() => void refreshAdminOverview()}>
-                    Refresh
-                  </button>
-                </div>
-              </form>
+              {adminSection === 'payments' ? (
+                <>
+                  <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={adminUpdatePlan}>
+                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Manual Plan Override</p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-3">
+                      <label className="field-label">
+                        <span className="mb-1.5 block">User</span>
+                        <select className="glass-input" value={adminPlanForm.userId} onChange={(e) => setAdminPlanForm((prev) => ({ ...prev, userId: e.target.value }))}>
+                          <option value="">Select user...</option>
+                          {adminOverview.users.map((row) => (
+                            <option key={row.id} value={row.id}>{row.email}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field-label">
+                        <span className="mb-1.5 block">Plan</span>
+                        <select className="glass-input" value={adminPlanForm.planKey} onChange={(e) => setAdminPlanForm((prev) => ({ ...prev, planKey: e.target.value }))}>
+                          <option value="free">The Starter</option>
+                          <option value="hustler">The Hustler</option>
+                          <option value="growth">The Growth</option>
+                          <option value="scale">The Scale</option>
+                          <option value="empire">The Empire</option>
+                        </select>
+                      </label>
+                      <div className="flex items-end">
+                        <button className="btn-primary w-full" type="submit" disabled={adminLoading}>Apply Plan</button>
+                      </div>
+                    </div>
+                  </form>
 
-              <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <p className="text-sm font-semibold text-white">Users</p>
-                  <p className="text-xs text-slate-400">{adminOverview.users.length} rows</p>
-                </div>
-                <div className="max-h-[460px] overflow-auto rounded-xl border border-white/10">
-                  <table className="min-w-full divide-y divide-white/10 text-sm">
-                    <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.1em] text-slate-400">
-                      <tr>
-                        <th className="px-3 py-2">Email</th>
-                        <th className="px-3 py-2">Last Login</th>
-                        <th className="px-3 py-2">Plan</th>
-                        <th className="px-3 py-2">Subscription</th>
-                        <th className="px-3 py-2">Credits</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/5">
-                      {adminOverview.users.map((row) => (
-                        <tr key={row.id || row.email} className="hover:bg-white/[0.03]">
-                          <td className="px-3 py-2 text-slate-200">{row.email || '-'}</td>
-                          <td className="px-3 py-2 text-slate-300">{row.last_login_at || '-'}</td>
-                          <td className="px-3 py-2 text-slate-300">{row.plan_name || row.plan_key || 'free'}</td>
-                          <td className="px-3 py-2">
-                            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${row.subscription_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-500/20 text-slate-300'}`}>
-                              {row.subscription_active ? 'active' : 'inactive'}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-slate-300">{Number(row.credits_balance || 0).toLocaleString('en-US')} / {Number(row.credits_limit || 0).toLocaleString('en-US')}</td>
-                        </tr>
-                      ))}
-                      {!adminOverview.users.length ? (
-                        <tr>
-                          <td className="px-3 py-6 text-center text-slate-500" colSpan={5}>{adminLoading ? 'Loading users…' : 'No users found.'}</td>
-                        </tr>
-                      ) : null}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-sm font-semibold text-white">Latest Transactions</p>
+                      <p className="text-xs text-slate-400">{adminOverview.transactions.length} entries</p>
+                    </div>
+                    <div className="max-h-[420px] overflow-auto rounded-xl border border-white/10">
+                      <table className="min-w-full divide-y divide-white/10 text-sm">
+                        <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.1em] text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">Date</th>
+                            <th className="px-3 py-2">User</th>
+                            <th className="px-3 py-2">Service</th>
+                            <th className="px-3 py-2">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {adminOverview.transactions.map((row) => (
+                            <tr key={`txn-${row.id}`} className="hover:bg-white/[0.03]">
+                              <td className="px-3 py-2 text-slate-300">{row.date || '-'}</td>
+                              <td className="px-3 py-2 text-slate-200">{row.email || row.user_id || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.service_type || '-'}</td>
+                              <td className="px-3 py-2 text-emerald-200">${formatUsd(row.amount || 0)}</td>
+                            </tr>
+                          ))}
+                          {!adminOverview.transactions.length ? (
+                            <tr><td className="px-3 py-6 text-center text-slate-500" colSpan={4}>No transactions found.</td></tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+
+              {adminSection === 'system' ? (
+                <>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Scraper Health</p>
+                        <p className="mt-1 text-sm text-slate-300">Latest task status: <span className="font-semibold text-white">{adminOverview.scraper.last_status || 'unknown'}</span></p>
+                        <p className="mt-2 text-[11px] text-slate-500">Updated: {adminOverview.scraper.last_updated_at || 'n/a'}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${adminOverview.scraper.health === 'running' ? 'bg-amber-500/20 text-amber-200' : adminOverview.scraper.health === 'failing' ? 'bg-rose-500/20 text-rose-200' : 'bg-emerald-500/20 text-emerald-200'}`}>
+                          <span className="h-2 w-2 rounded-full bg-current" />
+                          {adminOverview.scraper.health || 'healthy'}
+                        </span>
+                        <button type="button" className="rounded-xl bg-rose-500/20 px-3 py-2 text-sm font-semibold text-rose-100" onClick={adminRestartScrapers}>
+                          <RotateCcw className="inline h-4 w-4 mr-1" />RESTART SCRAPERS
+                        </button>
+                      </div>
+                    </div>
+                    {adminOverview.scraper.last_error ? <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">{adminOverview.scraper.last_error}</p> : null}
+                  </div>
+
+                  <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={adminSaveGlobalNotification}>
+                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Global Notification</p>
+                    <label className="field-label mt-3 block">
+                      <span className="mb-1.5 block">Message</span>
+                      <input className="glass-input" type="text" value={globalNoticeForm.message} onChange={(e) => setGlobalNoticeForm((prev) => ({ ...prev, message: e.target.value }))} placeholder="Maintenance in 10 min" />
+                    </label>
+                    <label className="mt-3 inline-flex items-center gap-2 text-sm text-slate-300">
+                      <input type="checkbox" checked={globalNoticeForm.active} onChange={(e) => setGlobalNoticeForm((prev) => ({ ...prev, active: e.target.checked }))} /> Active banner
+                    </label>
+                    <div className="mt-3 flex items-center gap-3">
+                      <button className="btn-primary" type="submit" disabled={adminLoading}><Bell className="inline h-4 w-4 mr-1" />Publish Banner</button>
+                      <button className="rounded-xl border border-white/15 bg-white/[0.02] px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.08]" type="button" onClick={() => void refreshAdminOverview()}>Sync</button>
+                    </div>
+                  </form>
+                </>
+              ) : null}
+
+              {adminSection === 'logs' ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                      <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Top Scrapers</p>
+                      <div className="mt-3 space-y-2">
+                        {adminOverview.top_scrapers.slice(0, 10).map((row) => (
+                          <div key={`top-${row.user_id}`} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm">
+                            <span className="text-slate-200">{row.email || row.user_id}</span>
+                            <span className="font-semibold text-cyan-200">{Number(row.scraped_count || 0).toLocaleString('en-US')}</span>
+                          </div>
+                        ))}
+                        {!adminOverview.top_scrapers.length ? <p className="text-sm text-slate-500">No scraper usage yet.</p> : null}
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                      <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Lead Quality</p>
+                      <p className="mt-2 text-3xl font-bold text-white">{Number(adminOverview.lead_quality.success_rate || 0).toFixed(2)}%</p>
+                      <p className="mt-1 text-sm text-slate-300">Success ratio from enrichment attempts.</p>
+                      <p className="mt-3 text-xs text-slate-400">Successful: {Number(adminOverview.lead_quality.successful || 0).toLocaleString('en-US')}</p>
+                      <p className="text-xs text-slate-400">Attempted: {Number(adminOverview.lead_quality.attempted || 0).toLocaleString('en-US')}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-sm font-semibold text-white">Activity Logs</p>
+                      <p className="text-xs text-slate-400">{adminOverview.logs.length} records</p>
+                    </div>
+                    <div className="max-h-[420px] overflow-auto rounded-xl border border-white/10">
+                      <table className="min-w-full divide-y divide-white/10 text-sm">
+                        <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.1em] text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">When</th>
+                            <th className="px-3 py-2">Type</th>
+                            <th className="px-3 py-2">User</th>
+                            <th className="px-3 py-2">Status</th>
+                            <th className="px-3 py-2">Message</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {adminOverview.logs.map((row) => (
+                            <tr key={`${row.kind}-${row.id}-${row.created_at || ''}`} className="hover:bg-white/[0.03]">
+                              <td className="px-3 py-2 text-slate-300">{row.created_at || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.kind || '-'}</td>
+                              <td className="px-3 py-2 text-slate-200">{row.email || row.user_id || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.status || '-'}</td>
+                              <td className="px-3 py-2 text-slate-300">{row.message || '-'}</td>
+                            </tr>
+                          ))}
+                          {!adminOverview.logs.length ? <tr><td className="px-3 py-6 text-center text-slate-500" colSpan={5}>No logs found.</td></tr> : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : null}
             </div>
           ) : activeTab === 'config' ? (
             <form className="max-w-2xl space-y-6" onSubmit={saveConfig}>

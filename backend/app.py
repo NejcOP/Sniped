@@ -655,6 +655,24 @@ class AdminCreditUpdateRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=300)
 
 
+class AdminBlockUserRequest(BaseModel):
+    blocked: bool = True
+    reason: Optional[str] = Field(default=None, max_length=300)
+
+
+class AdminPlanUpdateRequest(BaseModel):
+    plan_key: str = Field(..., min_length=2, max_length=32)
+
+
+class AdminResetPasswordRequest(BaseModel):
+    reset_base_url: Optional[str] = Field(default=None, max_length=600)
+
+
+class AdminGlobalNotificationRequest(BaseModel):
+    message: Optional[str] = Field(default=None, max_length=300)
+    active: bool = True
+
+
 NICHES = [
     "Paid Ads Agency",
     "Web Design & Dev",
@@ -2194,6 +2212,9 @@ def ensure_users_table(db_path: Path) -> None:
                     reset_token_expires_at TEXT,
                     last_login_at TEXT,
                     is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_blocked INTEGER NOT NULL DEFAULT 0,
+                    blocked_at TEXT,
+                    blocked_reason TEXT,
                     created_at    TEXT    NOT NULL,
                     updated_at    TEXT
                 )
@@ -2223,6 +2244,9 @@ def ensure_users_table(db_path: Path) -> None:
                 ("reset_token_expires_at", "TEXT"),
                 ("last_login_at", "TEXT"),
                 ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
+                ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
+                ("blocked_at", "TEXT"),
+                ("blocked_reason", "TEXT"),
                 ("updated_at", "TEXT"),
             ]:
                 try:
@@ -5310,6 +5334,9 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         reset_token_expires_at TEXT,
         last_login_at TEXT,
         is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+        is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+        blocked_at TEXT,
+        blocked_reason TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT
     );
@@ -5339,6 +5366,9 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_login_at TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS blocked_at TEXT;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT NOW()::text;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TEXT;
     ALTER TABLE public.users ALTER COLUMN credits_balance SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
@@ -14979,10 +15009,52 @@ def create_app() -> FastAPI:
             row = conn.execute("SELECT 1 FROM users WHERE token = ? LIMIT 1", (token,)).fetchone()
         return bool(row)
 
+    def _session_token_block_reason(session_token: str, db_path: Optional[Path] = None) -> Optional[str]:
+        token = str(session_token or "").strip()
+        if not token:
+            return None
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            sb_client = get_supabase_client_for_token(DEFAULT_CONFIG_PATH, token)
+            if sb_client is not None:
+                try:
+                    rows = (
+                        sb_client.table("users")
+                        .select("is_blocked,blocked_reason")
+                        .eq("token", token)
+                        .limit(1)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    if rows and bool(rows[0].get("is_blocked") or False):
+                        reason = str(rows[0].get("blocked_reason") or "").strip()
+                        return reason or "Your account is temporarily blocked."
+                except Exception:
+                    pass
+
+        auth_db_path = db_path or DEFAULT_DB_PATH
+        ensure_users_table(auth_db_path)
+        with pgdb.connect(auth_db_path) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                "SELECT COALESCE(is_blocked, 0) AS is_blocked, blocked_reason FROM users WHERE token = ? LIMIT 1",
+                (token,),
+            ).fetchone()
+        if row is None:
+            return None
+        if bool(int(row["is_blocked"] or 0)):
+            reason = str(row["blocked_reason"] or "").strip()
+            return reason or "Your account is temporarily blocked."
+        return None
+
     def require_authenticated_session(request: Optional[Request] = None, fallback_token: Optional[str] = None) -> str:
         token = _resolve_session_token(request=request, fallback_token=fallback_token)
         if not _session_token_exists(token):
             raise HTTPException(status_code=401, detail="Authentication required.")
+        block_reason = _session_token_block_reason(token)
+        if block_reason:
+            raise HTTPException(status_code=403, detail=block_reason)
         return token
 
     def resolve_user_id_from_session_token(session_token: str, db_path: Optional[Path] = None) -> str:
@@ -17024,7 +17096,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=503, detail="Supabase is not reachable.")
             try:
                 response = sb_client.table("users").select(
-                    "id,password_hash,salt,niche,token,display_name,contact_name,account_type"
+                    "id,password_hash,salt,niche,token,display_name,contact_name,account_type,is_blocked,blocked_reason"
                 ).eq("email", email).limit(1).execute()
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"Supabase login query failed: {exc}")
@@ -17032,6 +17104,9 @@ def create_app() -> FastAPI:
             if not rows:
                 raise HTTPException(status_code=401, detail="Invalid email or password.")
             row = rows[0]
+            if bool(row.get("is_blocked") or False):
+                block_reason = str(row.get("blocked_reason") or "").strip() or "Your account has been blocked by admin."
+                raise HTTPException(status_code=403, detail=block_reason)
             expected = _hash_password(req.password, str(row.get("salt") or ""))
             if not secrets.compare_digest(expected, str(row.get("password_hash") or "")):
                 raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -17060,11 +17135,14 @@ def create_app() -> FastAPI:
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type FROM users WHERE email = ?",
+                "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, COALESCE(is_blocked, 0) AS is_blocked, blocked_reason FROM users WHERE email = ?",
                 (email,),
             ).fetchone()
         if row is None:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
+        if bool(int(row["is_blocked"] or 0)):
+            block_reason = str(row["blocked_reason"] or "").strip() or "Your account has been blocked by admin."
+            raise HTTPException(status_code=403, detail=block_reason)
         expected = _hash_password(req.password, row["salt"])
         if not secrets.compare_digest(expected, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password.")
@@ -17367,8 +17445,11 @@ def create_app() -> FastAPI:
     def admin_overview(request: Request) -> dict:
         ensure_users_table(DEFAULT_DB_PATH)
         ensure_system_task_table(DEFAULT_DB_PATH)
+        ensure_revenue_log_table(DEFAULT_DB_PATH)
+        ensure_credit_logs_table(DEFAULT_DB_PATH)
 
         users_rows: list[dict[str, Any]] = []
+        user_email_map: dict[str, str] = {}
         total_users = 0
         total_leads = 0
         mrr_value = 0.0
@@ -17376,6 +17457,31 @@ def create_app() -> FastAPI:
         latest_scrape_status = "unknown"
         latest_scrape_error = ""
         latest_scrape_updated_at = ""
+        transactions: list[dict[str, Any]] = []
+        top_scrapers: list[dict[str, Any]] = []
+        logs: list[dict[str, Any]] = []
+        lead_quality = {
+            "success_rate": 0.0,
+            "successful": 0,
+            "attempted": 0,
+        }
+
+        def _compute_lead_quality(leads_rows: list[dict[str, Any]]) -> dict[str, Any]:
+            attempted = 0
+            successful = 0
+            for lead in leads_rows:
+                status_text = str(lead.get("enrichment_status") or "").strip().lower()
+                if not status_text or status_text in {"pending", "queued", "idle", "new"}:
+                    continue
+                attempted += 1
+                if status_text in {"enriched", "success", "completed"}:
+                    successful += 1
+            rate = round((successful / attempted) * 100.0, 2) if attempted > 0 else 0.0
+            return {
+                "success_rate": rate,
+                "successful": successful,
+                "attempted": attempted,
+            }
 
         if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
             ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
@@ -17386,12 +17492,17 @@ def create_app() -> FastAPI:
             users_rows = supabase_select_rows(
                 admin_client,
                 "users",
-                columns="id,email,plan_key,subscription_active,credits_balance,monthly_quota,monthly_limit,credits_limit,is_admin,last_login_at,created_at,updated_at",
+                columns="id,email,plan_key,subscription_active,credits_balance,monthly_quota,monthly_limit,credits_limit,is_admin,is_blocked,blocked_at,blocked_reason,last_login_at,created_at,updated_at",
                 order_by="created_at",
                 desc=True,
                 limit=5000,
             )
             total_users = len(users_rows)
+            user_email_map = {
+                str(row.get("id") or "").strip(): str(row.get("email") or "").strip().lower()
+                for row in users_rows
+                if str(row.get("id") or "").strip()
+            }
 
             try:
                 total_leads_resp = admin_client.table("leads").select("id", count="exact").limit(1).execute()
@@ -17399,10 +17510,53 @@ def create_app() -> FastAPI:
             except Exception:
                 total_leads = len(supabase_select_rows(admin_client, "leads", columns="id", limit=500000))
 
+            lead_rows = supabase_select_rows(
+                admin_client,
+                "leads",
+                columns="id,user_id,enrichment_status",
+                limit=200000,
+            )
+            lead_quality = _compute_lead_quality(lead_rows)
+            scraper_counts: dict[str, int] = {}
+            for row in lead_rows:
+                owner = str(row.get("user_id") or "").strip()
+                if not owner:
+                    continue
+                scraper_counts[owner] = int(scraper_counts.get(owner, 0) + 1)
+            top_scrapers = [
+                {
+                    "user_id": user_id,
+                    "email": user_email_map.get(user_id, ""),
+                    "scraped_count": count,
+                }
+                for user_id, count in sorted(scraper_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+            ]
+
             if supabase_table_available(DEFAULT_CONFIG_PATH, "revenue_log"):
                 revenue_rows = supabase_select_rows(admin_client, "revenue_log", columns="amount,is_recurring", limit=100000)
                 total_revenue_value = float(sum(float(r.get("amount") or 0) for r in revenue_rows))
                 mrr_value = float(sum(float(r.get("amount") or 0) for r in revenue_rows if int(r.get("is_recurring") or 0) == 1))
+                transaction_rows = supabase_select_rows(
+                    admin_client,
+                    "revenue_log",
+                    columns="id,user_id,amount,service_type,lead_name,lead_id,is_recurring,date",
+                    order_by="id",
+                    desc=True,
+                    limit=50,
+                )
+                transactions = [
+                    {
+                        "id": int(row.get("id") or 0),
+                        "user_id": str(row.get("user_id") or "").strip(),
+                        "email": user_email_map.get(str(row.get("user_id") or "").strip(), ""),
+                        "amount": float(row.get("amount") or 0),
+                        "service_type": str(row.get("service_type") or "").strip(),
+                        "lead_name": str(row.get("lead_name") or "").strip(),
+                        "is_recurring": bool(int(row.get("is_recurring") or 0)),
+                        "date": row.get("date"),
+                    }
+                    for row in transaction_rows
+                ]
 
             if supabase_table_available(DEFAULT_CONFIG_PATH, "system_tasks"):
                 task_rows = supabase_select_rows(
@@ -17419,6 +17573,51 @@ def create_app() -> FastAPI:
                     latest_scrape_status = str(task.get("status") or "unknown").strip().lower()
                     latest_scrape_error = str(task.get("error") or "").strip()
                     latest_scrape_updated_at = str(task.get("finished_at") or task.get("started_at") or task.get("created_at") or "").strip()
+                recent_task_logs = supabase_select_rows(
+                    admin_client,
+                    "system_tasks",
+                    columns="id,user_id,task_type,status,error,created_at,started_at,finished_at",
+                    order_by="id",
+                    desc=True,
+                    limit=40,
+                )
+                logs.extend(
+                    [
+                        {
+                            "kind": "task",
+                            "id": int(row.get("id") or 0),
+                            "user_id": str(row.get("user_id") or "").strip(),
+                            "email": user_email_map.get(str(row.get("user_id") or "").strip(), ""),
+                            "status": str(row.get("status") or "").strip(),
+                            "message": str(row.get("error") or row.get("task_type") or "").strip(),
+                            "created_at": row.get("finished_at") or row.get("started_at") or row.get("created_at"),
+                        }
+                        for row in recent_task_logs
+                    ]
+                )
+            if supabase_table_available(DEFAULT_CONFIG_PATH, "credit_logs"):
+                credit_log_rows = supabase_select_rows(
+                    admin_client,
+                    "credit_logs",
+                    columns="id,user_id,amount,action_type,created_at",
+                    order_by="id",
+                    desc=True,
+                    limit=40,
+                )
+                logs.extend(
+                    [
+                        {
+                            "kind": "credits",
+                            "id": int(row.get("id") or 0),
+                            "user_id": str(row.get("user_id") or "").strip(),
+                            "email": user_email_map.get(str(row.get("user_id") or "").strip(), ""),
+                            "status": str(row.get("action_type") or "").strip(),
+                            "message": f"{int(row.get('amount') or 0)} credits",
+                            "created_at": row.get("created_at"),
+                        }
+                        for row in credit_log_rows
+                    ]
+                )
         else:
             with pgdb.connect(DEFAULT_DB_PATH) as conn:
                 conn.row_factory = pgdb.Row
@@ -17427,6 +17626,9 @@ def create_app() -> FastAPI:
                     SELECT id,email,plan_key,subscription_active,credits_balance,
                            COALESCE(NULLIF(monthly_quota,0), NULLIF(monthly_limit,0), NULLIF(credits_limit,0), ?) AS credits_limit,
                            COALESCE(is_admin, 0) AS is_admin,
+                           COALESCE(is_blocked, 0) AS is_blocked,
+                           blocked_at,
+                           blocked_reason,
                            last_login_at,created_at,updated_at
                     FROM users
                     ORDER BY COALESCE(created_at, updated_at) DESC, id DESC
@@ -17435,9 +17637,54 @@ def create_app() -> FastAPI:
                 ).fetchall()
                 users_rows = [dict(r) for r in rows]
                 total_users = len(users_rows)
+                user_email_map = {
+                    str(row.get("id") or "").strip(): str(row.get("email") or "").strip().lower()
+                    for row in users_rows
+                    if str(row.get("id") or "").strip()
+                }
                 total_leads = int(conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0] or 0)
                 total_revenue_value = float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM revenue_log").fetchone()[0] or 0.0)
                 mrr_value = float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM revenue_log WHERE COALESCE(is_recurring, 0) = 1").fetchone()[0] or 0.0)
+                revenue_rows = conn.execute(
+                    """
+                    SELECT id,user_id,amount,service_type,lead_name,lead_id,is_recurring,date
+                    FROM revenue_log
+                    ORDER BY id DESC
+                    LIMIT 50
+                    """
+                ).fetchall()
+                transactions = [
+                    {
+                        "id": int(row["id"] or 0),
+                        "user_id": str(row["user_id"] or "").strip(),
+                        "email": user_email_map.get(str(row["user_id"] or "").strip(), ""),
+                        "amount": float(row["amount"] or 0),
+                        "service_type": str(row["service_type"] or "").strip(),
+                        "lead_name": str(row["lead_name"] or "").strip(),
+                        "is_recurring": bool(int(row["is_recurring"] or 0)),
+                        "date": row["date"],
+                    }
+                    for row in revenue_rows
+                ]
+                leads_for_analytics = conn.execute(
+                    "SELECT user_id,enrichment_status FROM leads"
+                ).fetchall()
+                lead_rows = [dict(row) for row in leads_for_analytics]
+                lead_quality = _compute_lead_quality(lead_rows)
+                scraper_counts: dict[str, int] = {}
+                for row in lead_rows:
+                    owner = str(row.get("user_id") or "").strip()
+                    if not owner:
+                        continue
+                    scraper_counts[owner] = int(scraper_counts.get(owner, 0) + 1)
+                top_scrapers = [
+                    {
+                        "user_id": user_id,
+                        "email": user_email_map.get(user_id, ""),
+                        "scraped_count": count,
+                    }
+                    for user_id, count in sorted(scraper_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+                ]
                 last_task = conn.execute(
                     "SELECT status,error,finished_at,started_at,created_at FROM system_tasks WHERE task_type = 'scrape' ORDER BY id DESC LIMIT 1"
                 ).fetchone()
@@ -17445,6 +17692,40 @@ def create_app() -> FastAPI:
                     latest_scrape_status = str(last_task[0] or "unknown").strip().lower()
                     latest_scrape_error = str(last_task[1] or "").strip()
                     latest_scrape_updated_at = str(last_task[2] or last_task[3] or last_task[4] or "").strip()
+                task_log_rows = conn.execute(
+                    "SELECT id,user_id,task_type,status,error,created_at,started_at,finished_at FROM system_tasks ORDER BY id DESC LIMIT 40"
+                ).fetchall()
+                logs.extend(
+                    [
+                        {
+                            "kind": "task",
+                            "id": int(row["id"] or 0),
+                            "user_id": str(row["user_id"] or "").strip(),
+                            "email": user_email_map.get(str(row["user_id"] or "").strip(), ""),
+                            "status": str(row["status"] or "").strip(),
+                            "message": str(row["error"] or row["task_type"] or "").strip(),
+                            "created_at": row["finished_at"] or row["started_at"] or row["created_at"],
+                        }
+                        for row in task_log_rows
+                    ]
+                )
+                credit_log_rows = conn.execute(
+                    "SELECT id,user_id,amount,action_type,created_at FROM credit_logs ORDER BY id DESC LIMIT 40"
+                ).fetchall()
+                logs.extend(
+                    [
+                        {
+                            "kind": "credits",
+                            "id": int(row["id"] or 0),
+                            "user_id": str(row["user_id"] or "").strip(),
+                            "email": user_email_map.get(str(row["user_id"] or "").strip(), ""),
+                            "status": str(row["action_type"] or "").strip(),
+                            "message": f"{int(row['amount'] or 0)} credits",
+                            "created_at": row["created_at"],
+                        }
+                        for row in credit_log_rows
+                    ]
+                )
 
         normalized_users = []
         plan_counts: dict[str, int] = {}
@@ -17462,6 +17743,9 @@ def create_app() -> FastAPI:
                     "credits_balance": int(row.get("credits_balance") or 0),
                     "credits_limit": max(1, resolved_limit),
                     "is_admin": bool(row.get("is_admin") or False),
+                    "is_blocked": bool(row.get("is_blocked") or False),
+                    "blocked_at": row.get("blocked_at") or None,
+                    "blocked_reason": row.get("blocked_reason") or None,
                     "last_login_at": row.get("last_login_at") or row.get("updated_at") or None,
                     "created_at": row.get("created_at") or None,
                 }
@@ -17472,6 +17756,30 @@ def create_app() -> FastAPI:
             scraper_health = "running"
         elif latest_scrape_status in {"failed", "cancelled", "stopped"}:
             scraper_health = "failing"
+
+        notification_payload: dict[str, Any] = {
+            "active": False,
+            "message": "",
+            "updated_at": None,
+        }
+        raw_notification = get_runtime_value(DEFAULT_DB_PATH, "global_notification_banner")
+        if raw_notification:
+            try:
+                parsed_notification = json.loads(str(raw_notification))
+                if isinstance(parsed_notification, dict):
+                    notification_payload = {
+                        "active": bool(parsed_notification.get("active") or False),
+                        "message": str(parsed_notification.get("message") or "").strip(),
+                        "updated_at": parsed_notification.get("updated_at"),
+                    }
+            except Exception:
+                pass
+
+        logs = sorted(
+            logs,
+            key=lambda row: str(row.get("created_at") or ""),
+            reverse=True,
+        )[:80]
 
         return {
             "stats": {
@@ -17488,6 +17796,11 @@ def create_app() -> FastAPI:
             },
             "plans": plan_counts,
             "users": normalized_users,
+            "transactions": transactions,
+            "top_scrapers": top_scrapers,
+            "lead_quality": lead_quality,
+            "logs": logs,
+            "notification": notification_payload,
         }
 
     @app.post("/api/admin/credits")
@@ -17619,6 +17932,377 @@ def create_app() -> FastAPI:
             "credits_before": current_balance,
             "credits_after": next_balance,
         }
+
+    @app.post("/api/admin/users/{user_id}/block")
+    def admin_block_user(user_id: str, payload: AdminBlockUserRequest, request: Request) -> dict:
+        target_user_id = str(user_id or "").strip()
+        if not target_user_id:
+            raise HTTPException(status_code=400, detail="Missing user id")
+
+        blocked = bool(payload.blocked)
+        reason = str(payload.reason or "").strip()
+        now_iso = utc_now_iso()
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            rows = (
+                admin_client.table("users")
+                .select("id,email")
+                .eq("id", target_user_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="User not found")
+            row = rows[0]
+            update_payload: dict[str, Any] = {
+                "is_blocked": blocked,
+                "blocked_at": now_iso if blocked else None,
+                "blocked_reason": reason if blocked else None,
+                "updated_at": now_iso,
+            }
+            if blocked:
+                update_payload["token"] = None
+            admin_client.table("users").update(update_payload).eq("id", target_user_id).execute()
+            return {
+                "status": "ok",
+                "user_id": target_user_id,
+                "email": str(row.get("email") or "").strip().lower(),
+                "is_blocked": blocked,
+                "blocked_reason": reason if blocked else "",
+            }
+
+        ensure_users_table(DEFAULT_DB_PATH)
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute("SELECT id,email FROM users WHERE id = ? LIMIT 1", (target_user_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="User not found")
+            if blocked:
+                conn.execute(
+                    "UPDATE users SET is_blocked = 1, blocked_at = ?, blocked_reason = ?, token = NULL, updated_at = ? WHERE id = ?",
+                    (now_iso, reason or None, now_iso, target_user_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE users SET is_blocked = 0, blocked_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    (now_iso, target_user_id),
+                )
+            conn.commit()
+            email = str(row["email"] or "").strip().lower()
+
+        return {
+            "status": "ok",
+            "user_id": target_user_id,
+            "email": email,
+            "is_blocked": blocked,
+            "blocked_reason": reason if blocked else "",
+        }
+
+    @app.post("/api/admin/users/{user_id}/impersonate")
+    def admin_impersonate_user(user_id: str, request: Request) -> dict:
+        target_user_id = str(user_id or "").strip()
+        if not target_user_id:
+            raise HTTPException(status_code=400, detail="Missing user id")
+
+        now_iso = utc_now_iso()
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            rows = (
+                admin_client.table("users")
+                .select("id,email,token,is_blocked")
+                .eq("id", target_user_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="User not found")
+            row = rows[0]
+            if bool(row.get("is_blocked") or False):
+                raise HTTPException(status_code=400, detail="Cannot impersonate blocked user")
+            token = str(row.get("token") or "").strip() or str(uuid.uuid4())
+            admin_client.table("users").update({"token": token, "last_login_at": now_iso, "updated_at": now_iso}).eq("id", target_user_id).execute()
+            return {
+                "status": "ok",
+                "token": token,
+                "user_id": target_user_id,
+                "email": str(row.get("email") or "").strip().lower(),
+            }
+
+        ensure_users_table(DEFAULT_DB_PATH)
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                "SELECT id,email,token,COALESCE(is_blocked, 0) AS is_blocked FROM users WHERE id = ? LIMIT 1",
+                (target_user_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="User not found")
+            if bool(int(row["is_blocked"] or 0)):
+                raise HTTPException(status_code=400, detail="Cannot impersonate blocked user")
+            token = str(row["token"] or "").strip() or str(uuid.uuid4())
+            conn.execute(
+                "UPDATE users SET token = ?, last_login_at = ?, updated_at = ? WHERE id = ?",
+                (token, now_iso, now_iso, target_user_id),
+            )
+            conn.commit()
+            email = str(row["email"] or "").strip().lower()
+
+        return {
+            "status": "ok",
+            "token": token,
+            "user_id": target_user_id,
+            "email": email,
+        }
+
+    @app.post("/api/admin/users/{user_id}/reset-password")
+    def admin_reset_user_password(user_id: str, payload: AdminResetPasswordRequest, request: Request) -> dict:
+        target_user_id = str(user_id or "").strip()
+        if not target_user_id:
+            raise HTTPException(status_code=400, detail="Missing user id")
+
+        reset_token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        now_iso = utc_now_iso()
+
+        target_email = ""
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            rows = (
+                admin_client.table("users")
+                .select("id,email")
+                .eq("id", target_user_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="User not found")
+            target_email = str(rows[0].get("email") or "").strip().lower()
+            admin_client.table("users").update(
+                {
+                    "reset_token": reset_token,
+                    "reset_token_expires_at": expires_at,
+                    "updated_at": now_iso,
+                }
+            ).eq("id", target_user_id).execute()
+        else:
+            ensure_users_table(DEFAULT_DB_PATH)
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                conn.row_factory = pgdb.Row
+                row = conn.execute("SELECT id,email FROM users WHERE id = ? LIMIT 1", (target_user_id,)).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="User not found")
+                target_email = str(row["email"] or "").strip().lower()
+                conn.execute(
+                    "UPDATE users SET reset_token = ?, reset_token_expires_at = ?, updated_at = ? WHERE id = ?",
+                    (reset_token, expires_at, now_iso, target_user_id),
+                )
+                conn.commit()
+
+        reset_base_url = str(payload.reset_base_url or "").strip().rstrip("/")
+        if not reset_base_url:
+            reset_base_url = str(os.environ.get("RESET_PASSWORD_BASE_URL") or "https://sniped-one.vercel.app/reset-password").strip().rstrip("/")
+        reset_link = f"{reset_base_url}?token={quote_plus(reset_token)}"
+
+        smtp_account: dict[str, Any] = {}
+        try:
+            smtp_account = get_primary_user_smtp_account(user_id=target_user_id, db_path=DEFAULT_DB_PATH)
+        except Exception:
+            smtp_account = get_system_smtp_account(DEFAULT_CONFIG_PATH)
+        if not smtp_account:
+            raise HTTPException(status_code=503, detail="No SMTP account available to send reset email.")
+
+        text_body = (
+            "Sniped password reset\n\n"
+            "An admin initiated a password reset for your account.\n"
+            f"Reset link: {reset_link}\n\n"
+            "This link expires in 1 hour."
+        )
+        html_body = (
+            "<p>An admin initiated a password reset for your account.</p>"
+            f"<p><a href=\"{reset_link}\">Reset your password</a></p>"
+            "<p>This link expires in 1 hour.</p>"
+        )
+        try:
+            send_auth_email(smtp_account, target_email, "Sniped password reset", text_body, html_body)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Password reset email failed: {classify_smtp_error(exc)}")
+
+        return {
+            "status": "ok",
+            "user_id": target_user_id,
+            "email": target_email,
+            "expires_at": expires_at,
+        }
+
+    @app.post("/api/admin/users/{user_id}/plan")
+    def admin_update_user_plan(user_id: str, payload: AdminPlanUpdateRequest, request: Request) -> dict:
+        target_user_id = str(user_id or "").strip()
+        plan_key = _normalize_plan_key(payload.plan_key, fallback=DEFAULT_PLAN_KEY)
+        if plan_key not in PLAN_MONTHLY_QUOTAS:
+            raise HTTPException(status_code=400, detail="Invalid plan key")
+
+        monthly_limit = max(1, int(PLAN_MONTHLY_QUOTAS.get(plan_key, DEFAULT_MONTHLY_CREDIT_LIMIT)))
+        now_iso = utc_now_iso()
+        subscription_active = plan_key != "free"
+        subscription_status = "active" if subscription_active else "free"
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+            rows = (
+                admin_client.table("users")
+                .select("id,email,credits_balance,topup_credits_balance")
+                .eq("id", target_user_id)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="User not found")
+            row = rows[0]
+            current_balance = int(row.get("credits_balance") or 0)
+            topup_balance = int(row.get("topup_credits_balance") or 0)
+            next_balance = max(current_balance, monthly_limit + max(0, topup_balance))
+            admin_client.table("users").update(
+                {
+                    "plan_key": plan_key,
+                    "monthly_quota": monthly_limit,
+                    "monthly_limit": monthly_limit,
+                    "credits_limit": monthly_limit,
+                    "subscription_active": subscription_active,
+                    "subscription_status": subscription_status,
+                    "credits_balance": next_balance,
+                    "credits": next_balance,
+                    "updated_at": now_iso,
+                }
+            ).eq("id", target_user_id).execute()
+            return {
+                "status": "ok",
+                "user_id": target_user_id,
+                "email": str(row.get("email") or "").strip().lower(),
+                "plan_key": plan_key,
+                "plan_name": str(PLAN_DISPLAY_NAMES.get(plan_key, plan_key.title())),
+                "monthly_limit": monthly_limit,
+            }
+
+        ensure_users_table(DEFAULT_DB_PATH)
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            row = conn.execute(
+                "SELECT id,email,COALESCE(credits_balance,0) AS credits_balance,COALESCE(topup_credits_balance,0) AS topup_credits_balance FROM users WHERE id = ? LIMIT 1",
+                (target_user_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="User not found")
+            current_balance = int(row["credits_balance"] or 0)
+            topup_balance = int(row["topup_credits_balance"] or 0)
+            next_balance = max(current_balance, monthly_limit + max(0, topup_balance))
+            conn.execute(
+                """
+                UPDATE users
+                SET plan_key = ?,
+                    monthly_quota = ?,
+                    monthly_limit = ?,
+                    credits_limit = ?,
+                    subscription_active = ?,
+                    subscription_status = ?,
+                    credits_balance = ?,
+                    credits = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    plan_key,
+                    monthly_limit,
+                    monthly_limit,
+                    monthly_limit,
+                    1 if subscription_active else 0,
+                    subscription_status,
+                    next_balance,
+                    next_balance,
+                    now_iso,
+                    target_user_id,
+                ),
+            )
+            conn.commit()
+            email = str(row["email"] or "").strip().lower()
+
+        return {
+            "status": "ok",
+            "user_id": target_user_id,
+            "email": email,
+            "plan_key": plan_key,
+            "plan_name": str(PLAN_DISPLAY_NAMES.get(plan_key, plan_key.title())),
+            "monthly_limit": monthly_limit,
+        }
+
+    @app.post("/api/admin/scrapers/restart")
+    def admin_restart_scrapers(request: Request) -> dict:
+        admin_email = str(getattr(request.state, "current_user_email", "") or "").strip().lower()
+        payload = {
+            "requested_by": admin_email,
+            "requested_at": utc_now_iso(),
+        }
+        set_runtime_value(DEFAULT_DB_PATH, "admin_scraper_restart_requested", json.dumps(payload, ensure_ascii=False))
+        reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
+        latest_task = fetch_latest_task(DEFAULT_DB_PATH, "scrape")
+        return {
+            "status": "restart_requested",
+            "requested_at": payload["requested_at"],
+            "latest_scrape": latest_task,
+        }
+
+    @app.post("/api/admin/notification")
+    def admin_set_global_notification(payload: AdminGlobalNotificationRequest, request: Request) -> dict:
+        message = str(payload.message or "").strip()
+        active = bool(payload.active and message)
+        notification_payload = {
+            "active": active,
+            "message": message,
+            "updated_at": utc_now_iso(),
+            "updated_by": str(getattr(request.state, "current_user_email", "") or "").strip().lower(),
+        }
+        set_runtime_value(DEFAULT_DB_PATH, "global_notification_banner", json.dumps(notification_payload, ensure_ascii=False))
+        return {
+            "status": "ok",
+            "notification": notification_payload,
+        }
+
+    @app.get("/api/system/notification")
+    def get_global_notification() -> dict:
+        raw_value = get_runtime_value(DEFAULT_DB_PATH, "global_notification_banner")
+        if not raw_value:
+            return {"active": False, "message": "", "updated_at": None}
+        try:
+            parsed = json.loads(str(raw_value))
+            if not isinstance(parsed, dict):
+                return {"active": False, "message": "", "updated_at": None}
+            return {
+                "active": bool(parsed.get("active") or False),
+                "message": str(parsed.get("message") or "").strip(),
+                "updated_at": parsed.get("updated_at"),
+            }
+        except Exception:
+            return {"active": False, "message": "", "updated_at": None}
 
     @app.post("/api/stripe/create-portal-session")
     def stripe_create_portal_session(request: Request) -> dict:
