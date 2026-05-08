@@ -15281,10 +15281,17 @@ def create_app() -> FastAPI:
         ensure_users_table(auth_db_path)
         with pgdb.connect(auth_db_path) as conn:
             conn.row_factory = pgdb.Row
-            row = conn.execute(
-                "SELECT COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE token = ? LIMIT 1",
-                (token,),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE token = ? LIMIT 1",
+                    (token,),
+                ).fetchone()
+            except Exception as exc:
+                if "does not exist" in str(exc).lower():
+                    # Older Railway schemas may not have blocking columns yet.
+                    row = conn.execute("SELECT 0 AS is_blocked, '' AS blocked_reason FROM users WHERE token = ? LIMIT 1", (token,)).fetchone()
+                else:
+                    raise
         if row is None:
             return None
         if bool(row["is_blocked"] or False):
@@ -17378,10 +17385,19 @@ def create_app() -> FastAPI:
         ensure_users_table(DEFAULT_DB_PATH)
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
-            row = conn.execute(
-                "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE email = ?",
-                (email,),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE email = ?",
+                    (email,),
+                ).fetchone()
+            except Exception as exc:
+                if "does not exist" in str(exc).lower():
+                    row = conn.execute(
+                        "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, 0 AS is_blocked, '' AS blocked_reason FROM users WHERE email = ?",
+                        (email,),
+                    ).fetchone()
+                else:
+                    raise
         if row is None:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         if bool(row["is_blocked"] or False):
@@ -18289,10 +18305,19 @@ def create_app() -> FastAPI:
         ensure_users_table(DEFAULT_DB_PATH)
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
-            row = conn.execute(
-                "SELECT id,email,token,COALESCE(is_blocked, FALSE) AS is_blocked FROM users WHERE id = ? LIMIT 1",
-                (target_user_id,),
-            ).fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT id,email,token,COALESCE(is_blocked, FALSE) AS is_blocked FROM users WHERE id = ? LIMIT 1",
+                    (target_user_id,),
+                ).fetchone()
+            except Exception as exc:
+                if "does not exist" in str(exc).lower():
+                    row = conn.execute(
+                        "SELECT id,email,token,0 AS is_blocked FROM users WHERE id = ? LIMIT 1",
+                        (target_user_id,),
+                    ).fetchone()
+                else:
+                    raise
             if row is None:
                 raise HTTPException(status_code=404, detail="User not found")
             if bool(row["is_blocked"] or False):
