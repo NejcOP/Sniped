@@ -2264,7 +2264,7 @@ def ensure_users_table(db_path: Path) -> None:
                     pass
             if DEFAULT_ADMIN_EMAILS:
                 conn.execute(
-                    "UPDATE users SET is_admin = 1 WHERE LOWER(COALESCE(email, '')) IN ({})".format(
+                    "UPDATE users SET is_admin = TRUE WHERE LOWER(COALESCE(email, '')) IN ({})".format(
                         ",".join(["?"] * len(DEFAULT_ADMIN_EMAILS))
                     ),
                     tuple(sorted(DEFAULT_ADMIN_EMAILS)),
@@ -15282,12 +15282,12 @@ def create_app() -> FastAPI:
         with pgdb.connect(auth_db_path) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT COALESCE(is_blocked, 0) AS is_blocked, blocked_reason FROM users WHERE token = ? LIMIT 1",
+                "SELECT COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE token = ? LIMIT 1",
                 (token,),
             ).fetchone()
         if row is None:
             return None
-        if bool(int(row["is_blocked"] or 0)):
+        if bool(row["is_blocked"] or False):
             reason = str(row["blocked_reason"] or "").strip()
             return reason or "Your account is temporarily blocked."
         return None
@@ -17379,12 +17379,12 @@ def create_app() -> FastAPI:
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, COALESCE(is_blocked, 0) AS is_blocked, blocked_reason FROM users WHERE email = ?",
+                "SELECT id, password_hash, salt, niche, token, display_name, contact_name, account_type, COALESCE(is_blocked, FALSE) AS is_blocked, blocked_reason FROM users WHERE email = ?",
                 (email,),
             ).fetchone()
         if row is None:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
-        if bool(int(row["is_blocked"] or 0)):
+        if bool(row["is_blocked"] or False):
             block_reason = str(row["blocked_reason"] or "").strip() or "Your account has been blocked by admin."
             raise HTTPException(status_code=403, detail=block_reason)
         expected = _hash_password(req.password, row["salt"])
@@ -17640,7 +17640,7 @@ def create_app() -> FastAPI:
             "display_name": row["display_name"] or "",
             "contact_name": row["contact_name"] or "",
             "account_type": row["account_type"] or "entrepreneur",
-            "is_admin": bool(int(row["is_admin"] or 0)),
+            "is_admin": bool(row["is_admin"] or False),
             "last_login_at": row["last_login_at"],
             "credits_balance": int(credit_snapshot.get("credits_balance") or 0),
             "credits_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
@@ -17869,8 +17869,8 @@ def create_app() -> FastAPI:
                     """
                     SELECT id,email,plan_key,subscription_active,credits_balance,
                            COALESCE(NULLIF(monthly_quota,0), NULLIF(monthly_limit,0), NULLIF(credits_limit,0), ?) AS credits_limit,
-                           COALESCE(is_admin, 0) AS is_admin,
-                           COALESCE(is_blocked, 0) AS is_blocked,
+                           COALESCE(is_admin, FALSE) AS is_admin,
+                           COALESCE(is_blocked, FALSE) AS is_blocked,
                            blocked_at,
                            blocked_reason,
                            last_login_at,created_at,updated_at
@@ -18232,12 +18232,12 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="User not found")
             if blocked:
                 conn.execute(
-                    "UPDATE users SET is_blocked = 1, blocked_at = ?, blocked_reason = ?, token = NULL, updated_at = ? WHERE id = ?",
+                    "UPDATE users SET is_blocked = TRUE, blocked_at = ?, blocked_reason = ?, token = NULL, updated_at = ? WHERE id = ?",
                     (now_iso, reason or None, now_iso, target_user_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE users SET is_blocked = 0, blocked_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ?",
+                    "UPDATE users SET is_blocked = FALSE, blocked_at = NULL, blocked_reason = NULL, updated_at = ? WHERE id = ?",
                     (now_iso, target_user_id),
                 )
             conn.commit()
@@ -18290,12 +18290,12 @@ def create_app() -> FastAPI:
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT id,email,token,COALESCE(is_blocked, 0) AS is_blocked FROM users WHERE id = ? LIMIT 1",
+                "SELECT id,email,token,COALESCE(is_blocked, FALSE) AS is_blocked FROM users WHERE id = ? LIMIT 1",
                 (target_user_id,),
             ).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="User not found")
-            if bool(int(row["is_blocked"] or 0)):
+            if bool(row["is_blocked"] or False):
                 raise HTTPException(status_code=400, detail="Cannot impersonate blocked user")
             token = str(row["token"] or "").strip() or str(uuid.uuid4())
             conn.execute(
