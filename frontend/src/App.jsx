@@ -32,6 +32,7 @@ import {
   Search,
   Send,
   Settings,
+  Shield,
   Sparkles,
   Rocket,
   Star,
@@ -52,7 +53,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion as Motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
 import Footer from './Footer'
 import { clearUserSession, getStoredValue } from './authStorage'
@@ -365,7 +366,7 @@ const DEFAULT_GOAL_CURRENCY = 'EUR'
 const GOAL_CURRENCY_OPTIONS = ['EUR', 'USD', 'GBP']
 const TASK_MANAGER_PRIORITIES = ['High', 'Medium', 'Low']
 const TASK_MANAGER_STATUSES = ['To Outreach', 'Waiting', 'Follow-up', 'Done']
-const TAB_QUERY_KEYS = new Set(['leads', 'blacklist', 'workers', 'tasks', 'history', 'mail', 'qualify', 'export', 'clients', 'config'])
+const TAB_QUERY_KEYS = new Set(['leads', 'blacklist', 'workers', 'tasks', 'history', 'mail', 'qualify', 'export', 'clients', 'config', 'admin'])
 
 function normalizeTabParam(raw, fallback = 'leads') {
   const tab = String(raw || '').toLowerCase().trim()
@@ -419,6 +420,7 @@ const mainNavItems = [
   { tab: 'tasks', label: 'Tasks', icon: Clipboard },
   { tab: 'mail', label: 'Mail', icon: Mail },
   { tab: 'clients', label: 'Clients', icon: LayoutDashboard },
+  { tab: 'admin', label: 'ADMIN CENTER', icon: Shield },
 ]
 const templateCardIcons = {
   ghost: Search,
@@ -2255,10 +2257,14 @@ function App({ initialTab = 'leads' }) {
     feature_access: getDefaultFeatureAccess(getStoredValue('lf_plan_key') || 'free'),
     average_deal_value: Number(getStoredValue('lf_average_deal_value') || DEFAULT_AVERAGE_DEAL_VALUE),
     niche: String(getStoredValue('lf_niche') || '').trim(),
+    email: String(currentUserEmail || '').trim().toLowerCase(),
+    is_admin: String(getStoredValue('lf_is_admin') || '').trim().toLowerCase() === 'true' || String(currentUserEmail || '').trim().toLowerCase() === 'info@sniped.io',
+    last_login_at: null,
   }))
   const [profileHydrated, setProfileHydrated] = useState(() => !hasSessionToken)
   const [profileLoadedFromApi, setProfileLoadedFromApi] = useState(() => !hasSessionToken)
   const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
   const initialTabResolved = normalizeTabParam(searchParams.get('tab'), normalizeTabParam(initialTab, 'leads'))
   const [health, setHealth] = useState('checking')
   const [configHealth, setConfigHealth] = useState({ ok: false, openai_ok: false, smtp_ok: false, error: null })
@@ -2296,6 +2302,18 @@ function App({ initialTab = 'leads' }) {
   })
   const [tasks, setTasks] = useState({})
   const [taskHistory, setTaskHistory] = useState([])
+  const [adminOverview, setAdminOverview] = useState({
+    stats: { total_users: 0, total_revenue: 0, total_leads: 0 },
+    scraper: { health: 'unknown', last_status: 'unknown', last_error: '', last_updated_at: null },
+    users: [],
+  })
+  const [adminLoading, setAdminLoading] = useState(false)
+  const [adminCreditForm, setAdminCreditForm] = useState({
+    email: '',
+    action: 'add',
+    amount: '100',
+    note: '',
+  })
   const [scrapeForm, setScrapeForm] = useState(defaultScrape)
   const [enrichForm, setEnrichForm] = useState(defaultEnrich)
   const [mailerForm, setMailerForm] = useState(defaultMailer)
@@ -3884,6 +3902,8 @@ function App({ initialTab = 'leads' }) {
   const canLeadScoring = Boolean(featureAccess.ai_lead_scoring)
   const canAdvancedReporting = Boolean(featureAccess.advanced_reporting)
   const canClientSuccessDashboard = Boolean(featureAccess.client_success_dashboard)
+  const isAdmin = String(user?.email || currentUserEmail || '').trim().toLowerCase() === 'info@sniped.io'
+  const isAdminUser = Boolean(user?.is_admin || isAdmin)
 
   const bulkExportSelectedCsv = useCallback(() => {
     if (!selectedLeadRows.length) {
@@ -4527,6 +4547,9 @@ function App({ initialTab = 'leads' }) {
           feature_access: resolvedFeatureAccess,
           average_deal_value: Number(data?.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
           niche: String(data?.niche ?? prev.niche ?? '').trim(),
+          email: String(data?.email ?? prev.email ?? '').trim().toLowerCase(),
+          is_admin: Boolean(data?.is_admin ?? prev.is_admin ?? false),
+          last_login_at: data?.last_login_at ?? prev.last_login_at ?? null,
         }
       })
       localStorage.setItem('lf_credits', String(Number(data?.credits_balance ?? 0)))
@@ -4538,6 +4561,7 @@ function App({ initialTab = 'leads' }) {
       localStorage.setItem('lf_is_subscribed', String(Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)))
       localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
       localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
+      localStorage.setItem('lf_is_admin', String(Boolean(data?.is_admin ?? false)))
       setProfileLoadedFromApi(true)
       setProfileHydrated(true)
       return data
@@ -4587,6 +4611,74 @@ function App({ initialTab = 'leads' }) {
     }, 30000)
     return () => window.clearInterval(profileId)
   }, [refreshUserProfile])
+
+  const refreshAdminOverview = useCallback(async ({ silent = false } = {}) => {
+    if (!isAdminUser) return null
+    if (!silent) setAdminLoading(true)
+    try {
+      const data = await fetchJson('/api/admin/overview')
+      setAdminOverview({
+        stats: {
+          total_users: Number(data?.stats?.total_users || 0),
+          total_revenue: Number(data?.stats?.total_revenue || data?.stats?.mrr || 0),
+          total_leads: Number(data?.stats?.total_leads || 0),
+        },
+        scraper: {
+          health: String(data?.scraper?.health || 'unknown').toLowerCase(),
+          last_status: String(data?.scraper?.last_status || 'unknown').toLowerCase(),
+          last_error: String(data?.scraper?.last_error || ''),
+          last_updated_at: data?.scraper?.last_updated_at || null,
+        },
+        users: Array.isArray(data?.users) ? data.users : [],
+      })
+      return data
+    } catch (error) {
+      if (!silent) {
+        toast.error(error?.message || 'Failed to load admin dashboard')
+      }
+      return null
+    } finally {
+      if (!silent) setAdminLoading(false)
+    }
+  }, [isAdminUser])
+
+  const submitAdminCreditUpdate = useCallback(async (event) => {
+    event.preventDefault()
+    if (!isAdminUser) {
+      toast.error('Admin access required')
+      return
+    }
+    const payload = {
+      email: String(adminCreditForm.email || '').trim().toLowerCase(),
+      action: String(adminCreditForm.action || 'add').trim().toLowerCase(),
+      amount: Number(adminCreditForm.amount || 0),
+      note: String(adminCreditForm.note || '').trim(),
+    }
+    if (!payload.email) {
+      toast.error('Target user email is required')
+      return
+    }
+
+    if (payload.action !== 'reset' && !Number.isFinite(payload.amount)) {
+      toast.error('Enter a valid credits amount')
+      return
+    }
+
+    setAdminLoading(true)
+    try {
+      await fetchJson('/api/admin/credits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      toast.success('Credits updated')
+      await refreshAdminOverview({ silent: true })
+    } catch (error) {
+      toast.error(error?.message || 'Failed to update credits')
+    } finally {
+      setAdminLoading(false)
+    }
+  }, [adminCreditForm, isAdminUser, refreshAdminOverview])
 
   const syncBillingStateAfterCheckout = useCallback(async (rawPlanKey = '') => {
     const normalizedPlanKey = String(rawPlanKey || '').trim().toLowerCase()
@@ -6079,6 +6171,10 @@ function App({ initialTab = 'leads' }) {
   }
 
   function openMainTab(tabName) {
+    if (tabName === 'admin' && !isAdminUser) {
+      toast.error('Admin access required')
+      return
+    }
     setActiveTab(tabName)
 
     if (tabName === 'mail' || tabName === 'config') {
@@ -6105,6 +6201,18 @@ function App({ initialTab = 'leads' }) {
         leadSearchRef.current?.focus()
       }
     }, 60)
+  }
+
+  function handleMainNavigation(tabName) {
+    if (tabName === 'admin') {
+      navigate('/admin')
+      openMainTab('admin')
+      return
+    }
+    if (window.location.pathname === '/admin') {
+      navigate('/app')
+    }
+    openMainTab(tabName)
   }
 
   function savePersonalGoal(event) {
@@ -7235,8 +7343,12 @@ function App({ initialTab = 'leads' }) {
     selectedUserNiche,
   ])
   const visibleMainNavItems = useMemo(
-    () => mainNavItems.filter((item) => item.tab !== 'clients' || canClientSuccessDashboard),
-    [canClientSuccessDashboard],
+    () => mainNavItems.filter((item) => {
+      if (item.tab === 'clients') return canClientSuccessDashboard
+      if (item.tab === 'admin') return isAdminUser
+      return true
+    }),
+    [canClientSuccessDashboard, isAdminUser],
   )
   useEffect(() => {
     if (!canBulkExport) {
@@ -7274,6 +7386,19 @@ function App({ initialTab = 'leads' }) {
       setActiveTab('leads')
     }
   }, [activeTab, canClientSuccessDashboard])
+  useEffect(() => {
+    if (activeTab === 'admin' && !isAdminUser) {
+      setActiveTab('leads')
+    }
+  }, [activeTab, isAdminUser])
+  useEffect(() => {
+    if (!isAdminUser || activeTab !== 'admin') return undefined
+    void refreshAdminOverview()
+    const timerId = window.setInterval(() => {
+      void refreshAdminOverview({ silent: true })
+    }, 15000)
+    return () => window.clearInterval(timerId)
+  }, [activeTab, isAdminUser, refreshAdminOverview])
   useEffect(() => {
     const targetPercent = creditsReady ? creditsPercent : 0
     const frameId = window.requestAnimationFrame(() => setAnimatedCreditsPercent(targetPercent))
@@ -7363,7 +7488,7 @@ function App({ initialTab = 'leads' }) {
                   key={item.tab}
                   className={`topbar-nav w-full justify-start ${activeTab === item.tab ? 'topbar-nav-active' : ''}`}
                   type="button"
-                  onClick={() => openMainTab(item.tab)}
+                  onClick={() => handleMainNavigation(item.tab)}
                 >
                   <Icon className="h-4 w-4" /> {item.label}
                 </button>
@@ -7401,7 +7526,7 @@ function App({ initialTab = 'leads' }) {
               {visibleMainNavItems.map((item) => {
                 const Icon = item.icon
                 return (
-                  <button key={item.tab} className={`topbar-nav ${activeTab === item.tab ? 'topbar-nav-active' : ''}`} type="button" onClick={() => openMainTab(item.tab)}>
+                  <button key={item.tab} className={`topbar-nav ${activeTab === item.tab ? 'topbar-nav-active' : ''}`} type="button" onClick={() => handleMainNavigation(item.tab)}>
                     <Icon className="h-4 w-4" /> {item.label}
                   </button>
                 )
@@ -8400,8 +8525,14 @@ function App({ initialTab = 'leads' }) {
                 </span>
               )}
             </button>
+            {isAdminUser ? (
+              <button className={`tab-btn ${activeTab === 'admin' ? 'tab-active' : ''}`} type="button" onClick={() => handleMainNavigation('admin')}>
+                <Shield className="inline h-3.5 w-3.5 mr-1" />
+                ADMIN CENTER
+              </button>
+            ) : null}
             <div className="ml-auto rounded-full bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-              {activeTab === 'leads' ? `${filteredLeads.length} visible • ${Math.max(leadServerTotal, filteredLeads.length)} total leads` : activeTab === 'blacklist' ? `${blacklistedLeads.length} blacklisted` : activeTab === 'workers' ? `${workers.length} workers` : activeTab === 'tasks' || activeTab === 'history' ? `${deliverySummary.total} task manager items • ${taskHistory.length} history entries` : activeTab === 'mail' ? 'Mailer editor' : activeTab === 'qualify' ? `${qualifierData.data?.total ?? 0} gold mines` : activeTab === 'export' ? 'Reporting & exports' : activeTab === 'clients' ? `${clientFolders.length} client folders` : activeTab === 'config' ? 'Platform settings' : null}
+              {activeTab === 'leads' ? `${filteredLeads.length} visible • ${Math.max(leadServerTotal, filteredLeads.length)} total leads` : activeTab === 'blacklist' ? `${blacklistedLeads.length} blacklisted` : activeTab === 'workers' ? `${workers.length} workers` : activeTab === 'tasks' || activeTab === 'history' ? `${deliverySummary.total} task manager items • ${taskHistory.length} history entries` : activeTab === 'mail' ? 'Mailer editor' : activeTab === 'qualify' ? `${qualifierData.data?.total ?? 0} gold mines` : activeTab === 'export' ? 'Reporting & exports' : activeTab === 'clients' ? `${clientFolders.length} client folders` : activeTab === 'admin' ? `${adminOverview.stats.total_users || 0} users • ${adminOverview.stats.total_leads || 0} leads` : activeTab === 'config' ? 'Platform settings' : null}
             </div>
           </div>
 
@@ -10500,6 +10631,147 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
             </form>
+          ) : activeTab === 'admin' ? (
+            <div className="space-y-5">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                  <p className="text-xs uppercase tracking-[0.12em] text-cyan-200/80">Total Users</p>
+                  <p className="mt-2 text-3xl font-bold text-white">{Number(adminOverview.stats.total_users || 0).toLocaleString('en-US')}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+                  <p className="text-xs uppercase tracking-[0.12em] text-emerald-200/80">Total Revenue</p>
+                  <p className="mt-2 text-3xl font-bold text-white">${formatUsd(adminOverview.stats.total_revenue || 0)}</p>
+                </div>
+                <div className="rounded-2xl border border-violet-500/20 bg-violet-500/10 p-4">
+                  <p className="text-xs uppercase tracking-[0.12em] text-violet-200/80">Total Scraped Leads</p>
+                  <p className="mt-2 text-3xl font-bold text-white">{Number(adminOverview.stats.total_leads || 0).toLocaleString('en-US')}</p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Scraper Health</p>
+                    <p className="mt-1 text-sm text-slate-300">Latest task status: <span className="font-semibold text-white">{adminOverview.scraper.last_status || 'unknown'}</span></p>
+                  </div>
+                  <span
+                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                      adminOverview.scraper.health === 'running'
+                        ? 'bg-amber-500/20 text-amber-200'
+                        : adminOverview.scraper.health === 'failing'
+                          ? 'bg-rose-500/20 text-rose-200'
+                          : 'bg-emerald-500/20 text-emerald-200'
+                    }`}
+                  >
+                    <span className="h-2 w-2 rounded-full bg-current" />
+                    {adminOverview.scraper.health || 'healthy'}
+                  </span>
+                </div>
+                {adminOverview.scraper.last_error ? (
+                  <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+                    {adminOverview.scraper.last_error}
+                  </p>
+                ) : null}
+                <p className="mt-2 text-[11px] text-slate-500">Updated: {adminOverview.scraper.last_updated_at || 'n/a'}</p>
+              </div>
+
+              <form className="rounded-2xl border border-white/10 bg-white/[0.03] p-4" onSubmit={submitAdminCreditUpdate}>
+                <p className="text-xs uppercase tracking-[0.12em] text-slate-400">Credit Management</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-4">
+                  <label className="field-label md:col-span-2">
+                    <span className="mb-1.5 block">User Email</span>
+                    <input
+                      className="glass-input"
+                      type="email"
+                      value={adminCreditForm.email}
+                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, email: e.target.value }))}
+                      placeholder="user@email.com"
+                      required
+                    />
+                  </label>
+                  <label className="field-label">
+                    <span className="mb-1.5 block">Action</span>
+                    <select
+                      className="glass-input"
+                      value={adminCreditForm.action}
+                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, action: e.target.value }))}
+                    >
+                      <option value="add">Add</option>
+                      <option value="set">Set Exact</option>
+                      <option value="reset">Reset to Plan Limit</option>
+                    </select>
+                  </label>
+                  <label className="field-label">
+                    <span className="mb-1.5 block">Amount</span>
+                    <input
+                      className="glass-input"
+                      type="number"
+                      value={adminCreditForm.amount}
+                      onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, amount: e.target.value }))}
+                      disabled={adminCreditForm.action === 'reset'}
+                    />
+                  </label>
+                </div>
+                <label className="field-label mt-3 block">
+                  <span className="mb-1.5 block">Note</span>
+                  <input
+                    className="glass-input"
+                    type="text"
+                    value={adminCreditForm.note}
+                    onChange={(e) => setAdminCreditForm((prev) => ({ ...prev, note: e.target.value }))}
+                    placeholder="Optional audit note"
+                  />
+                </label>
+                <div className="mt-3 flex items-center gap-3">
+                  <button className="btn-primary" type="submit" disabled={adminLoading}>
+                    {adminLoading ? 'Updating…' : 'Apply Credit Change'}
+                  </button>
+                  <button className="rounded-xl border border-white/15 bg-white/[0.02] px-3 py-2 text-sm text-slate-300 hover:bg-white/[0.08]" type="button" onClick={() => void refreshAdminOverview()}>
+                    Refresh
+                  </button>
+                </div>
+              </form>
+
+              <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-white">Users</p>
+                  <p className="text-xs text-slate-400">{adminOverview.users.length} rows</p>
+                </div>
+                <div className="max-h-[460px] overflow-auto rounded-xl border border-white/10">
+                  <table className="min-w-full divide-y divide-white/10 text-sm">
+                    <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.1em] text-slate-400">
+                      <tr>
+                        <th className="px-3 py-2">Email</th>
+                        <th className="px-3 py-2">Last Login</th>
+                        <th className="px-3 py-2">Plan</th>
+                        <th className="px-3 py-2">Subscription</th>
+                        <th className="px-3 py-2">Credits</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {adminOverview.users.map((row) => (
+                        <tr key={row.id || row.email} className="hover:bg-white/[0.03]">
+                          <td className="px-3 py-2 text-slate-200">{row.email || '-'}</td>
+                          <td className="px-3 py-2 text-slate-300">{row.last_login_at || '-'}</td>
+                          <td className="px-3 py-2 text-slate-300">{row.plan_name || row.plan_key || 'free'}</td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${row.subscription_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-500/20 text-slate-300'}`}>
+                              {row.subscription_active ? 'active' : 'inactive'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-slate-300">{Number(row.credits_balance || 0).toLocaleString('en-US')} / {Number(row.credits_limit || 0).toLocaleString('en-US')}</td>
+                        </tr>
+                      ))}
+                      {!adminOverview.users.length ? (
+                        <tr>
+                          <td className="px-3 py-6 text-center text-slate-500" colSpan={5}>{adminLoading ? 'Loading users…' : 'No users found.'}</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           ) : activeTab === 'config' ? (
             <form className="max-w-2xl space-y-6" onSubmit={saveConfig}>
               <div>

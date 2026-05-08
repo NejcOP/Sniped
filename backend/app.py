@@ -647,6 +647,14 @@ class AILeadFilterRequest(BaseModel):
     include_blacklisted: bool = False
 
 
+class AdminCreditUpdateRequest(BaseModel):
+    user_id: Optional[str] = Field(default=None, max_length=128)
+    email: Optional[str] = Field(default=None, max_length=320)
+    action: str = Field(default="add", max_length=16)
+    amount: Optional[int] = Field(default=None, ge=-5_000_000, le=5_000_000)
+    note: Optional[str] = Field(default=None, max_length=300)
+
+
 NICHES = [
     "Paid Ads Agency",
     "Web Design & Dev",
@@ -722,6 +730,11 @@ PLAN_MONTHLY_QUOTAS: dict[str, int] = {
 DEFAULT_PLAN_KEY = "free"
 DEFAULT_MONTHLY_CREDIT_LIMIT = int(PLAN_MONTHLY_QUOTAS.get(DEFAULT_PLAN_KEY, 50))
 DEFAULT_AVERAGE_DEAL_VALUE = 1000
+DEFAULT_ADMIN_EMAILS = {
+    email.strip().lower()
+    for email in str(os.environ.get("SNIPED_ADMIN_EMAILS", "info@sniped.io") or "info@sniped.io").split(",")
+    if email.strip()
+}
 FREE_PLAN_NICHE_RECOMMENDATIONS_PER_MONTH = 1
 FREE_PLAN_NICHE_REFRESH_DAYS = 7
 PAID_PLAN_NICHE_REFRESH_HOURS = 1
@@ -2179,6 +2192,8 @@ def ensure_users_table(db_path: Path) -> None:
                     smtp_accounts_json TEXT,
                     reset_token   TEXT,
                     reset_token_expires_at TEXT,
+                    last_login_at TEXT,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
                     created_at    TEXT    NOT NULL,
                     updated_at    TEXT
                 )
@@ -2206,12 +2221,21 @@ def ensure_users_table(db_path: Path) -> None:
                 ("smtp_accounts_json", "TEXT"),
                 ("reset_token", "TEXT"),
                 ("reset_token_expires_at", "TEXT"),
+                ("last_login_at", "TEXT"),
+                ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
                 ("updated_at", "TEXT"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
                 except Exception:
                     pass
+            if DEFAULT_ADMIN_EMAILS:
+                conn.execute(
+                    "UPDATE users SET is_admin = 1 WHERE LOWER(COALESCE(email, '')) IN ({})".format(
+                        ",".join(["?"] * len(DEFAULT_ADMIN_EMAILS))
+                    ),
+                    tuple(sorted(DEFAULT_ADMIN_EMAILS)),
+                )
             conn.commit()
 
             users_table_exists_row = conn.execute(
@@ -5284,6 +5308,8 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
         smtp_accounts_json TEXT,
         reset_token TEXT,
         reset_token_expires_at TEXT,
+        last_login_at TEXT,
+        is_admin BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TEXT NOT NULL,
         updated_at TEXT
     );
@@ -5311,6 +5337,8 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS smtp_accounts_json TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token TEXT;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS reset_token_expires_at TEXT;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_login_at TEXT;
+    ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT NOW()::text;
     ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TEXT;
     ALTER TABLE public.users ALTER COLUMN credits_balance SET DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT};
@@ -5371,6 +5399,10 @@ def ensure_supabase_users_table(config_path: Path) -> bool:
     UPDATE public.users
     SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, FALSE)
     WHERE subscription_cancel_at_period_end IS NULL;
+
+    UPDATE public.users
+    SET is_admin = TRUE
+    WHERE LOWER(COALESCE(email, '')) IN ({','.join([f"'{email}'" for email in sorted(DEFAULT_ADMIN_EMAILS)])});
 
     UPDATE public.users
     SET plan_key = CASE
@@ -11136,6 +11168,24 @@ def create_app() -> FastAPI:
                 "error_type": type(exc).__name__,
             },
         )
+
+    @app.middleware("http")
+    async def admin_api_guard(request: Request, call_next):
+        path = str(request.url.path or "")
+        if path.startswith("/api/admin/"):
+            try:
+                token = require_authenticated_session(request)
+                billing = load_user_billing_context(token, allow_stripe_recovery=False)
+                requester_email = str(billing.get("email") or "").strip().lower()
+                if requester_email not in DEFAULT_ADMIN_EMAILS:
+                    return JSONResponse(status_code=403, content={"detail": "Admin access required."})
+                request.state.current_user_email = requester_email
+                request.state.is_admin = True
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            except Exception:
+                return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+        return await call_next(request)
 
     async def _log_playwright_runtime_diagnostics() -> None:
         try:
@@ -16986,8 +17036,15 @@ def create_app() -> FastAPI:
             if not secrets.compare_digest(expected, str(row.get("password_hash") or "")):
                 raise HTTPException(status_code=401, detail="Invalid email or password.")
             token = str(row.get("token") or "") or str(uuid.uuid4())
+            now_iso = utc_now_iso()
             try:
-                sb_client.table("users").update({"token": token}).eq("id", row.get("id")).execute()
+                sb_client.table("users").update(
+                    {
+                        "token": token,
+                        "last_login_at": now_iso,
+                        "updated_at": now_iso,
+                    }
+                ).eq("id", row.get("id")).execute()
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"Supabase token update failed: {exc}")
             return {
@@ -17012,8 +17069,12 @@ def create_app() -> FastAPI:
         if not secrets.compare_digest(expected, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         token = row["token"] or str(uuid.uuid4())
+        now_iso = utc_now_iso()
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
-            conn.execute("UPDATE users SET token = ? WHERE id = ?", (token, row["id"]))
+            conn.execute(
+                "UPDATE users SET token = ?, last_login_at = ?, updated_at = ? WHERE id = ?",
+                (token, now_iso, now_iso, row["id"]),
+            )
             conn.commit()
         return {
             "token": token,
@@ -17178,7 +17239,8 @@ def create_app() -> FastAPI:
             row_dict = None
             # Try full select first, fall back to minimal columns if schema is incomplete
             for attempt_cols in [
-                "email,niche,display_name,contact_name,account_type,quickstart_completed,average_deal_value",
+                "email,niche,display_name,contact_name,account_type,quickstart_completed,average_deal_value,is_admin,last_login_at",
+                "email,niche,display_name,contact_name,account_type,is_admin,last_login_at",
                 "email,niche,display_name,contact_name,account_type",
             ]:
                 try:
@@ -17213,6 +17275,8 @@ def create_app() -> FastAPI:
                 "display_name": row_dict.get("display_name") or "",
                 "contact_name": row_dict.get("contact_name") or "",
                 "account_type": row_dict.get("account_type") or "entrepreneur",
+                "is_admin": bool(row_dict.get("is_admin") or False),
+                "last_login_at": row_dict.get("last_login_at"),
                 "credits_balance": int(credit_snapshot.get("credits_balance") or 0),
                 "credits_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
                 "monthly_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
@@ -17239,7 +17303,7 @@ def create_app() -> FastAPI:
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
             conn.row_factory = pgdb.Row
             row = conn.execute(
-                "SELECT email, niche, display_name, contact_name, account_type, quickstart_completed, average_deal_value FROM users WHERE token = ?",
+                "SELECT email, niche, display_name, contact_name, account_type, quickstart_completed, average_deal_value, is_admin, last_login_at FROM users WHERE token = ?",
                 (token,),
             ).fetchone()
         if row is None:
@@ -17254,6 +17318,8 @@ def create_app() -> FastAPI:
             "display_name": row["display_name"] or "",
             "contact_name": row["contact_name"] or "",
             "account_type": row["account_type"] or "entrepreneur",
+            "is_admin": bool(int(row["is_admin"] or 0)),
+            "last_login_at": row["last_login_at"],
             "credits_balance": int(credit_snapshot.get("credits_balance") or 0),
             "credits_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
             "monthly_limit": int(credit_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
@@ -17295,6 +17361,263 @@ def create_app() -> FastAPI:
             "monthly_quota": credits_limit,
             "topup_credits_balance": topup_credits_balance,
             "updated_at": utc_now_iso(),
+        }
+
+    @app.get("/api/admin/overview")
+    def admin_overview(request: Request) -> dict:
+        ensure_users_table(DEFAULT_DB_PATH)
+        ensure_system_task_table(DEFAULT_DB_PATH)
+
+        users_rows: list[dict[str, Any]] = []
+        total_users = 0
+        total_leads = 0
+        mrr_value = 0.0
+        total_revenue_value = 0.0
+        latest_scrape_status = "unknown"
+        latest_scrape_error = ""
+        latest_scrape_updated_at = ""
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+
+            users_rows = supabase_select_rows(
+                admin_client,
+                "users",
+                columns="id,email,plan_key,subscription_active,credits_balance,monthly_quota,monthly_limit,credits_limit,is_admin,last_login_at,created_at,updated_at",
+                order_by="created_at",
+                desc=True,
+                limit=5000,
+            )
+            total_users = len(users_rows)
+
+            try:
+                total_leads_resp = admin_client.table("leads").select("id", count="exact").limit(1).execute()
+                total_leads = int(getattr(total_leads_resp, "count", 0) or 0)
+            except Exception:
+                total_leads = len(supabase_select_rows(admin_client, "leads", columns="id", limit=500000))
+
+            if supabase_table_available(DEFAULT_CONFIG_PATH, "revenue_log"):
+                revenue_rows = supabase_select_rows(admin_client, "revenue_log", columns="amount,is_recurring", limit=100000)
+                total_revenue_value = float(sum(float(r.get("amount") or 0) for r in revenue_rows))
+                mrr_value = float(sum(float(r.get("amount") or 0) for r in revenue_rows if int(r.get("is_recurring") or 0) == 1))
+
+            if supabase_table_available(DEFAULT_CONFIG_PATH, "system_tasks"):
+                task_rows = supabase_select_rows(
+                    admin_client,
+                    "system_tasks",
+                    columns="id,task_type,status,error,finished_at,started_at,created_at",
+                    filters={"task_type": "scrape"},
+                    order_by="id",
+                    desc=True,
+                    limit=1,
+                )
+                if task_rows:
+                    task = task_rows[0]
+                    latest_scrape_status = str(task.get("status") or "unknown").strip().lower()
+                    latest_scrape_error = str(task.get("error") or "").strip()
+                    latest_scrape_updated_at = str(task.get("finished_at") or task.get("started_at") or task.get("created_at") or "").strip()
+        else:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                conn.row_factory = pgdb.Row
+                rows = conn.execute(
+                    """
+                    SELECT id,email,plan_key,subscription_active,credits_balance,
+                           COALESCE(NULLIF(monthly_quota,0), NULLIF(monthly_limit,0), NULLIF(credits_limit,0), ?) AS credits_limit,
+                           COALESCE(is_admin, 0) AS is_admin,
+                           last_login_at,created_at,updated_at
+                    FROM users
+                    ORDER BY COALESCE(created_at, updated_at) DESC, id DESC
+                    """,
+                    (DEFAULT_MONTHLY_CREDIT_LIMIT,),
+                ).fetchall()
+                users_rows = [dict(r) for r in rows]
+                total_users = len(users_rows)
+                total_leads = int(conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0] or 0)
+                total_revenue_value = float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM revenue_log").fetchone()[0] or 0.0)
+                mrr_value = float(conn.execute("SELECT COALESCE(SUM(amount), 0) FROM revenue_log WHERE COALESCE(is_recurring, 0) = 1").fetchone()[0] or 0.0)
+                last_task = conn.execute(
+                    "SELECT status,error,finished_at,started_at,created_at FROM system_tasks WHERE task_type = 'scrape' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if last_task is not None:
+                    latest_scrape_status = str(last_task[0] or "unknown").strip().lower()
+                    latest_scrape_error = str(last_task[1] or "").strip()
+                    latest_scrape_updated_at = str(last_task[2] or last_task[3] or last_task[4] or "").strip()
+
+        normalized_users = []
+        plan_counts: dict[str, int] = {}
+        for row in users_rows:
+            plan_key = _normalize_plan_key(row.get("plan_key"), fallback="free")
+            plan_counts[plan_key] = int(plan_counts.get(plan_key, 0) + 1)
+            resolved_limit = int(row.get("monthly_quota") or row.get("monthly_limit") or row.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT)
+            normalized_users.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "email": str(row.get("email") or "").strip().lower(),
+                    "plan_key": plan_key,
+                    "plan_name": str(PLAN_DISPLAY_NAMES.get(plan_key, plan_key.title())),
+                    "subscription_active": bool(row.get("subscription_active") or False),
+                    "credits_balance": int(row.get("credits_balance") or 0),
+                    "credits_limit": max(1, resolved_limit),
+                    "is_admin": bool(row.get("is_admin") or False),
+                    "last_login_at": row.get("last_login_at") or row.get("updated_at") or None,
+                    "created_at": row.get("created_at") or None,
+                }
+            )
+
+        scraper_health = "healthy"
+        if latest_scrape_status in {"running", "queued"}:
+            scraper_health = "running"
+        elif latest_scrape_status in {"failed", "cancelled", "stopped"}:
+            scraper_health = "failing"
+
+        return {
+            "stats": {
+                "total_users": int(total_users),
+                "mrr": float(mrr_value),
+                "total_revenue": float(total_revenue_value),
+                "total_leads": int(total_leads),
+            },
+            "scraper": {
+                "health": scraper_health,
+                "last_status": latest_scrape_status,
+                "last_error": latest_scrape_error,
+                "last_updated_at": latest_scrape_updated_at,
+            },
+            "plans": plan_counts,
+            "users": normalized_users,
+        }
+
+    @app.post("/api/admin/credits")
+    def admin_update_user_credits(payload: AdminCreditUpdateRequest, request: Request) -> dict:
+        action = str(payload.action or "add").strip().lower()
+        if action not in {"add", "set", "reset"}:
+            raise HTTPException(status_code=400, detail="action must be one of: add, set, reset")
+
+        target_user_id = str(payload.user_id or "").strip()
+        target_email = str(payload.email or "").strip().lower()
+        if not target_user_id and not target_email:
+            raise HTTPException(status_code=400, detail="user_id or email is required")
+
+        note = str(payload.note or "").strip()
+        now_iso = utc_now_iso()
+        amount = int(payload.amount or 0)
+
+        if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+            ensure_supabase_users_table(DEFAULT_CONFIG_PATH)
+            admin_client = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
+            if admin_client is None:
+                raise HTTPException(status_code=503, detail="Supabase is not reachable.")
+
+            query = admin_client.table("users").select(
+                "id,email,credits_balance,monthly_quota,monthly_limit,credits_limit,topup_credits_balance"
+            )
+            if target_user_id:
+                query = query.eq("id", target_user_id)
+            else:
+                query = query.eq("email", target_email)
+            rows = list(getattr(query.limit(1).execute(), "data", None) or [])
+            if not rows:
+                raise HTTPException(status_code=404, detail="User not found")
+            row = rows[0]
+            resolved_id = str(row.get("id") or "").strip()
+            current_balance = int(row.get("credits_balance") or 0)
+            credits_limit = int(row.get("monthly_quota") or row.get("monthly_limit") or row.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT)
+            topup_balance = int(row.get("topup_credits_balance") or 0)
+
+            if action == "reset":
+                next_balance = max(0, int(credits_limit) + max(0, int(topup_balance)))
+            elif action == "set":
+                next_balance = max(0, amount)
+            else:
+                next_balance = max(0, int(current_balance) + amount)
+
+            admin_client.table("users").update(
+                {
+                    "credits": next_balance,
+                    "credits_balance": next_balance,
+                    "updated_at": now_iso,
+                }
+            ).eq("id", resolved_id).execute()
+
+            _append_credit_log(
+                resolved_id,
+                int(next_balance - current_balance),
+                f"admin_{action}",
+                {
+                    "note": note,
+                    "admin_email": str(getattr(request.state, "current_user_email", "") or "").strip().lower(),
+                    "credits_before": current_balance,
+                    "credits_after": next_balance,
+                },
+                db_path=DEFAULT_DB_PATH,
+            )
+
+            return {
+                "status": "ok",
+                "user_id": resolved_id,
+                "email": str(row.get("email") or "").strip().lower(),
+                "action": action,
+                "credits_before": current_balance,
+                "credits_after": next_balance,
+            }
+
+        ensure_users_table(DEFAULT_DB_PATH)
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            if target_user_id:
+                row = conn.execute(
+                    "SELECT id,email,credits_balance,COALESCE(NULLIF(monthly_quota,0),NULLIF(monthly_limit,0),NULLIF(credits_limit,0),?) AS credits_limit,COALESCE(topup_credits_balance,0) AS topup_credits_balance FROM users WHERE id = ? LIMIT 1",
+                    (DEFAULT_MONTHLY_CREDIT_LIMIT, target_user_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id,email,credits_balance,COALESCE(NULLIF(monthly_quota,0),NULLIF(monthly_limit,0),NULLIF(credits_limit,0),?) AS credits_limit,COALESCE(topup_credits_balance,0) AS topup_credits_balance FROM users WHERE LOWER(email) = ? LIMIT 1",
+                    (DEFAULT_MONTHLY_CREDIT_LIMIT, target_email),
+                ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            resolved_id = str(row["id"])
+            current_balance = int(row["credits_balance"] or 0)
+            credits_limit = int(row["credits_limit"] or DEFAULT_MONTHLY_CREDIT_LIMIT)
+            topup_balance = int(row["topup_credits_balance"] or 0)
+
+            if action == "reset":
+                next_balance = max(0, int(credits_limit) + max(0, int(topup_balance)))
+            elif action == "set":
+                next_balance = max(0, amount)
+            else:
+                next_balance = max(0, int(current_balance) + amount)
+
+            conn.execute(
+                "UPDATE users SET credits = ?, credits_balance = ?, updated_at = ? WHERE id = ?",
+                (next_balance, next_balance, now_iso, resolved_id),
+            )
+            conn.commit()
+
+        _append_credit_log(
+            resolved_id,
+            int(next_balance - current_balance),
+            f"admin_{action}",
+            {
+                "note": note,
+                "admin_email": str(getattr(request.state, "current_user_email", "") or "").strip().lower(),
+                "credits_before": current_balance,
+                "credits_after": next_balance,
+            },
+            db_path=DEFAULT_DB_PATH,
+        )
+
+        return {
+            "status": "ok",
+            "user_id": resolved_id,
+            "email": str(row["email"] or "").strip().lower(),
+            "action": action,
+            "credits_before": current_balance,
+            "credits_after": next_balance,
         }
 
     @app.post("/api/stripe/create-portal-session")

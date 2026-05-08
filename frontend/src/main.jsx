@@ -54,6 +54,7 @@ createRoot(document.getElementById('root')).render(
         <Routes>
           {/* Main app */}
           <Route path="/app/*" element={<App />} />
+          <Route path="/admin" element={<App initialTab="admin" />} />
           <Route path="/tasks" element={<App initialTab="tasks" />} />
           <Route path="/delivery" element={<Navigate to="/tasks" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
