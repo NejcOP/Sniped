@@ -18411,6 +18411,62 @@ def create_app() -> FastAPI:
             "credits_after": next_balance,
         }
 
+    @app.get("/api/admin/reply-alerts")
+    def admin_reply_alerts(limit: int = Query(default=25, ge=1, le=200)) -> dict:
+        ensure_mailer_campaign_tables(DEFAULT_DB_PATH)
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            conn.row_factory = pgdb.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    e.id,
+                    e.lead_id,
+                    e.user_id,
+                    e.email,
+                    e.subject_line,
+                    e.metadata_json,
+                    e.occurred_at,
+                    l.business_name,
+                    l.status,
+                    l.pipeline_stage,
+                    l.reply_detected_at,
+                    l.last_contacted_at
+                FROM CampaignEvents e
+                LEFT JOIN leads l ON l.id = e.lead_id
+                WHERE LOWER(COALESCE(e.event_type, '')) = 'reply'
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            parsed_metadata = deserialize_json(row["metadata_json"]) or {}
+            if not isinstance(parsed_metadata, dict):
+                parsed_metadata = {}
+            items.append(
+                {
+                    "id": int(row["id"] or 0),
+                    "lead_id": int(row["lead_id"] or 0) if row["lead_id"] is not None else None,
+                    "user_id": str(row["user_id"] or "").strip(),
+                    "email": str(row["email"] or "").strip(),
+                    "business_name": str(row["business_name"] or "").strip(),
+                    "subject_line": str(row["subject_line"] or "").strip(),
+                    "status": str(row["status"] or "").strip(),
+                    "pipeline_stage": str(row["pipeline_stage"] or "").strip(),
+                    "reply_detected_at": row["reply_detected_at"],
+                    "last_contacted_at": row["last_contacted_at"],
+                    "occurred_at": row["occurred_at"],
+                    "metadata": parsed_metadata,
+                }
+            )
+
+        return {
+            "items": items,
+            "count": len(items),
+        }
+
     @app.post("/api/admin/users/{user_id}/block")
     def admin_block_user(user_id: str, payload: AdminBlockUserRequest, request: Request) -> dict:
         target_user_id = str(user_id or "").strip()
