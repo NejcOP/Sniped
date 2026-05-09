@@ -761,10 +761,36 @@ DEFAULT_ADMIN_EMAILS = {
     for email in str(os.environ.get("SNIPED_ADMIN_EMAILS", "info@sniped.io") or "info@sniped.io").split(",")
     if email.strip()
 }
+ADMIN_OVERRIDE_PLAN_KEY = "empire"
+ADMIN_UNLIMITED_CREDITS = 10**9
 FREE_PLAN_NICHE_RECOMMENDATIONS_PER_MONTH = 1
 FREE_PLAN_NICHE_REFRESH_DAYS = 7
 PAID_PLAN_NICHE_REFRESH_HOURS = 1
 PAID_PLAN_NICHE_REFRESH_DAYS = PAID_PLAN_NICHE_REFRESH_HOURS / 24
+
+
+def _is_admin_email(email: Any) -> bool:
+    return str(email or "").strip().lower() in DEFAULT_ADMIN_EMAILS
+
+
+def _apply_admin_billing_override(payload: dict[str, Any], *, email: Any = None) -> dict[str, Any]:
+    if not _is_admin_email(email or payload.get("email")):
+        return payload
+    monthly_limit = max(1, int(PLAN_MONTHLY_QUOTAS.get(ADMIN_OVERRIDE_PLAN_KEY, PLAN_MONTHLY_QUOTAS.get("empire", 100000))))
+    payload.update(
+        {
+            "plan_key": ADMIN_OVERRIDE_PLAN_KEY,
+            "subscription_active": True,
+            "subscription_status": "active",
+            "credits_limit": monthly_limit,
+            "monthly_limit": monthly_limit,
+            "monthly_quota": monthly_limit,
+            "credits_balance": ADMIN_UNLIMITED_CREDITS,
+            "topup_credits_balance": max(0, int(payload.get("topup_credits_balance") or 0)),
+            "is_admin": True,
+        }
+    )
+    return payload
 
 
 class RegisterRequest(BaseModel):
@@ -8537,7 +8563,7 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
         try:
             response = (
                 sb_client.table("users")
-                .select("id,credits_balance,monthly_quota,monthly_limit,credits_limit,topup_credits_balance")
+                .select("id,email,is_admin,credits_balance,monthly_quota,monthly_limit,credits_limit,topup_credits_balance")
                 .eq("id", target_user_id)
                 .limit(1)
                 .execute()
@@ -8550,12 +8576,15 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
             raise HTTPException(status_code=401, detail="Authenticated user does not exist.")
 
         row = rows[0]
-        return {
+        snapshot = {
             "user_id": target_user_id,
             "credits_balance": int(row.get("credits_balance") or 0),
             "credits_limit": max(1, int(row.get("monthly_quota") or row.get("monthly_limit") or row.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT)),
             "topup_credits_balance": max(0, int(row.get("topup_credits_balance") or 0)),
+            "is_admin": bool(row.get("is_admin") or False) or _is_admin_email(row.get("email")),
+            "email": str(row.get("email") or "").strip().lower(),
         }
+        return _apply_admin_billing_override(snapshot, email=row.get("email"))
 
     auth_db_path = db_path or DEFAULT_DB_PATH
     ensure_users_table(auth_db_path)
@@ -8565,6 +8594,8 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
             """
             SELECT
                 id,
+                COALESCE(email, '') AS email,
+                COALESCE(is_admin, FALSE) AS is_admin,
                 COALESCE(credits_balance, 0) AS credits_balance,
                 COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), 50) AS credits_limit,
                 COALESCE(topup_credits_balance, 0) AS topup_credits_balance
@@ -8577,12 +8608,15 @@ def _load_user_credit_snapshot(user_id: str, db_path: Optional[Path] = None) -> 
     if row is None:
         raise HTTPException(status_code=401, detail="Authenticated user does not exist.")
 
-    return {
+    snapshot = {
         "user_id": target_user_id,
         "credits_balance": int(row["credits_balance"] or 0),
         "credits_limit": max(1, int(row["credits_limit"] or DEFAULT_MONTHLY_CREDIT_LIMIT)),
         "topup_credits_balance": max(0, int(row["topup_credits_balance"] or 0)),
+        "is_admin": bool(row["is_admin"] or False) or _is_admin_email(row["email"]),
+        "email": str(row["email"] or "").strip().lower(),
     }
+    return _apply_admin_billing_override(snapshot, email=row["email"])
 
 
 def _append_credit_log(
@@ -8644,13 +8678,20 @@ def deduct_credits_on_success(
         raise HTTPException(status_code=401, detail="Missing authenticated user.")
 
     amount = max(0, int(credits_to_deduct or 0))
-    if amount <= 0:
-        snapshot = _load_user_credit_snapshot(target_user_id, db_path=db_path)
+    admin_snapshot = _load_user_credit_snapshot(target_user_id, db_path=db_path)
+    if bool(admin_snapshot.get("is_admin") or False):
         return {
             "user_id": target_user_id,
             "credits_charged": 0,
-            "credits_balance": int(snapshot.get("credits_balance") or 0),
-            "credits_limit": int(snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
+            "credits_balance": int(admin_snapshot.get("credits_balance") or ADMIN_UNLIMITED_CREDITS),
+            "credits_limit": int(admin_snapshot.get("credits_limit") or PLAN_MONTHLY_QUOTAS.get(ADMIN_OVERRIDE_PLAN_KEY, DEFAULT_MONTHLY_CREDIT_LIMIT)),
+        }
+    if amount <= 0:
+        return {
+            "user_id": target_user_id,
+            "credits_charged": 0,
+            "credits_balance": int(admin_snapshot.get("credits_balance") or 0),
+            "credits_limit": int(admin_snapshot.get("credits_limit") or DEFAULT_MONTHLY_CREDIT_LIMIT),
         }
 
     now_iso = utc_now_iso()
@@ -15800,7 +15841,7 @@ def create_app() -> FastAPI:
             next_reset_at = _next_monthly_reset_iso(subscription_start_date)
             next_reset_in_days = _monthly_reset_days_left(subscription_start_date)
 
-            return {
+            payload = {
                 "id": str(base_row.get("id") or "").strip(),
                 "email": str(base_row.get("email") or "").strip().lower(),
                 "credits_balance": _safe_int(extras.get("credits_balance"), 0),
@@ -15819,6 +15860,7 @@ def create_app() -> FastAPI:
                 "stripe_customer_id": str(extras.get("stripe_customer_id") or "").strip(),
                 "updated_at": str(extras.get("updated_at") or "").strip(),
             }
+            return _apply_admin_billing_override(payload, email=base_row.get("email"))
 
         ensure_users_table(DEFAULT_DB_PATH)
         with pgdb.connect(DEFAULT_DB_PATH) as conn:
@@ -16015,7 +16057,7 @@ def create_app() -> FastAPI:
         next_reset_at = _next_monthly_reset_iso(subscription_start_date)
         next_reset_in_days = _monthly_reset_days_left(subscription_start_date)
 
-        return {
+        payload = {
             "id": str(row_data["id"]),
             "email": str(row_data["email"] or "").strip().lower(),
             "credits_balance": int(row_data["credits_balance"] or 0),
@@ -16034,6 +16076,7 @@ def create_app() -> FastAPI:
             "stripe_customer_id": str(row_data["stripe_customer_id"] or "").strip(),
             "updated_at": str(row_data["updated_at"] or "").strip(),
         }
+        return _apply_admin_billing_override(payload, email=row_data.get("email"))
 
     def create_stripe_billing_portal_session(customer_id: str, return_url: str) -> str:
         secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
