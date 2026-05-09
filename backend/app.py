@@ -708,22 +708,22 @@ STRIPE_TOP_UP_PRICE_ID_TO_PACKAGE: dict[str, dict[str, Any]] = {
 }
 STRIPE_SUBSCRIPTION_PLANS: dict[str, dict[str, Any]] = {
     "hustler": {
-        "price_id": "price_1TJHdkRGcYMcfC8viZYHscWt",
+        "price_id": "price_1TV8fWIHcumhGMC4U4pDKM7S",
         "credits": 2000,
         "display_name": "The Hustler",
     },
     "growth": {
-        "price_id": "price_1TJHeMRGcYMcfC8vevfcX7LL",
+        "price_id": "price_1TV8fzIHcumhGMC4MDVaUcBx",
         "credits": 7000,
         "display_name": "The Growth",
     },
     "scale": {
-        "price_id": "price_1TJHeiRGcYMcfC8vSribLQSd",
+        "price_id": "price_1TV8gOIHcumhGMC4WZZqHo78",
         "credits": 20000,
         "display_name": "The Scale",
     },
     "empire": {
-        "price_id": "price_1TJHf7RGcYMcfC8vleT9raNz",
+        "price_id": "price_1TV8gsIHcumhGMC4IOFDxDte",
         "credits": 100000,
         "display_name": "The Empire",
     },
@@ -19705,7 +19705,7 @@ def create_app() -> FastAPI:
 
         is_topup_event = credits_delta > 0
         is_subscription_cycle_event = (
-            (event_type in {"invoice.payment_succeeded", "invoice.paid"} and billing_reason in {"subscription_create", "subscription_update"})
+            (event_type in {"invoice.payment_succeeded", "invoice.paid"} and billing_reason in {"subscription_create", "subscription_update", "subscription_cycle"})
             or (event_type == "checkout.session.completed" and checkout_mode == "subscription")
             or event_type == "customer.subscription.created"
         )
@@ -19853,12 +19853,17 @@ def create_app() -> FastAPI:
                 payload["monthly_limit"] = next_monthly_limit
                 payload["credits_limit"] = next_monthly_limit
                 payload["subscription_start_date"] = now_iso
-                payload["credits_balance"] = next_monthly_limit + topup_balance
                 payload["subscription_active"] = True
                 payload["subscription_status"] = "active"
                 payload["subscription_cancel_at"] = None
                 payload["subscription_cancel_at_period_end"] = False
                 payload["plan_key"] = _resolve_plan_key_from_limit(next_monthly_limit, fallback="pro")
+                if billing_reason == "subscription_update" and next_monthly_limit > current_monthly_limit:
+                    # Mid-month upgrade: immediately add only the credit difference
+                    payload["credits_balance"] = current_balance + (next_monthly_limit - current_monthly_limit)
+                else:
+                    # New subscription or monthly renewal: reset to full plan quota
+                    payload["credits_balance"] = next_monthly_limit + topup_balance
 
             if is_subscription_state_event:
                 if deleted_or_terminal and not has_paid_access_until_end:
@@ -19998,12 +20003,17 @@ def create_app() -> FastAPI:
                 monthly_limit_to_store = next_monthly_limit
                 credits_limit_to_store = next_monthly_limit
                 subscription_start_date_to_store = now_iso
-                credits_balance_to_store = next_monthly_limit + topup_balance
                 subscription_active_to_store = 1
                 subscription_status_to_store = "active"
                 subscription_cancel_at_to_store = None
                 subscription_cancel_at_period_end_to_store = 0
                 plan_key_to_store = _resolve_plan_key_from_limit(next_monthly_limit, fallback="pro")
+                if billing_reason == "subscription_update" and next_monthly_limit > current_monthly_limit:
+                    # Mid-month upgrade: immediately add only the credit difference
+                    credits_balance_to_store = current_balance + (next_monthly_limit - current_monthly_limit)
+                else:
+                    # New subscription or monthly renewal: reset to full plan quota
+                    credits_balance_to_store = next_monthly_limit + topup_balance
 
             if is_subscription_state_event:
                 if deleted_or_terminal and not has_paid_access_until_end:
