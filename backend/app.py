@@ -3200,7 +3200,7 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                         END,
                         status = CASE
                             WHEN LOWER(COALESCE(status, '')) IN ('paid', 'closed') THEN status
-                            ELSE 'Replied'
+                            ELSE 'replied'
                         END
                     WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
@@ -12012,8 +12012,50 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url=target_url, status_code=307)
 
-    @app.post("/api/webhooks/incoming-email")
-    def incoming_email_webhook(payload: IncomingEmailWebhookRequest, request: Request) -> dict:
+    def _send_admin_reply_alert_email(
+        *,
+        lead_id: int,
+        lead_email: str,
+        subject_line: Optional[str],
+        reason: Optional[str],
+    ) -> None:
+        account = get_system_smtp_account(DEFAULT_CONFIG_PATH)
+        if not account:
+            logging.info("Reply alert email skipped: system SMTP is not configured.")
+            return
+
+        safe_lead_email = str(lead_email or "").strip() or "unknown"
+        safe_subject_line = str(subject_line or "").strip() or "(no subject)"
+        safe_reason = str(reason or "").strip()
+        subject = f"Reply detected: lead #{int(lead_id)}"
+        text_body = (
+            "A lead replied to a cold email.\n\n"
+            f"Lead ID: {int(lead_id)}\n"
+            f"Lead Email: {safe_lead_email}\n"
+            f"Subject: {safe_subject_line}\n"
+            f"Reason: {safe_reason or 'n/a'}\n\n"
+            "Status was automatically set to 'replied' and the sequence was stopped."
+        )
+
+        for admin_email in sorted(DEFAULT_ADMIN_EMAILS):
+            try:
+                send_auth_email(account, admin_email, subject, text_body)
+            except Exception as exc:
+                logging.warning("Failed to send reply alert email to %s: %s", admin_email, exc)
+
+    def _store_reply_dashboard_notification(*, lead_id: int, lead_email: str) -> None:
+        payload = {
+            "active": True,
+            "message": f"Reply detected from {str(lead_email or '').strip() or 'a lead'} (lead #{int(lead_id)}). Jump in manually to close.",
+            "updated_at": utc_now_iso(),
+            "source": "reply_webhook",
+        }
+        try:
+            set_runtime_value(DEFAULT_DB_PATH, "reply_detection_latest", json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            logging.warning("Failed to store reply dashboard notification: %s", exc)
+
+    def _handle_reply_webhook(payload: IncomingEmailWebhookRequest, request: Request, *, source: str) -> dict:
         ensure_system_tables(DEFAULT_DB_PATH)
         cfg: dict[str, Any] = {}
         try:
@@ -12079,7 +12121,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="No matching lead for inbound reply.")
 
         metadata = dict(payload.metadata or {})
-        metadata.setdefault("source", "incoming_email_webhook")
+        metadata.setdefault("source", source)
         if payload.thread_token:
             metadata.setdefault("thread_token", str(payload.thread_token).strip())
         if payload.from_email:
@@ -12099,6 +12141,16 @@ def create_app() -> FastAPI:
         )
         maybe_sync_supabase(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH)
         _invalidate_leads_cache()
+        _store_reply_dashboard_notification(
+            lead_id=int(lead_row["id"]),
+            lead_email=str(payload.email or lead_row["email"] or "").strip(),
+        )
+        _send_admin_reply_alert_email(
+            lead_id=int(lead_row["id"]),
+            lead_email=str(payload.email or lead_row["email"] or "").strip(),
+            subject_line=str(payload.subject_line or "").strip() or None,
+            reason=str(payload.reason or "").strip() or None,
+        )
 
         return {
             "status": "recorded",
@@ -12106,6 +12158,14 @@ def create_app() -> FastAPI:
             "pipeline_stage": "Replied",
             "event": event,
         }
+
+    @app.post("/api/webhooks/incoming-email")
+    def incoming_email_webhook(payload: IncomingEmailWebhookRequest, request: Request) -> dict:
+        return _handle_reply_webhook(payload, request, source="incoming_email_webhook")
+
+    @app.post("/api/webhooks/reply")
+    def reply_webhook(payload: IncomingEmailWebhookRequest, request: Request) -> dict:
+        return _handle_reply_webhook(payload, request, source="reply_webhook")
 
     @app.get("/api/supabase-health")
     def supabase_health() -> dict:
@@ -18727,6 +18787,19 @@ def create_app() -> FastAPI:
     def get_global_notification() -> dict:
         raw_value = get_runtime_value(DEFAULT_DB_PATH, "global_notification_banner")
         if not raw_value:
+            reply_value = get_runtime_value(DEFAULT_DB_PATH, "reply_detection_latest")
+            if not reply_value:
+                return {"active": False, "message": "", "updated_at": None}
+            try:
+                parsed_reply = json.loads(str(reply_value))
+                if isinstance(parsed_reply, dict):
+                    return {
+                        "active": bool(parsed_reply.get("active") or False),
+                        "message": str(parsed_reply.get("message") or "").strip(),
+                        "updated_at": parsed_reply.get("updated_at"),
+                    }
+            except Exception:
+                pass
             return {"active": False, "message": "", "updated_at": None}
         try:
             parsed = json.loads(str(raw_value))
