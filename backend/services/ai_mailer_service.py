@@ -425,6 +425,11 @@ class AIMailer:
             if step_index is None:
                 continue
 
+            if self._is_lead_send_blocked(int(lead["id"])):
+                logging.info("Skipping lead %s because it is already replied/terminal.", lead.get("email"))
+                skipped += 1
+                continue
+
             if self.is_blacklisted(lead["email"], lead["website_url"]):
                 logging.info("Skipping unsubscribed lead %s (%s).", lead["business_name"], lead["email"])
                 skipped += 1
@@ -993,6 +998,7 @@ class AIMailer:
         prepared_subject = subject
         prepared_body = self.ensure_signature(body, self.mail_signature)
         prepared_body = self.ensure_unsubscribe_footer(prepared_body, recipient_email)
+        prepared_body = self._apply_click_tracking(prepared_body, lead_id)
 
         message = EmailMessage()
         message["To"] = recipient_email
@@ -1202,7 +1208,70 @@ class AIMailer:
         if not base_url:
             return None
         token = self._get_or_create_tracking_token(int(lead_id))
-        return f"{base_url}/api/track/open/{token}"
+        return f"{base_url}/api/tracks/open/{token}"
+
+    def _build_click_tracking_url(self, lead_id: Optional[int], target_url: str) -> Optional[str]:
+        if not lead_id:
+            return None
+        clean_target = str(target_url or "").strip()
+        if not clean_target.lower().startswith(("http://", "https://")):
+            return None
+        base_url = str(self.open_tracking_base_url or "").strip().rstrip("/")
+        if not base_url:
+            return None
+        token = self._get_or_create_tracking_token(int(lead_id))
+        return f"{base_url}/api/tracks/click/{token}?url={quote(clean_target, safe='')}"
+
+    def _apply_click_tracking(self, body: str, lead_id: Optional[int]) -> str:
+        clean_body = str(body or "")
+        if not clean_body or not lead_id:
+            return clean_body
+
+        url_pattern = re.compile(r"https?://[^\s<>'\"]+")
+
+        def _replace_url(match: re.Match[str]) -> str:
+            url = str(match.group(0) or "").strip()
+            if not url:
+                return url
+            # Keep unsubscribe links direct for deliverability/compliance.
+            if "/api/unsubscribe/" in url or "/api/tracks/click/" in url:
+                return url
+            tracked = self._build_click_tracking_url(lead_id, url)
+            return tracked or url
+
+        return url_pattern.sub(_replace_url, clean_body)
+
+    def _is_lead_send_blocked(self, lead_id: Optional[int]) -> bool:
+        if not lead_id:
+            return False
+        row = self._fetchone(
+            text(
+                """
+                SELECT COALESCE(status, '') AS status, reply_detected_at
+                FROM leads
+                WHERE id = :lead_id
+                LIMIT 1
+                """
+            ),
+            {"lead_id": int(lead_id)},
+        )
+        if row is None:
+            return True
+        status_value = str((row or {}).get("status") or "").strip().lower()
+        if (row or {}).get("reply_detected_at"):
+            return True
+        return status_value in {
+            "replied",
+            "interested",
+            "meeting set",
+            "zoom scheduled",
+            "paid",
+            "closed",
+            "blacklisted",
+            "skipped (unsubscribed)",
+            "bounced",
+            "invalid_email",
+        }
 
     def _resolve_public_base_url(self) -> str:
         candidates = [

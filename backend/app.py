@@ -37,7 +37,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from openai import OpenAI
 from sqlalchemy import text
@@ -2942,6 +2942,7 @@ def _normalize_campaign_event_type(raw_event_type: Any) -> str:
     value = str(raw_event_type or "").strip().lower().replace("_", " ")
     aliases = {
         "opened": "open",
+        "clicked": "click",
         "reply detected": "reply",
         "replied": "reply",
         "bounced": "bounce",
@@ -3092,7 +3093,7 @@ def list_saved_mail_templates(db_path: Path, user_id: str, limit: int = 50) -> l
 def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     ensure_mailer_campaign_tables(db_path)
     event_type = _normalize_campaign_event_type(payload.get("event_type"))
-    allowed_event_types = {"sent", "open", "reply", "bounce"}
+    allowed_event_types = {"sent", "open", "click", "reply", "bounce"}
     if event_type not in allowed_event_types:
         raise HTTPException(status_code=422, detail=f"Unsupported event_type '{event_type}'")
 
@@ -3191,6 +3192,8 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                     UPDATE leads
                     SET
                         reply_detected_at = COALESCE(reply_detected_at, ?),
+                        next_mail_at = NULL,
+                        status_updated_at = ?,
                         pipeline_stage = CASE
                             WHEN LOWER(COALESCE(status, '')) IN ('paid', 'closed') THEN 'Won (Paid)'
                             ELSE 'Replied'
@@ -3199,6 +3202,15 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                             WHEN LOWER(COALESCE(status, '')) IN ('paid', 'closed') THEN status
                             ELSE 'Replied'
                         END
+                    WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+                    """,
+                    (now_iso, now_iso, lead_id, str(user_id or "legacy")),
+                )
+            elif event_type == "click":
+                conn.execute(
+                    """
+                    UPDATE leads
+                    SET status_updated_at = ?
                     WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
                     (now_iso, lead_id, str(user_id or "legacy")),
@@ -11880,9 +11892,8 @@ def create_app() -> FastAPI:
                 "error": str(exc),
             }
 
-    @app.get("/api/track/open/{token}")
-    def track_mail_open(token: str) -> Response:
-        safe_token = str(token or "").strip()
+    def _record_open_tracking_token(tracking_token: str) -> None:
+        safe_token = str(tracking_token or "").strip()
         if safe_token:
             now_iso = utc_now_iso()
             try:
@@ -11931,6 +11942,10 @@ def create_app() -> FastAPI:
                     except Exception:
                         logging.debug("Failed to update Supabase open tracking for token=%s", safe_token)
 
+    @app.get("/api/track/open/{token}")
+    def track_mail_open_legacy(token: str) -> Response:
+        _record_open_tracking_token(token)
+
         return Response(
             content=TRACKING_PIXEL_GIF,
             media_type="image/gif",
@@ -11940,6 +11955,62 @@ def create_app() -> FastAPI:
                 "Expires": "0",
             },
         )
+
+    @app.get("/api/tracks/open/{tracking_id}")
+    def track_mail_open(tracking_id: str) -> Response:
+        _record_open_tracking_token(tracking_id)
+
+        return Response(
+            content=TRACKING_PIXEL_GIF,
+            media_type="image/gif",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
+    @app.get("/api/tracks/click/{link_id}")
+    def track_mail_click(link_id: str, request: Request) -> RedirectResponse:
+        safe_link_id = str(link_id or "").strip()
+        target_url = str(request.query_params.get("url") or request.query_params.get("u") or "").strip()
+        parsed = urlparse(target_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=400, detail="Invalid redirect target.")
+
+        if safe_link_id:
+            try:
+                ensure_mailer_campaign_tables(DEFAULT_DB_PATH)
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                    conn.row_factory = pgdb.Row
+                    lead_row = conn.execute(
+                        """
+                        SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id
+                        FROM leads
+                        WHERE open_tracking_token = ?
+                        LIMIT 1
+                        """,
+                        (safe_link_id,),
+                    ).fetchone()
+                if lead_row is not None:
+                    record_mailer_campaign_event(
+                        DEFAULT_DB_PATH,
+                        str(lead_row["user_id"] or "legacy"),
+                        {
+                            "lead_id": int(lead_row["id"]),
+                            "email": str(lead_row["email"] or "").strip(),
+                            "event_type": "click",
+                            "metadata": {
+                                "source": "click_redirect",
+                                "token": safe_link_id,
+                                "target_url": target_url,
+                            },
+                        },
+                    )
+            except Exception:
+                logging.debug("Failed to update click tracking for token=%s", safe_link_id)
+
+        return RedirectResponse(url=target_url, status_code=307)
 
     @app.post("/api/webhooks/incoming-email")
     def incoming_email_webhook(payload: IncomingEmailWebhookRequest, request: Request) -> dict:
