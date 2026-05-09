@@ -729,8 +729,8 @@ STRIPE_SUBSCRIPTION_PLANS: dict[str, dict[str, Any]] = {
     },
 }
 
-STRIPE_SETTINGS_SUCCESS_URL = "https://sniped-one.vercel.app/app?tab=settings&payment=success"
-STRIPE_SETTINGS_CANCEL_URL = "https://sniped-one.vercel.app/app?tab=settings&payment=cancelled"
+STRIPE_SETTINGS_SUCCESS_URL = "https://www.sniped.io/app?tab=settings&payment=success"
+STRIPE_SETTINGS_CANCEL_URL = "https://www.sniped.io/app?tab=settings&payment=cancelled"
 STRIPE_PRICE_ID_TO_PLAN: dict[str, dict[str, Any]] = {
     str(config.get("price_id") or "").strip(): {"plan_key": key, **config}
     for key, config in STRIPE_SUBSCRIPTION_PLANS.items()
@@ -4369,7 +4369,7 @@ def build_checkout_app_redirect_url(
     package_credits: Optional[int] = None,
     include_session_id: bool = False,
 ) -> str:
-    normalized_base_url = str(app_base_url or "").strip().rstrip("/") or "https://sniped-one.vercel.app"
+    normalized_base_url = str(app_base_url or "").strip().rstrip("/") or "https://www.sniped.io"
     params: list[tuple[str, str]] = []
     if checkout_status:
         params.append(("checkout", str(checkout_status).strip().lower()))
