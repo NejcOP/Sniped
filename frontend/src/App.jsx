@@ -438,13 +438,13 @@ const templateCardIcons = {
 const templatePlaceholderTokens = ['{BusinessName}', '{City}', '{Niche}', '{YourName}']
 const TOP_UP_PACKAGES = [
   { id: 'credits_1000', credits: 1000, priceUsd: 29.99, badge: '' },
-  { id: 'credits_2500', credits: 2500, priceUsd: 59.00, badge: '' },
+  { id: 'credits_3000', credits: 3000, priceUsd: 59.00, badge: '' },
   { id: 'credits_5000', credits: 5000, priceUsd: 99.00, badge: 'MOST POPULAR' },
   { id: 'credits_10000', credits: 10000, priceUsd: 169.00, badge: 'BEST VALUE' },
   { id: 'credits_25000', credits: 25000, priceUsd: 349.00, badge: '' },
   { id: 'credits_50000', credits: 50000, priceUsd: 699.00, badge: '' },
   { id: 'credits_100000', credits: 100000, priceUsd: 1119.00, badge: '' },
-  { id: 'credits_250000', credits: 250000, priceUsd: 2199.00, badge: '' },
+  { id: 'credits_250000', credits: 250000, priceUsd: 2119.00, badge: '' },
   { id: 'credits_500000', credits: 500000, priceUsd: 3499.00, badge: '' },
 ]
 function compactPkgCredits(n) {

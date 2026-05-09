@@ -691,15 +691,15 @@ NICHES = [
 ACCOUNT_TYPES = {"entrepreneur", "freelancer", "agency", "company"}
 
 STRIPE_TOP_UP_PACKAGES: dict[str, dict[str, Any]] = {
-    "credits_1000": {"credits": 1000, "price_usd": 29.99, "amount_cents": 2999, "price_id": "price_1TJdbYRGcYMcfC8vEmqohR0A"},
-    "credits_2500": {"credits": 2500, "price_usd": 59.00, "amount_cents": 5900, "price_id": "price_1TJdfaRGcYMcfC8vM9chdfdl"},
-    "credits_5000": {"credits": 5000, "price_usd": 99.00, "amount_cents": 9900, "price_id": "price_1TJdgKRGcYMcfC8vMhO5UcVP"},
-    "credits_10000": {"credits": 10000, "price_usd": 169.00, "amount_cents": 16900, "price_id": "price_1TJdgqRGcYMcfC8vJN7fgTME"},
-    "credits_25000": {"credits": 25000, "price_usd": 349.00, "amount_cents": 34900, "price_id": "price_1TJdhWRGcYMcfC8vAzIwvHB7"},
-    "credits_50000": {"credits": 50000, "price_usd": 699.00, "amount_cents": 69900, "price_id": "price_1TJdhvRGcYMcfC8vk1zZ3MqL"},
-    "credits_100000": {"credits": 100000, "price_usd": 1119.00, "amount_cents": 111900, "price_id": "price_1TJdjXRGcYMcfC8vRBHiQYwC"},
-    "credits_250000": {"credits": 250000, "price_usd": 2199.00, "amount_cents": 219900, "price_id": "price_1TJdk2RGcYMcfC8vHkN777Rw"},
-    "credits_500000": {"credits": 500000, "price_usd": 3499.00, "amount_cents": 349900, "price_id": "price_1TJdkSRGcYMcfC8vHlu1NTxc"},
+    "credits_1000": {"credits": 1000, "price_usd": 29.99, "amount_cents": 2999, "price_id": "price_1TV8i8IHcumhGMC4mW4LYWvN"},
+    "credits_3000": {"credits": 3000, "price_usd": 59.00, "amount_cents": 5900, "price_id": "price_1TV8iZIHcumhGMC4l76oD4e2"},
+    "credits_5000": {"credits": 5000, "price_usd": 99.00, "amount_cents": 9900, "price_id": "price_1TV8j8IHcumhGMC49IsLxyC3"},
+    "credits_10000": {"credits": 10000, "price_usd": 169.00, "amount_cents": 16900, "price_id": "price_1TV8jlIHcumhGMC4v4bUu4n9"},
+    "credits_25000": {"credits": 25000, "price_usd": 349.00, "amount_cents": 34900, "price_id": "price_1TV8kBIHcumhGMC4ZbFRduw4"},
+    "credits_50000": {"credits": 50000, "price_usd": 699.00, "amount_cents": 69900, "price_id": "price_1TV8lGIHcumhGMC45IWe3NSE"},
+    "credits_100000": {"credits": 100000, "price_usd": 1119.00, "amount_cents": 111900, "price_id": "price_1TV8lrIHcumhGMC4JLgLpp4y"},
+    "credits_250000": {"credits": 250000, "price_usd": 2119.00, "amount_cents": 211900, "price_id": "price_1TV8maIHcumhGMC4DEeyQSUl"},
+    "credits_500000": {"credits": 500000, "price_usd": 3499.00, "amount_cents": 349900, "price_id": "price_1TV8n0IHcumhGMC4icci2M6X"},
 }
 STRIPE_TOP_UP_PRICE_ID_TO_PACKAGE: dict[str, dict[str, Any]] = {
     str(config.get("price_id") or "").strip(): {"package_id": key, **config}
