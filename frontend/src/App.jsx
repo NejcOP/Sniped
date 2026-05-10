@@ -670,7 +670,11 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
           <p className="inline-flex items-baseline justify-center gap-1.5 whitespace-nowrap text-sm font-semibold text-white">
             <span>Credits&nbsp;</span>
             {creditsLoading ? (
-              <span className="text-[0.95rem] font-medium text-slate-400">Loading...</span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-[1.05rem] w-14 rounded-md bg-slate-700/70 animate-pulse" />
+                <span className="h-[0.95rem] w-2 rounded-sm bg-slate-700/60 animate-pulse" />
+                <span className="h-[0.85rem] w-12 rounded-md bg-slate-700/70 animate-pulse" />
+              </span>
             ) : (
               <span className={`inline-flex items-baseline gap-1 ${creditsLabelClass}`}>
                 <span className="text-[1.05rem] font-semibold text-yellow-200">
@@ -685,16 +689,25 @@ const SidebarLeadFlowPanel = memo(function SidebarLeadFlowPanel({
           </p>
         </div>
         <div className="mt-3 h-2 w-full overflow-hidden rounded-xl bg-slate-700/70">
-          <div
-            className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-500 ease-out"
-            style={{ width: `${creditsPercent}%` }}
-          />
+          {creditsLoading ? (
+            <div className="h-full w-full rounded-xl bg-slate-600/70 animate-pulse" />
+          ) : (
+            <div
+              className="h-full rounded-xl bg-gradient-to-r from-[#d9a406] to-[#FFC107] transition-[width] duration-500 ease-out"
+              style={{ width: `${creditsPercent}%` }}
+            />
+          )}
         </div>
         <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-400">
           <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
-          {resetLabel}
+          {creditsLoading ? <span className="h-[11px] w-40 rounded-md bg-slate-700/70 animate-pulse" /> : resetLabel}
         </div>
-        {topupLabel ? (
+        {creditsLoading ? (
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-[#FFE082]">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#FFC107]" />
+            <span className="h-[11px] w-36 rounded-md bg-slate-700/70 animate-pulse" />
+          </div>
+        ) : topupLabel ? (
           <div className="mt-1 flex items-center gap-2 text-[11px] text-[#FFE082]">
             <span className="h-1.5 w-1.5 rounded-full bg-[#FFC107]" />
             {topupLabel}
@@ -7800,9 +7813,13 @@ function App({ initialTab = 'leads' }) {
                 </button>
                 <div className="flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-950/35 px-2.5 py-1">
                   <Zap className="h-3 w-3 text-amber-300" />
-                  <span className={`text-[11px] font-semibold ${creditsLabelClass}`}>
-                    {creditsReady ? creditsBalanceLabel : '...'}
-                  </span>
+                  {creditsReady ? (
+                    <span className={`text-[11px] font-semibold ${creditsLabelClass}`}>
+                      {creditsBalanceLabel}
+                    </span>
+                  ) : (
+                    <span className="h-[11px] w-10 rounded-md bg-slate-700/70 animate-pulse" />
+                  )}
                 </div>
                 <div className="flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-slate-800/70 text-[11px] font-semibold text-slate-200">
                   {userInitial}
