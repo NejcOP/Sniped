@@ -16623,6 +16623,125 @@ def create_app() -> FastAPI:
         store_runtime_billing_snapshot(user_id, user_email, snapshot)
         return snapshot
 
+    def _resolve_or_create_stripe_customer(
+        user_id: str,
+        user_email: str,
+        stripe_customer_id: Optional[str],
+    ) -> str:
+        """Return a guaranteed-valid Stripe customer ID.
+
+        If the stored ID doesn't exist in the current Stripe environment
+        (live vs. test key mismatch, deleted customer, etc.) the stale ID
+        is wiped from our database, a fresh customer is created, and the
+        new ID is persisted before being returned.
+        """
+        secret_key = get_stripe_secret_key(DEFAULT_CONFIG_PATH)
+        if not secret_key:
+            return str(stripe_customer_id or "").strip()
+
+        safe_customer_id = str(stripe_customer_id or "").strip()
+        safe_user_id = str(user_id or "").strip()
+        safe_user_email = str(user_email or "").strip().lower()
+
+        def _create_new_stripe_customer() -> str:
+            form: list[tuple[str, str]] = []
+            if safe_user_email:
+                form.append(("email", safe_user_email))
+            if safe_user_id:
+                form.append(("metadata[user_id]", safe_user_id))
+            req = urllib.request.Request(
+                "https://api.stripe.com/v1/customers",
+                data=urlencode(form).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {secret_key}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                new_id = str(data.get("id") or "").strip()
+                logging.info("Created new Stripe customer %s for user_id=%s", new_id, safe_user_id)
+                return new_id
+            except Exception as exc:
+                logging.warning("Could not create new Stripe customer for user_id=%s: %s", safe_user_id, exc)
+                return ""
+
+        def _nullify_and_refresh_customer_id(new_cid: str) -> None:
+            now_iso = utc_now_iso()
+            try:
+                with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                    conn.execute(
+                        "UPDATE users SET stripe_customer_id = ?, updated_at = ? WHERE id = ?",
+                        (new_cid or None, now_iso, safe_user_id),
+                    )
+                    conn.commit()
+            except Exception:
+                logging.debug("Could not update local stripe_customer_id for user_id=%s", safe_user_id)
+            if is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
+                sb_client = get_supabase_client(DEFAULT_CONFIG_PATH)
+                if sb_client is not None:
+                    try:
+                        execute_supabase_update_with_retry(
+                            sb_client,
+                            "users",
+                            {"stripe_customer_id": new_cid or None, "updated_at": now_iso},
+                            eq_filters={"id": safe_user_id},
+                            operation_name=f"nullify stripe_customer_id user={safe_user_id}",
+                        )
+                    except Exception:
+                        logging.debug("Could not update Supabase stripe_customer_id for user_id=%s", safe_user_id)
+
+        if safe_customer_id:
+            # Validate that the customer actually exists in the current Stripe environment.
+            req = urllib.request.Request(
+                f"https://api.stripe.com/v1/customers/{safe_customer_id}",
+                method="GET",
+                headers={"Authorization": f"Bearer {secret_key}"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read()  # customer exists, all good
+                return safe_customer_id
+            except urllib.error.HTTPError as exc:
+                raw = ""
+                try:
+                    raw = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+                err_code = ""
+                try:
+                    err_code = str((json.loads(raw).get("error") or {}).get("code") or "").strip().lower()
+                except Exception:
+                    pass
+                is_no_such_customer = (
+                    getattr(exc, "code", None) in (404,)
+                    or err_code in ("resource_missing", "no_such_customer")
+                    or "no such customer" in raw.lower()
+                )
+                if is_no_such_customer:
+                    logging.warning(
+                        "Stripe customer %s does not exist in current environment — creating a new one for user_id=%s",
+                        safe_customer_id,
+                        safe_user_id,
+                    )
+                    new_cid = _create_new_stripe_customer()
+                    _nullify_and_refresh_customer_id(new_cid)
+                    return new_cid
+                # Any other Stripe error: don't block checkout, fall through with original ID.
+                logging.warning("Stripe customer validation returned unexpected error for %s: %s", safe_customer_id, raw[:400])
+                return safe_customer_id
+            except Exception as exc:
+                logging.warning("Stripe customer validation failed (network?) for %s: %s", safe_customer_id, exc)
+                return safe_customer_id
+
+        # No stored customer ID — create a new one.
+        new_cid = _create_new_stripe_customer()
+        if new_cid:
+            _nullify_and_refresh_customer_id(new_cid)
+        return new_cid
+
     def create_stripe_subscription_checkout_session(
         user_id: str,
         user_email: str,
@@ -16671,9 +16790,9 @@ def create_app() -> FastAPI:
             ("allow_promotion_codes", "true"),
         ]
 
-        normalized_customer_id = str(stripe_customer_id or "").strip()
-        if normalized_customer_id:
-            form_items.append(("customer", normalized_customer_id))
+        resolved_customer_id = _resolve_or_create_stripe_customer(user_id, user_email, stripe_customer_id)
+        if resolved_customer_id:
+            form_items.append(("customer", resolved_customer_id))
         elif str(user_email or "").strip():
             form_items.append(("customer_email", str(user_email).strip()))
 
@@ -16769,9 +16888,9 @@ def create_app() -> FastAPI:
             ("payment_intent_data[metadata][stripe_price_id]", price_id),
         ]
 
-        normalized_customer_id = str(stripe_customer_id or "").strip()
-        if normalized_customer_id:
-            form_items.append(("customer", normalized_customer_id))
+        resolved_customer_id = _resolve_or_create_stripe_customer(user_id, user_email, stripe_customer_id)
+        if resolved_customer_id:
+            form_items.append(("customer", resolved_customer_id))
         elif str(user_email or "").strip():
             form_items.append(("customer_email", str(user_email).strip()))
 
