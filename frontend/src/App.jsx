@@ -58,7 +58,7 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useDraggable,
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion as Motion } from 'framer-motion'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import toast, { Toaster } from 'react-hot-toast'
@@ -90,6 +90,8 @@ const BYPASS_LEAD_FILTERS = false
 const LEAD_QUICK_FILTER_VALUES = new Set(['all', 'qualified', 'not_qualified', 'mailed', 'opened', 'replied'])
 const LEADS_QUERY_STALE_TIME_MS = 0
 const LEADS_QUERY_GC_TIME_MS = 10 * 60_000
+const PROFILE_QUERY_BASE_KEY = 'user-profile'
+const USER_CREDITS_QUERY_BASE_KEY = 'user-credits'
 
 const AI_QUICK_FILTERS = [
   { key: 'high_priority', label: '🚀 High Priority', prompt: 'Show high priority leads with score above 8' },
@@ -2308,6 +2310,7 @@ function App({ initialTab = 'leads' }) {
     client_folder_count: 0,
     pipeline: { scraped: 0, contacted: 0, replied: 0, won_paid: 0 },
   })
+  const [statsHydrated, setStatsHydrated] = useState(false)
   const [tasks, setTasks] = useState({})
   const [taskHistory, setTaskHistory] = useState([])
   const [adminOverview, setAdminOverview] = useState({
@@ -4547,110 +4550,175 @@ function App({ initialTab = 'leads' }) {
     }
   }
 
-  const refreshUserProfile = useCallback(async () => {
+  const applyUserProfileData = useCallback((data) => {
+    if (!data || typeof data !== 'object') return
+    setUser((prev) => {
+      const resolvedFeatureAccess = resolveFeatureAccess(
+        data?.plan_type ?? data?.plan_key ?? prev?.plan_type ?? prev?.plan_key ?? 'free',
+        data?.feature_access ?? prev?.feature_access,
+      )
+      return {
+        ...prev,
+        ...data,
+        credits: Number(data?.credits_balance ?? 0),
+        creditLimit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+        credits_balance: Number(data?.credits_balance ?? 0),
+        credits_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+        monthly_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+        monthly_quota: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
+        topup_credits_balance: Number(data?.topup_credits_balance ?? 0),
+        next_reset_at: data?.next_reset_at ?? prev.next_reset_at,
+        next_reset_in_days: data?.next_reset_in_days ?? prev.next_reset_in_days,
+        isSubscribed: Boolean(data?.isSubscribed ?? prev.isSubscribed ?? false),
+        subscription_active: Boolean(data?.subscription_active ?? prev.subscription_active ?? false),
+        subscriptionStatus: String(data?.subscription_status ?? data?.subscriptionStatus ?? prev.subscriptionStatus ?? '').toLowerCase().trim(),
+        subscription_status: String(data?.subscription_status ?? prev.subscription_status ?? '').toLowerCase().trim(),
+        subscription_cancel_at: data?.subscription_cancel_at ?? prev.subscription_cancel_at ?? null,
+        subscription_cancel_at_period_end: Boolean(data?.subscription_cancel_at_period_end ?? prev.subscription_cancel_at_period_end ?? false),
+        currentPlanName: String(data?.currentPlanName ?? prev.currentPlanName ?? 'Free Plan').trim() || 'Free Plan',
+        plan_key: String(data?.plan_key ?? prev.plan_key ?? 'free').toLowerCase().trim(),
+        plan_type: String(data?.plan_type ?? data?.plan_key ?? prev.plan_type ?? prev.plan_key ?? 'free').toLowerCase().trim(),
+        feature_access: resolvedFeatureAccess,
+        average_deal_value: Number(data?.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
+        niche: String(data?.niche ?? prev.niche ?? '').trim(),
+        email: String(data?.email ?? prev.email ?? '').trim().toLowerCase(),
+        is_admin: Boolean(data?.is_admin ?? prev.is_admin ?? false),
+        last_login_at: data?.last_login_at ?? prev.last_login_at ?? null,
+      }
+    })
+    localStorage.setItem('lf_credits', String(Number(data?.credits_balance ?? 0)))
+    localStorage.setItem('lf_credits_balance', String(Number(data?.credits_balance ?? 0)))
+    localStorage.setItem('lf_topup_credits_balance', String(Number(data?.topup_credits_balance ?? 0)))
+    localStorage.setItem('lf_credits_limit', String(Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT)))
+    localStorage.setItem('lf_plan_key', String(data?.plan_key ?? 'free').toLowerCase().trim() || 'free')
+    localStorage.setItem('lf_plan_name', String(data?.currentPlanName ?? 'Free Plan').trim() || 'Free Plan')
+    localStorage.setItem('lf_is_subscribed', String(Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)))
+    localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
+    localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
+    localStorage.setItem('lf_is_admin', String(Boolean(data?.is_admin ?? false)))
+  }, [])
+
+  const applyCreditsData = useCallback((data) => {
+    if (!data || typeof data !== 'object') return
+    const nextBalance = Number(data?.credits_balance)
+    const nextLimit = Number(data?.credits_limit)
+    const nextTopup = Math.max(0, Number(data?.topup_credits_balance || 0))
+    if (!Number.isFinite(nextBalance)) return
+
+    const safeBalance = Math.max(0, nextBalance)
+    const safeLimit = Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : DEFAULT_FREE_CREDIT_LIMIT
+    setUser((prev) => ({
+      ...prev,
+      credits: safeBalance,
+      credits_balance: safeBalance,
+      credits_limit: safeLimit,
+      monthly_limit: safeLimit,
+      monthly_quota: safeLimit,
+      topup_credits_balance: nextTopup,
+    }))
+    localStorage.setItem('lf_credits', String(safeBalance))
+    localStorage.setItem('lf_credits_balance', String(safeBalance))
+    localStorage.setItem('lf_credits_limit', String(safeLimit))
+    localStorage.setItem('lf_topup_credits_balance', String(nextTopup))
+    writeCreditsSwrCache({
+      credits_balance: safeBalance,
+      credits_limit: safeLimit,
+      topup_credits_balance: nextTopup,
+      updated_at: Date.now(),
+    })
+  }, [])
+
+  const fetchUserProfileApi = useCallback(async () => {
     const token = getStoredValue('lf_token')
     if (!token) return null
+    return fetchJson('/api/auth/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+  }, [])
 
-    try {
-      const data = await fetchJson('/api/auth/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      })
+  const profileQuery = useQuery({
+    queryKey: [PROFILE_QUERY_BASE_KEY, sessionToken || 'anon'],
+    enabled: hasSessionToken,
+    queryFn: fetchUserProfileApi,
+    staleTime: 15_000,
+    gcTime: 10 * 60_000,
+    refetchInterval: 30_000,
+    retry: 1,
+  })
 
-      setUser((prev) => {
-        const resolvedFeatureAccess = resolveFeatureAccess(
-          data?.plan_type ?? data?.plan_key ?? prev?.plan_type ?? prev?.plan_key ?? 'free',
-          data?.feature_access ?? prev?.feature_access,
-        )
-        return {
-          ...prev,
-          ...data,
-          credits: Number(data?.credits_balance ?? 0),
-          creditLimit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          credits_balance: Number(data?.credits_balance ?? 0),
-          credits_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          monthly_limit: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          monthly_quota: Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT),
-          topup_credits_balance: Number(data?.topup_credits_balance ?? 0),
-          next_reset_at: data?.next_reset_at ?? prev.next_reset_at,
-          next_reset_in_days: data?.next_reset_in_days ?? prev.next_reset_in_days,
-          isSubscribed: Boolean(data?.isSubscribed ?? prev.isSubscribed ?? false),
-          subscription_active: Boolean(data?.subscription_active ?? prev.subscription_active ?? false),
-          subscriptionStatus: String(data?.subscription_status ?? data?.subscriptionStatus ?? prev.subscriptionStatus ?? '').toLowerCase().trim(),
-          subscription_status: String(data?.subscription_status ?? prev.subscription_status ?? '').toLowerCase().trim(),
-          subscription_cancel_at: data?.subscription_cancel_at ?? prev.subscription_cancel_at ?? null,
-          subscription_cancel_at_period_end: Boolean(data?.subscription_cancel_at_period_end ?? prev.subscription_cancel_at_period_end ?? false),
-          currentPlanName: String(data?.currentPlanName ?? prev.currentPlanName ?? 'Free Plan').trim() || 'Free Plan',
-          plan_key: String(data?.plan_key ?? prev.plan_key ?? 'free').toLowerCase().trim(),
-          plan_type: String(data?.plan_type ?? data?.plan_key ?? prev.plan_type ?? prev.plan_key ?? 'free').toLowerCase().trim(),
-          feature_access: resolvedFeatureAccess,
-          average_deal_value: Number(data?.average_deal_value ?? prev.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE),
-          niche: String(data?.niche ?? prev.niche ?? '').trim(),
-          email: String(data?.email ?? prev.email ?? '').trim().toLowerCase(),
-          is_admin: Boolean(data?.is_admin ?? prev.is_admin ?? false),
-          last_login_at: data?.last_login_at ?? prev.last_login_at ?? null,
-        }
-      })
-      localStorage.setItem('lf_credits', String(Number(data?.credits_balance ?? 0)))
-      localStorage.setItem('lf_credits_balance', String(Number(data?.credits_balance ?? 0)))
-      localStorage.setItem('lf_topup_credits_balance', String(Number(data?.topup_credits_balance ?? 0)))
-      localStorage.setItem('lf_credits_limit', String(Number(data?.monthly_quota ?? data?.monthly_limit ?? data?.credits_limit ?? DEFAULT_FREE_CREDIT_LIMIT)))
-      localStorage.setItem('lf_plan_key', String(data?.plan_key ?? 'free').toLowerCase().trim() || 'free')
-      localStorage.setItem('lf_plan_name', String(data?.currentPlanName ?? 'Free Plan').trim() || 'Free Plan')
-      localStorage.setItem('lf_is_subscribed', String(Boolean(data?.isSubscribed ?? data?.subscription_active ?? false)))
-      localStorage.setItem('lf_average_deal_value', String(Number(data?.average_deal_value ?? DEFAULT_AVERAGE_DEAL_VALUE)))
-      localStorage.setItem('lf_niche', String(data?.niche ?? '').trim())
-      localStorage.setItem('lf_is_admin', String(Boolean(data?.is_admin ?? false)))
+  useEffect(() => {
+    if (!hasSessionToken) return
+    if (profileQuery.data) {
+      applyUserProfileData(profileQuery.data)
       setProfileLoadedFromApi(true)
       setProfileHydrated(true)
+      return
+    }
+    if (profileQuery.error && isAuthInvalidError(profileQuery.error)) {
+      void forceLogoutToLogin('profile_missing_or_invalid')
+      return
+    }
+    if (!profileQuery.isFetching) {
+      setProfileHydrated(true)
+    }
+  }, [applyUserProfileData, hasSessionToken, profileQuery.data, profileQuery.error, profileQuery.isFetching])
+
+  const creditsQuery = useQuery({
+    queryKey: [USER_CREDITS_QUERY_BASE_KEY, sessionToken || 'anon'],
+    enabled: hasSessionToken,
+    queryFn: () => fetchJson('/api/user/credits', { method: 'GET', timeoutMs: 4500 }),
+    staleTime: 10_000,
+    gcTime: 10 * 60_000,
+    refetchInterval: 20_000,
+    retry: 1,
+    initialData: () => {
+      const cache = readCreditsSwrCache()
+      if (!cache || typeof cache !== 'object') return undefined
+      const cachedBalance = Number(cache?.credits_balance)
+      const cachedLimit = Number(cache?.credits_limit)
+      if (!Number.isFinite(cachedBalance) && !Number.isFinite(cachedLimit)) return undefined
+      return {
+        credits_balance: Number.isFinite(cachedBalance) ? Math.max(0, cachedBalance) : 0,
+        credits_limit: Number.isFinite(cachedLimit) ? Math.max(1, cachedLimit) : DEFAULT_FREE_CREDIT_LIMIT,
+        topup_credits_balance: Math.max(0, Number(cache?.topup_credits_balance || 0)),
+      }
+    },
+  })
+
+  useEffect(() => {
+    if (!hasSessionToken) return
+    if (creditsQuery.data) {
+      applyCreditsData(creditsQuery.data)
+    }
+  }, [applyCreditsData, creditsQuery.data, hasSessionToken])
+
+  const refreshUserProfile = useCallback(async () => {
+    if (!hasSessionToken) return null
+    try {
+      const data = await queryClient.fetchQuery({
+        queryKey: [PROFILE_QUERY_BASE_KEY, sessionToken || 'anon'],
+        queryFn: fetchUserProfileApi,
+        staleTime: 0,
+      })
+      if (data) {
+        applyUserProfileData(data)
+        setProfileLoadedFromApi(true)
+        setProfileHydrated(true)
+      }
       return data
     } catch (error) {
       if (isAuthInvalidError(error)) {
         await forceLogoutToLogin('profile_missing_or_invalid')
         return null
       }
-      // Keep existing credits values if profile call fails.
       setProfileHydrated(true)
       return null
     }
-  }, [])
+  }, [applyUserProfileData, fetchUserProfileApi, hasSessionToken, queryClient, sessionToken])
 
   refreshUserProfileRef.current = refreshUserProfile
-
-  useEffect(() => {
-    if (!hasSessionToken) return
-    try {
-      const cache = readCreditsSwrCache()
-      const cachedBalance = Number(cache?.credits_balance)
-      const cachedLimit = Number(cache?.credits_limit)
-      const cachedTopup = Number(cache?.topup_credits_balance)
-      const hasCachedBalance = Number.isFinite(cachedBalance)
-      const hasCachedLimit = Number.isFinite(cachedLimit)
-
-      if (hasCachedBalance || hasCachedLimit) {
-        setUser((prev) => ({
-          ...prev,
-          credits: hasCachedBalance ? cachedBalance : prev.credits,
-          credits_balance: hasCachedBalance ? cachedBalance : prev.credits_balance,
-          topup_credits_balance: Number.isFinite(cachedTopup) ? Math.max(0, cachedTopup) : prev.topup_credits_balance,
-          credits_limit: hasCachedLimit ? Math.max(1, cachedLimit) : prev.credits_limit,
-          monthly_limit: hasCachedLimit ? Math.max(1, cachedLimit) : prev.monthly_limit,
-          monthly_quota: hasCachedLimit ? Math.max(1, cachedLimit) : prev.monthly_quota,
-        }))
-      }
-    } catch {
-      // Ignore cache read issues in restricted browser contexts.
-    }
-  }, [hasSessionToken])
-
-  useEffect(() => {
-    void refreshUserProfile()
-    const profileId = window.setInterval(() => {
-      void refreshUserProfile()
-    }, 30000)
-    return () => window.clearInterval(profileId)
-  }, [refreshUserProfile])
 
   const refreshAdminOverview = useCallback(async ({ silent = false } = {}) => {
     if (!isAdminUser) return null
@@ -5669,50 +5737,26 @@ function App({ initialTab = 'leads' }) {
       })
     } catch (error) {
       console.error('[stats] fetch failed:', error)
+    } finally {
+      setStatsHydrated(true)
     }
   }
 
   const refreshCreditsBalance = useCallback(async (options = {}) => {
     if (!hasSessionToken) return null
     try {
-      const data = await fetchJson('/api/user/credits', {
-        method: 'GET',
-        timeoutMs: Number(options?.timeoutMs || 4500),
+      const timeoutMs = Number(options?.timeoutMs || 4500)
+      const data = await queryClient.fetchQuery({
+        queryKey: [USER_CREDITS_QUERY_BASE_KEY, sessionToken || 'anon'],
+        queryFn: () => fetchJson('/api/user/credits', { method: 'GET', timeoutMs }),
+        staleTime: 0,
       })
-
-      const nextBalance = Number(data?.credits_balance)
-      const nextLimit = Number(data?.credits_limit)
-      const nextTopup = Math.max(0, Number(data?.topup_credits_balance || 0))
-      if (!Number.isFinite(nextBalance)) return null
-
-      const safeBalance = Math.max(0, nextBalance)
-      const safeLimit = Number.isFinite(nextLimit) ? Math.max(1, nextLimit) : DEFAULT_FREE_CREDIT_LIMIT
-
-      setUser((prev) => ({
-        ...prev,
-        credits: safeBalance,
-        credits_balance: safeBalance,
-        credits_limit: safeLimit,
-        monthly_limit: safeLimit,
-        monthly_quota: safeLimit,
-        topup_credits_balance: nextTopup,
-      }))
-
-      localStorage.setItem('lf_credits', String(safeBalance))
-      localStorage.setItem('lf_credits_balance', String(safeBalance))
-      localStorage.setItem('lf_credits_limit', String(safeLimit))
-      localStorage.setItem('lf_topup_credits_balance', String(nextTopup))
-      writeCreditsSwrCache({
-        credits_balance: safeBalance,
-        credits_limit: safeLimit,
-        topup_credits_balance: nextTopup,
-        updated_at: Date.now(),
-      })
+      applyCreditsData(data)
       return data
     } catch {
       return null
     }
-  }, [hasSessionToken])
+  }, [applyCreditsData, hasSessionToken, queryClient, sessionToken])
 
   const fetchTaskState = useCallback(async (force = false) => {
     // Exponential backoff — skip if we are in a cooldown period
@@ -7833,39 +7877,45 @@ function App({ initialTab = 'leads' }) {
             ) : null}
 
             <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <MetricSparkCard
-                icon={<DollarSign className="h-5 w-5" />}
-                label="Total Setup Revenue"
-                value={formatCurrencyEur(stats.setup_revenue)}
-                subtitle={`${stats.paid_count} paid clients · 1.300€/setup`}
-                points={performanceSeries.revenue}
-                tone="amber"
-              />
-              <MetricSparkCard
-                icon={<TrendingUp className="h-5 w-5" />}
-                label="Live MRR"
-                value={formatCurrencyEur(agencyMrrForGoal)}
-                subtitle={`${stats.website_clients || 0}w · ${stats.ads_clients || 0}ads · ${stats.ads_and_website_clients || 0}both`}
-                points={performanceSeries.mrr}
-                tone="cyan"
-                live
-              />
-              <MetricSparkCard
-                icon={<MessageCircle className="h-5 w-5" />}
-                label="Reply Rate"
-                value={`${Number(stats.reply_rate || 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`}
-                subtitle={`Total Replies: ${Number(stats.replies_count || 0).toLocaleString()}`}
-                points={performanceSeries.replies}
-                tone={Number(stats.reply_rate || 0) > 5 ? 'emerald' : Number(stats.reply_rate || 0) < 2 ? 'amber' : 'slate'}
-              />
-              <MetricSparkCard
-                icon={<Users className="h-5 w-5" />}
-                label="Pipeline"
-                value={stats.total_leads.toLocaleString()}
-                subtitle={`${stats.emails_sent.toLocaleString()} emailed · ${stats.opened_count.toLocaleString()} opened`}
-                points={performanceSeries.replies.map((value, index) => value + (performanceSeries.revenue[index] / 1200))}
-                tone="violet"
-              />
+              {!statsHydrated ? (
+                <StatCardSkeletonList count={4} />
+              ) : (
+                <>
+                  <MetricSparkCard
+                    icon={<DollarSign className="h-5 w-5" />}
+                    label="Total Setup Revenue"
+                    value={formatCurrencyEur(stats.setup_revenue)}
+                    subtitle={`${stats.paid_count} paid clients · 1.300€/setup`}
+                    points={performanceSeries.revenue}
+                    tone="amber"
+                  />
+                  <MetricSparkCard
+                    icon={<TrendingUp className="h-5 w-5" />}
+                    label="Live MRR"
+                    value={formatCurrencyEur(agencyMrrForGoal)}
+                    subtitle={`${stats.website_clients || 0}w · ${stats.ads_clients || 0}ads · ${stats.ads_and_website_clients || 0}both`}
+                    points={performanceSeries.mrr}
+                    tone="cyan"
+                    live
+                  />
+                  <MetricSparkCard
+                    icon={<MessageCircle className="h-5 w-5" />}
+                    label="Reply Rate"
+                    value={`${Number(stats.reply_rate || 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`}
+                    subtitle={`Total Replies: ${Number(stats.replies_count || 0).toLocaleString()}`}
+                    points={performanceSeries.replies}
+                    tone={Number(stats.reply_rate || 0) > 5 ? 'emerald' : Number(stats.reply_rate || 0) < 2 ? 'amber' : 'slate'}
+                  />
+                  <MetricSparkCard
+                    icon={<Users className="h-5 w-5" />}
+                    label="Pipeline"
+                    value={stats.total_leads.toLocaleString()}
+                    subtitle={`${stats.emails_sent.toLocaleString()} emailed · ${stats.opened_count.toLocaleString()} opened`}
+                    points={performanceSeries.replies.map((value, index) => value + (performanceSeries.revenue[index] / 1200))}
+                    tone="violet"
+                  />
+                </>
+              )}
             </div>
 
             <div id="revenue-stat" className="mt-4 rounded-[18px] border border-cyan-500/20 bg-[linear-gradient(135deg,rgba(8,47,73,0.38),rgba(15,23,42,0.92))] p-4 shadow-[0_14px_38px_rgba(8,47,73,0.28)]">
