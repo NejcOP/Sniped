@@ -641,6 +641,8 @@ class IncomingEmailWebhookRequest(BaseModel):
     email: Optional[str] = Field(default=None, max_length=320)
     from_email: Optional[str] = Field(default=None, max_length=320)
     subject_line: Optional[str] = Field(default=None, max_length=300)
+    body_html: Optional[str] = None
+    body_text: Optional[str] = None
     reason: Optional[str] = Field(default=None, max_length=300)
     metadata: Optional[dict[str, Any]] = None
 
@@ -2935,9 +2937,29 @@ def ensure_mailer_campaign_tables(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_communications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy',
+                direction TEXT NOT NULL,
+                subject TEXT,
+                body_html TEXT,
+                body_text TEXT,
+                status TEXT NOT NULL DEFAULT 'sent',
+                tracking_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_sequences_user_active ON CampaignSequences(user_id, active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_templates_user_category ON SavedTemplates(user_id, category)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_campaign_events_user_type ON CampaignEvents(user_id, event_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_comms_lead_created ON email_communications(lead_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_comms_user_lead ON email_communications(user_id, lead_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_comms_tracking ON email_communications(tracking_id)")
         conn.execute("UPDATE leads SET campaign_step = 1 WHERE campaign_step IS NULL -- SYSTEM-WIDE: intentionally unscoped.")
         conn.commit()
 
@@ -2962,6 +2984,253 @@ def _normalize_campaign_event_row(row: pgdb.Row | None) -> dict[str, Any]:
     item = dict(row)
     item["metadata"] = deserialize_json(item.get("metadata_json")) or {}
     return item
+
+
+def _normalize_email_communication_row(row: pgdb.Row | dict | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    item = dict(row)
+    item["lead_id"] = int(item.get("lead_id") or 0)
+    item["id"] = int(item.get("id") or 0)
+    item["direction"] = str(item.get("direction") or "").strip().lower()
+    item["status"] = str(item.get("status") or "").strip().lower()
+    item["subject"] = str(item.get("subject") or "").strip() or None
+    item["body_html"] = str(item.get("body_html") or "").strip() or None
+    item["body_text"] = str(item.get("body_text") or "").strip() or None
+    item["tracking_id"] = str(item.get("tracking_id") or "").strip() or None
+    item["timestamp"] = str(item.get("created_at") or item.get("timestamp") or "").strip() or utc_now_iso()
+    return item
+
+
+def _insert_email_communication_local(
+    db_path: Path,
+    *,
+    lead_id: int,
+    user_id: str,
+    direction: str,
+    status: str,
+    subject: Optional[str] = None,
+    body_html: Optional[str] = None,
+    body_text: Optional[str] = None,
+    tracking_id: Optional[str] = None,
+) -> dict[str, Any]:
+    ensure_mailer_campaign_tables(db_path)
+    now_iso = utc_now_iso()
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
+        cursor = conn.execute(
+            """
+            INSERT INTO email_communications (
+                lead_id, user_id, direction, subject, body_html, body_text, status, tracking_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(lead_id),
+                str(user_id or "legacy"),
+                str(direction or "").strip().lower(),
+                str(subject or "").strip() or None,
+                str(body_html or "").strip() or None,
+                str(body_text or "").strip() or None,
+                str(status or "sent").strip().lower(),
+                str(tracking_id or "").strip() or None,
+                now_iso,
+                now_iso,
+            ),
+        )
+        row = conn.execute("SELECT * FROM email_communications WHERE id = ? LIMIT 1", (cursor.lastrowid,)).fetchone()
+        conn.commit()
+    return _normalize_email_communication_row(row)
+
+
+def _update_email_communication_status_local(
+    db_path: Path,
+    *,
+    status: str,
+    communication_id: Optional[int] = None,
+    tracking_id: Optional[str] = None,
+    lead_id: Optional[int] = None,
+) -> None:
+    ensure_mailer_campaign_tables(db_path)
+    now_iso = utc_now_iso()
+    safe_status = str(status or "").strip().lower() or "sent"
+    with pgdb.connect(db_path) as conn:
+        if communication_id is not None:
+            conn.execute(
+                "UPDATE email_communications SET status = ?, updated_at = ? WHERE id = ?",
+                (safe_status, now_iso, int(communication_id)),
+            )
+        elif str(tracking_id or "").strip():
+            conn.execute(
+                """
+                UPDATE email_communications
+                SET status = ?, updated_at = ?
+                WHERE tracking_id = ?
+                  AND direction = 'sent'
+                  AND (status IS NULL OR LOWER(COALESCE(status, '')) <> 'replied')
+                """,
+                (safe_status, now_iso, str(tracking_id or "").strip()),
+            )
+        elif lead_id is not None:
+            conn.execute(
+                """
+                UPDATE email_communications
+                SET status = ?, updated_at = ?
+                WHERE id = (
+                    SELECT id
+                    FROM email_communications
+                    WHERE lead_id = ? AND direction = 'sent'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+                """,
+                (safe_status, now_iso, int(lead_id)),
+            )
+        conn.commit()
+
+
+def _insert_email_communication_supabase(payload: dict[str, Any]) -> None:
+    if not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return
+    if not supabase_table_available(DEFAULT_CONFIG_PATH, "communications"):
+        return
+    client = get_supabase_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        return
+    try:
+        table_name = resolve_supabase_table_name(client, "communications")
+        client.table(table_name).insert(payload).execute()
+    except Exception:
+        logging.debug("Failed to insert communication into Supabase communications table.")
+
+
+def _update_email_communication_status_supabase(
+    *,
+    status: str,
+    communication_id: Optional[int] = None,
+    tracking_id: Optional[str] = None,
+    lead_id: Optional[int] = None,
+) -> None:
+    if not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return
+    if not supabase_table_available(DEFAULT_CONFIG_PATH, "communications"):
+        return
+    client = get_supabase_client(DEFAULT_CONFIG_PATH)
+    if client is None:
+        return
+    now_iso = utc_now_iso()
+    payload = {"status": str(status or "").strip().lower() or "sent", "updated_at": now_iso}
+    try:
+        table_name = resolve_supabase_table_name(client, "communications")
+        if communication_id is not None:
+            client.table(table_name).update(payload).eq("id", int(communication_id)).execute()
+            return
+        if str(tracking_id or "").strip():
+            client.table(table_name).update(payload).eq("tracking_id", str(tracking_id or "").strip()).eq("direction", "sent").neq("status", "replied").execute()
+            return
+        if lead_id is not None:
+            rows = client.table(table_name).select("id").eq("lead_id", int(lead_id)).eq("direction", "sent").order("created_at", desc=True).limit(1).execute().data or []
+            if rows:
+                client.table(table_name).update(payload).eq("id", int(rows[0].get("id") or 0)).execute()
+    except Exception:
+        logging.debug("Failed to update communication status in Supabase communications table.")
+
+
+def _record_email_communication(
+    *,
+    lead_id: int,
+    user_id: str,
+    direction: str,
+    status: str,
+    subject: Optional[str] = None,
+    body_html: Optional[str] = None,
+    body_text: Optional[str] = None,
+    tracking_id: Optional[str] = None,
+) -> dict[str, Any]:
+    item = _insert_email_communication_local(
+        DEFAULT_DB_PATH,
+        lead_id=int(lead_id),
+        user_id=str(user_id or "legacy"),
+        direction=str(direction or "").strip().lower(),
+        status=str(status or "sent").strip().lower(),
+        subject=subject,
+        body_html=body_html,
+        body_text=body_text,
+        tracking_id=tracking_id,
+    )
+    _insert_email_communication_supabase(
+        {
+            "lead_id": int(item.get("lead_id") or lead_id),
+            "user_id": str(user_id or "legacy"),
+            "direction": str(item.get("direction") or direction or "sent"),
+            "subject": item.get("subject"),
+            "body_html": item.get("body_html"),
+            "body_text": item.get("body_text"),
+            "status": str(item.get("status") or status or "sent"),
+            "tracking_id": item.get("tracking_id"),
+            "created_at": item.get("timestamp") or utc_now_iso(),
+            "updated_at": item.get("updated_at") or utc_now_iso(),
+        }
+    )
+    return item
+
+
+def _mark_email_communication_opened(*, communication_id: Optional[int] = None, tracking_id: Optional[str] = None, lead_id: Optional[int] = None) -> None:
+    _update_email_communication_status_local(
+        DEFAULT_DB_PATH,
+        status="opened",
+        communication_id=communication_id,
+        tracking_id=tracking_id,
+        lead_id=lead_id,
+    )
+    _update_email_communication_status_supabase(
+        status="opened",
+        communication_id=communication_id,
+        tracking_id=tracking_id,
+        lead_id=lead_id,
+    )
+
+
+def _mark_email_communication_replied(*, tracking_id: Optional[str] = None, lead_id: Optional[int] = None) -> None:
+    _update_email_communication_status_local(
+        DEFAULT_DB_PATH,
+        status="replied",
+        tracking_id=tracking_id,
+        lead_id=lead_id,
+    )
+    _update_email_communication_status_supabase(
+        status="replied",
+        tracking_id=tracking_id,
+        lead_id=lead_id,
+    )
+
+
+def list_email_communications_for_lead(*, lead_id: int, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 100), 500))
+
+    if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH) and supabase_table_available(DEFAULT_CONFIG_PATH, "communications"):
+        client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if client is not None:
+            try:
+                table_name = resolve_supabase_table_name(client, "communications")
+                rows = client.table(table_name).select("id,lead_id,user_id,direction,subject,body_html,body_text,status,tracking_id,created_at,updated_at").eq("lead_id", int(lead_id)).eq("user_id", str(user_id or "legacy")).order("created_at", desc=False).limit(safe_limit).execute().data or []
+                return [_normalize_email_communication_row(row) for row in rows]
+            except Exception:
+                logging.debug("Supabase communications read failed for lead_id=%s", int(lead_id))
+
+    ensure_mailer_campaign_tables(DEFAULT_DB_PATH)
+    with pgdb.connect(DEFAULT_DB_PATH) as conn:
+        conn.row_factory = pgdb.Row
+        rows = conn.execute(
+            """
+            SELECT id, lead_id, user_id, direction, subject, body_html, body_text, status, tracking_id, created_at, updated_at
+            FROM email_communications
+            WHERE lead_id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (int(lead_id), str(user_id or "legacy"), safe_limit),
+        ).fetchall()
+    return [_normalize_email_communication_row(row) for row in rows]
 
 
 def _normalize_campaign_event_type(raw_event_type: Any) -> str:
@@ -3137,7 +3406,7 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
         email = str(payload.get("email") or "").strip()
         if lead_id is not None:
             lead_row = conn.execute(
-                "SELECT id, email, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id, status FROM leads WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ? LIMIT 1",
+                "SELECT id, email, open_tracking_token, COALESCE(NULLIF(user_id, ''), 'legacy') AS user_id, status FROM leads WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ? LIMIT 1",
                 (lead_id, str(user_id or "legacy")),
             ).fetchone()
             if lead_row is None:
@@ -3200,6 +3469,24 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                     """,
                     (now_iso, now_iso, lead_id, str(user_id or "legacy")),
                 )
+                try:
+                    _record_email_communication(
+                        lead_id=int(lead_id),
+                        user_id=str(user_id or "legacy"),
+                        direction="sent",
+                        status="sent",
+                        subject=str(payload.get("subject_line") or "").strip() or None,
+                        body_html=str(metadata.get("body_html") or "").strip() or None,
+                        body_text=str(
+                            payload.get("body_text")
+                            or metadata.get("body_text")
+                            or metadata.get("generated_email_body")
+                            or ""
+                        ).strip() or None,
+                        tracking_id=str(metadata.get("thread_token") or metadata.get("token") or lead_row.get("open_tracking_token") or "").strip() or None,
+                    )
+                except Exception:
+                    logging.debug("Failed to record sent email communication for lead_id=%s", lead_id)
             elif event_type == "open":
                 conn.execute(
                     """
@@ -3211,6 +3498,10 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                     WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ?
                     """,
                     (now_iso, now_iso, lead_id, str(user_id or "legacy")),
+                )
+                _mark_email_communication_opened(
+                    tracking_id=str(metadata.get("thread_token") or metadata.get("token") or lead_row.get("open_tracking_token") or "").strip() or None,
+                    lead_id=int(lead_id),
                 )
             elif event_type == "reply":
                 conn.execute(
@@ -3232,6 +3523,23 @@ def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str,
                     """,
                     (now_iso, now_iso, lead_id, str(user_id or "legacy")),
                 )
+                _mark_email_communication_replied(
+                    tracking_id=str(metadata.get("thread_token") or metadata.get("token") or lead_row.get("open_tracking_token") or "").strip() or None,
+                    lead_id=int(lead_id),
+                )
+                try:
+                    _record_email_communication(
+                        lead_id=int(lead_id),
+                        user_id=str(user_id or "legacy"),
+                        direction="received",
+                        status="replied",
+                        subject=str(payload.get("subject_line") or "").strip() or None,
+                        body_html=str(metadata.get("body_html") or "").strip() or None,
+                        body_text=str(payload.get("body_text") or metadata.get("body_text") or "").strip() or None,
+                        tracking_id=str(metadata.get("thread_token") or metadata.get("token") or lead_row.get("open_tracking_token") or "").strip() or None,
+                    )
+                except Exception:
+                    logging.debug("Failed to record received reply communication for lead_id=%s", lead_id)
             elif event_type == "click":
                 conn.execute(
                     """
@@ -11937,6 +12245,7 @@ def create_app() -> FastAPI:
         safe_token = str(tracking_token or "").strip()
         if safe_token:
             now_iso = utc_now_iso()
+            _mark_email_communication_opened(tracking_id=safe_token)
             try:
                 ensure_mailer_campaign_tables(DEFAULT_DB_PATH)
                 with pgdb.connect(DEFAULT_DB_PATH) as conn:
@@ -12000,6 +12309,24 @@ def create_app() -> FastAPI:
     @app.get("/api/tracks/open/{tracking_id}")
     def track_mail_open(tracking_id: str) -> Response:
         _record_open_tracking_token(tracking_id)
+
+        return Response(
+            content=TRACKING_PIXEL_GIF,
+            media_type="image/gif",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+
+    @app.get("/api/tracking/open/{email_id}")
+    def track_mail_open_email_history(email_id: str) -> Response:
+        safe_id = str(email_id or "").strip()
+        if safe_id.isdigit():
+            _mark_email_communication_opened(communication_id=int(safe_id))
+        else:
+            _record_open_tracking_token(safe_id)
 
         return Response(
             content=TRACKING_PIXEL_GIF,
@@ -12167,6 +12494,10 @@ def create_app() -> FastAPI:
             metadata.setdefault("thread_token", str(payload.thread_token).strip())
         if payload.from_email:
             metadata.setdefault("from_email", str(payload.from_email).strip())
+        if payload.body_html:
+            metadata.setdefault("body_html", str(payload.body_html))
+        if payload.body_text:
+            metadata.setdefault("body_text", str(payload.body_text))
 
         event = record_mailer_campaign_event(
             DEFAULT_DB_PATH,
@@ -12176,6 +12507,7 @@ def create_app() -> FastAPI:
                 "email": str(payload.email or lead_row["email"] or "").strip(),
                 "event_type": "reply",
                 "subject_line": str(payload.subject_line or "").strip() or None,
+                "body_text": str(payload.body_text or "").strip() or None,
                 "reason": str(payload.reason or "").strip() or None,
                 "metadata": metadata,
             },
@@ -16854,6 +17186,53 @@ def create_app() -> FastAPI:
         item = record_mailer_campaign_event(DEFAULT_DB_PATH, user_id=user_id, payload=payload.model_dump())
         maybe_sync_supabase(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH)
         return {"status": "recorded", "item": item}
+
+    @app.get("/api/leads/{lead_id}/email-history")
+    def get_lead_email_history(lead_id: int, request: Request, limit: int = Query(default=100, ge=1, le=500)) -> dict:
+        user_id = require_current_user_id(request)
+        lead_id_value = int(lead_id)
+
+        owns_lead = False
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            client = get_supabase_client(DEFAULT_CONFIG_PATH)
+            if client is not None:
+                try:
+                    rows = (
+                        client.table("leads")
+                        .select("id")
+                        .eq("id", lead_id_value)
+                        .eq("user_id", str(user_id))
+                        .limit(1)
+                        .execute()
+                        .data
+                        or []
+                    )
+                    owns_lead = bool(rows)
+                except Exception:
+                    owns_lead = False
+
+        if not owns_lead:
+            with pgdb.connect(DEFAULT_DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT id FROM leads WHERE id = ? AND COALESCE(NULLIF(user_id, ''), 'legacy') = ? LIMIT 1",
+                    (lead_id_value, str(user_id or "legacy")),
+                ).fetchone()
+                owns_lead = row is not None
+
+        if not owns_lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+
+        items = list_email_communications_for_lead(
+            lead_id=lead_id_value,
+            user_id=str(user_id or "legacy"),
+            limit=int(limit),
+        )
+        return {
+            "status": "ok",
+            "lead_id": lead_id_value,
+            "count": len(items),
+            "items": items,
+        }
 
     @app.get("/api/mailer/campaign-stats")
     def get_mailer_stats(request: Request) -> dict:

@@ -30,6 +30,7 @@ import {
   Phone,
   PlusCircle,
   RefreshCw,
+  Reply,
   RotateCcw,
   Save,
   Search,
@@ -1376,6 +1377,28 @@ function formatFeedTime(raw) {
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return '--:--'
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatCommunicationTime(raw) {
+  if (!raw) return 'Just now'
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return 'Just now'
+  return date.toLocaleString()
+}
+
+function extractCommunicationBody(item) {
+  const plain = String(item?.body_text || '').trim()
+  if (plain) return plain
+  const html = String(item?.body_html || '')
+  if (!html) return ''
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function deriveToneProfile(subject, body) {
@@ -2726,6 +2749,7 @@ function App({ initialTab = 'leads' }) {
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
   const [leadDetailsPreviewLead, setLeadDetailsPreviewLead] = useState(null)
+  const [leadEmailHistory, setLeadEmailHistory] = useState({ loading: false, error: '', items: [] })
   const [showLeadScoreBreakdown, setShowLeadScoreBreakdown] = useState(false)
   const [taskAiPreviewLead, setTaskAiPreviewLead] = useState(null)
   const [activeLiveMailTemplateKey, setActiveLiveMailTemplateKey] = useState(liveMailTemplateCards[0]?.key || 'ghost')
@@ -2750,6 +2774,7 @@ function App({ initialTab = 'leads' }) {
   const pendingDeletesRef = useRef({})
   const checkoutRedirectHandledRef = useRef('')
   const scrapeSuccessResetTimerRef = useRef(null)
+  const leadEmailHistoryRealtimeChannelRef = useRef(null)
 
   useEffect(() => {
     if (hasSessionToken) return
@@ -7286,6 +7311,80 @@ function App({ initialTab = 'leads' }) {
     const ok = await updateLeadStatus(lead.id, 'low_priority')
     if (ok) toast.success('Lead skipped for now')
   }
+
+  const loadLeadEmailHistory = useCallback(async (leadId, options = {}) => {
+    const numericLeadId = Number(leadId || 0)
+    if (!Number.isFinite(numericLeadId) || numericLeadId <= 0) {
+      setLeadEmailHistory({ loading: false, error: '', items: [] })
+      return
+    }
+
+    const silent = Boolean(options?.silent)
+    if (!silent) {
+      setLeadEmailHistory((prev) => ({ ...prev, loading: true, error: '' }))
+    }
+
+    try {
+      const response = await fetchJson(`/api/leads/${numericLeadId}/email-history?limit=120`, {
+        bypassCache: true,
+        timeoutMs: 15000,
+        abortKey: `lead-email-history-${numericLeadId}`,
+      })
+      const items = Array.isArray(response?.items) ? response.items.slice() : []
+      items.sort((a, b) => {
+        const aTs = new Date(a?.timestamp || a?.created_at || 0).getTime() || 0
+        const bTs = new Date(b?.timestamp || b?.created_at || 0).getTime() || 0
+        return aTs - bTs
+      })
+      setLeadEmailHistory({ loading: false, error: '', items })
+    } catch (error) {
+      const detail = String(error?.message || 'Failed to load email history.').trim() || 'Failed to load email history.'
+      setLeadEmailHistory((prev) => ({
+        loading: false,
+        error: detail,
+        items: Array.isArray(prev?.items) ? prev.items : [],
+      }))
+    }
+  }, [])
+
+  useEffect(() => {
+    const leadId = Number(leadDetailsPreviewLead?.id || 0)
+    if (!Number.isFinite(leadId) || leadId <= 0) {
+      setLeadEmailHistory({ loading: false, error: '', items: [] })
+      return
+    }
+    void loadLeadEmailHistory(leadId)
+  }, [leadDetailsPreviewLead?.id, loadLeadEmailHistory])
+
+  useEffect(() => {
+    const leadId = Number(leadDetailsPreviewLead?.id || 0)
+    const supabaseClient = window?.supabase
+    if (!Number.isFinite(leadId) || leadId <= 0 || !supabaseClient || typeof supabaseClient.channel !== 'function') {
+      return undefined
+    }
+
+    const channelName = `lead-email-history-${leadId}-${Date.now()}`
+    const channel = supabaseClient
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'communications', filter: `lead_id=eq.${leadId}` },
+        () => {
+          void loadLeadEmailHistory(leadId, { silent: true })
+        },
+      )
+      .subscribe()
+
+    leadEmailHistoryRealtimeChannelRef.current = channel
+
+    return () => {
+      const existing = leadEmailHistoryRealtimeChannelRef.current
+      if (existing && typeof supabaseClient.removeChannel === 'function') {
+        supabaseClient.removeChannel(existing)
+      }
+      leadEmailHistoryRealtimeChannelRef.current = null
+    }
+  }, [leadDetailsPreviewLead?.id, loadLeadEmailHistory])
 
   function openEmailPreviewModal(lead) {
     setEmailPreviewLead({
@@ -12246,6 +12345,7 @@ function App({ initialTab = 'leads' }) {
         const ldEnrichmentPayload = parseLeadEnrichmentData(ld)
         const ldScoreBreakdown = resolveLeadScoreBreakdown(ld)
         const ldNicheName = String(ldEnrichmentPayload?.user_niche || user?.niche || getStoredValue('lf_niche') || '').trim() || 'Current Niche'
+        const ldEmailHistoryItems = Array.isArray(leadEmailHistory?.items) ? leadEmailHistory.items : []
         return (
           <div
             className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/85 px-4"
@@ -12468,6 +12568,90 @@ function App({ initialTab = 'leads' }) {
                     )}
                   </div>
                 )}
+
+                <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">Email History</p>
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-semibold text-cyan-200 transition hover:bg-cyan-500/20"
+                      onClick={() => void loadLeadEmailHistory(ld.id, { silent: true })}
+                    >
+                      <RefreshCw className="h-3 w-3" /> Refresh
+                    </button>
+                  </div>
+
+                  {leadEmailHistory.loading && ldEmailHistoryItems.length === 0 ? (
+                    <div className="space-y-2">
+                      {[0, 1, 2].map((idx) => (
+                        <div key={`history-skeleton-${idx}`} className="h-14 animate-pulse rounded-xl border border-white/8 bg-slate-900/50" />
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {!leadEmailHistory.loading && leadEmailHistory.error ? (
+                    <div className="rounded-xl border border-rose-500/25 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                      {leadEmailHistory.error}
+                    </div>
+                  ) : null}
+
+                  {!leadEmailHistory.loading && !leadEmailHistory.error && ldEmailHistoryItems.length === 0 ? (
+                    <div className="rounded-xl border border-white/10 bg-slate-900/60 px-3 py-3 text-sm text-slate-400">
+                      No communication history yet for this lead.
+                    </div>
+                  ) : null}
+
+                  {ldEmailHistoryItems.length > 0 && (
+                    <div className="space-y-2">
+                      {ldEmailHistoryItems.map((entry) => {
+                        const direction = String(entry?.direction || '').toLowerCase() === 'inbound' ? 'inbound' : 'outbound'
+                        const isOutbound = direction === 'outbound'
+                        const status = String(entry?.status || '').toLowerCase().trim()
+                        const timeLabel = formatCommunicationTime(entry?.timestamp || entry?.created_at)
+                        const subject = String(entry?.subject || '').trim()
+                        const body = extractCommunicationBody(entry)
+                        return (
+                          <div
+                            key={`email-history-${entry?.id || `${direction}-${timeLabel}`}`}
+                            className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div className={`w-full max-w-[88%] rounded-2xl border px-3 py-2 ${isOutbound ? 'border-cyan-500/25 bg-cyan-500/10' : 'border-emerald-500/25 bg-emerald-500/10'}`}>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className={`text-[10px] font-bold uppercase tracking-widest ${isOutbound ? 'text-cyan-200' : 'text-emerald-200'}`}>
+                                  {isOutbound ? 'Sent' : 'Received'}
+                                </span>
+                                <span className="text-[11px] text-slate-400">{timeLabel}</span>
+                              </div>
+
+                              {subject ? (
+                                <p className="mt-1 text-sm font-semibold text-white">{subject}</p>
+                              ) : null}
+
+                              {body ? (
+                                <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-200">{body}</p>
+                              ) : (
+                                <p className="mt-1 text-sm text-slate-400">No body content stored.</p>
+                              )}
+
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                {isOutbound && (status === 'opened' || status === 'replied') ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+                                    <CheckCircle2 className="h-3 w-3" /> Opened
+                                  </span>
+                                ) : null}
+                                {(status === 'replied' || (!isOutbound && status === 'received')) ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                                    <Reply className="h-3 w-3" /> Replied
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
 
                 {/* Social links */}
                 {(ld.linkedin_url || ld.instagram_url || ld.facebook_url || ld.twitter_url || ld.youtube_url) && (
