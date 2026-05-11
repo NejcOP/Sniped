@@ -25,6 +25,7 @@ except ImportError:
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from backend.services.ai_provider import create_async_ai_client
 from backend.services.prompt_service import PromptFactory
 from playwright.sync_api import sync_playwright
 
@@ -150,7 +151,7 @@ class LeadEnricher:
         # Speed mode: skip social metrics (slower) and parallelize website scans.
         self.speed_mode = bool(speed_mode)
 
-        self.openai_api_key, self.ai_model = self._init_ai_client(
+        self.ai_client, self.ai_model, self.ai_provider = self._init_ai_client(
             config_path=config_path,
             model_name_override=self.model_name_override,
         )
@@ -682,23 +683,16 @@ class LeadEnricher:
 
         return len(rows)
 
-    def _init_ai_client(self, config_path: str, model_name_override: Optional[str] = None) -> tuple[Optional[str], str]:
-        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-        resolved_model = str(model_name_override or FORCED_AI_MODEL).strip() or FORCED_AI_MODEL
+    def _init_ai_client(self, config_path: str, model_name_override: Optional[str] = None) -> tuple[Optional[object], str, str]:
+        client, model_name, provider = create_async_ai_client(
+            config_path=config_path,
+            model_name_override=model_name_override,
+        )
+        if client is None:
+            logging.info("Azure OpenAI key not set for enrichment scoring. Falling back to heuristic scoring.")
+            return None, model_name, provider
 
-        try:
-            with open(config_path, "r", encoding="utf-8") as handle:
-                config = json.load(handle)
-            if not api_key:
-                api_key = str(config.get("openai", {}).get("api_key", "")).strip()
-        except Exception:
-            pass
-
-        if not api_key or api_key == "YOUR_OPENAI_API_KEY":
-            logging.info("OpenAI key not set for enrichment scoring. Falling back to heuristic scoring.")
-            return None, resolved_model
-
-        return api_key, resolved_model
+        return client, model_name, provider
 
     def _ensure_enrichment_columns(self) -> None:
         statements = [
@@ -1209,7 +1203,7 @@ class LeadEnricher:
                 candidates = company_candidates + [url for url in candidates if url not in company_candidates]
 
         # AI tiebreaker for multiple valid candidates.
-        if self.openai_api_key:
+        if self.ai_client:
             try:
                 payload = {
                     "platform": platform,
@@ -1589,7 +1583,7 @@ class LeadEnricher:
         return None
 
     def _ai_guess_email_pattern(self, *, business_name: str, website_url: str) -> Optional[str]:
-        if self.openai_api_key is None:
+        if self.ai_client is None:
             return None
 
         try:
@@ -2205,7 +2199,7 @@ class LeadEnricher:
             logging.info("Supabase cache HIT for %s — skipping AI call.", business_name)
             return score, summary, hook, deep_payload
 
-        if self.openai_api_key is None:
+        if self.ai_client is None:
             base_heuristic = self._heuristic_score(
                 website_url=website_url, rating=rating, review_count=review_count,
                 shortcoming=shortcoming, insecure_site=insecure_site, has_email=has_email,
@@ -2549,10 +2543,9 @@ class LeadEnricher:
         payload: dict | str,
         temperature: float,
     ) -> dict:
-        timeout = aiohttp.ClientTimeout(total=OPENAI_REQUEST_TIMEOUT_SECONDS)
         user_content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         request_payload = {
-            "model": self.ai_model or FORCED_AI_MODEL,
+            "model": self.ai_model,
             "temperature": temperature,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -2560,47 +2553,33 @@ class LeadEnricher:
                 {"role": "user", "content": user_content},
             ],
         }
-        headers = {
-            "Authorization": f"Bearer {self.openai_api_key}",
-            "Content-Type": "application/json",
-        }
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for attempt in range(OPENAI_429_MAX_RETRIES + 1):
-                async with session.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json=request_payload,
-                ) as response:
-                    body = await response.text()
-                    if response.status == 429:
-                        if attempt < OPENAI_429_MAX_RETRIES:
-                            backoff_seconds = OPENAI_429_BACKOFF_BASE_SECONDS * (2 ** attempt)
-                            logging.warning(
-                                "OpenAI returned 429. Retrying in %.1fs (attempt %s/%s).",
-                                backoff_seconds,
-                                attempt + 1,
-                                OPENAI_429_MAX_RETRIES,
-                            )
-                            await asyncio.sleep(backoff_seconds)
-                            continue
-                        raise RuntimeError(f"OpenAI HTTP 429: {body[:400]}")
-
-                    if response.status >= 400:
-                        raise RuntimeError(f"OpenAI HTTP {response.status}: {body[:400]}")
-
-                    data = json.loads(body or "{}")
-                    content = (
-                        data.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "{}")
+        for attempt in range(OPENAI_429_MAX_RETRIES + 1):
+            try:
+                response = await self.ai_client.chat.completions.create(  # type: ignore[union-attr]
+                    **request_payload,
+                    timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                )
+                content = response.choices[0].message.content or "{}"
+                parsed = json.loads(content or "{}")
+                if not isinstance(parsed, dict) or not parsed:
+                    logging.warning("Azure OpenAI returned empty/invalid JSON payload for enrichment request.")
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception as exc:
+                message = str(exc)
+                if "429" in message and attempt < OPENAI_429_MAX_RETRIES:
+                    backoff_seconds = OPENAI_429_BACKOFF_BASE_SECONDS * (2 ** attempt)
+                    logging.warning(
+                        "Azure OpenAI returned 429. Retrying in %.1fs (attempt %s/%s).",
+                        backoff_seconds,
+                        attempt + 1,
+                        OPENAI_429_MAX_RETRIES,
                     )
-                    parsed = json.loads(content or "{}")
-                    if not isinstance(parsed, dict) or not parsed:
-                        logging.warning("OpenAI returned empty/invalid JSON payload for enrichment request.")
-                    return parsed if isinstance(parsed, dict) else {}
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+                raise RuntimeError(f"Azure OpenAI scoring failed: {message[:400]}") from exc
 
-        raise RuntimeError("OpenAI scoring failed after retry attempts.")
+        raise RuntimeError("Azure OpenAI scoring failed after retry attempts.")
 
     def _check_supabase_score_cache(
         self,

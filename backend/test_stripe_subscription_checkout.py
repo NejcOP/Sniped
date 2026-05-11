@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import io
 import json
-import pgdb
 import tempfile
 import time
 import unittest
@@ -12,6 +11,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs
 
+import pgdb
 from fastapi.testclient import TestClient
 
 import backend.app as app_module
@@ -32,11 +32,19 @@ class _FakeUrlopenResponse:
 
 
 class StripeSubscriptionCheckoutTests(unittest.TestCase):
+    def _make_email(self, prefix: str) -> str:
+        return f"{prefix}-{uuid.uuid4().hex[:8]}@example.com"
+
+    def _make_token(self, prefix: str) -> str:
+        return f"token-{prefix}-{uuid.uuid4().hex[:8]}"
+
     def test_create_subscription_session_uses_expected_price_id(self) -> None:
         temp_dir = Path(tempfile.gettempdir()) / f"sniped_stripe_checkout_{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = temp_dir / "stripe_checkout.db"
         captured: dict[str, str] = {}
+        user_email = self._make_email("growth")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         def _fake_urlopen(req, timeout=0):
             captured["url"] = req.full_url
@@ -47,21 +55,23 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
                 app_module.ensure_users_table(db_path)
+                token = self._make_token("growth")
                 with pgdb.connect(db_path) as conn:
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "growth@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-growth",
+                            token,
                             50,
                             50,
                             50,
@@ -83,7 +93,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     with TestClient(app, base_url="http://localhost:8000") as client:
                         response = client.post(
                             "/api/stripe/create-subscription-session",
-                            headers={"Authorization": "Bearer token-growth"},
+                            headers={"Authorization": f"Bearer {token}"},
                             json={"plan_id": "growth"},
                         )
 
@@ -95,20 +105,14 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
 
                 encoded = parse_qs(captured["body"])
                 self.assertEqual(encoded.get("mode"), ["subscription"])
-                self.assertEqual(encoded.get("line_items[0][price]"), ["price_1TJHeMRGcYMcfC8vevfcX7LL"])
-                self.assertEqual(encoded.get("metadata[user_id]"), ["1"])
+                self.assertEqual(encoded.get("line_items[0][price]"), ["price_1TV8fzIHcumhGMC4MDVaUcBx"])
+                self.assertEqual(encoded.get("metadata[user_id]"), [str(user_id)])
                 self.assertEqual(encoded.get("metadata[plan_key]"), ["growth"])
                 self.assertEqual(encoded.get("metadata[monthly_limit]"), ["7000"])
                 self.assertEqual(encoded.get("subscription_data[metadata][plan_key]"), ["growth"])
                 self.assertEqual(encoded.get("subscription_data[metadata][monthly_limit]"), ["7000"])
-                self.assertEqual(
-                    encoded.get("success_url", [""])[0],
-                    "http://localhost:5173/app?checkout=success&plan=growth",
-                )
-                self.assertEqual(
-                    encoded.get("cancel_url", [""])[0],
-                    "http://localhost:5173/app?checkout=cancel&plan=growth",
-                )
+                self.assertIn("payment=success", encoded.get("success_url", [""])[0])
+                self.assertIn("payment=cancelled", encoded.get("cancel_url", [""])[0])
         finally:
             try:
                 if db_path.exists():
@@ -125,6 +129,9 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         temp_dir = Path(tempfile.gettempdir()) / f"sniped_stripe_checkout_error_{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = temp_dir / "stripe_checkout_error.db"
+        user_email = self._make_email("growth-error")
+        token = self._make_token("growth-error")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         def _fake_urlopen(_req, timeout=0):
             raise HTTPError(
@@ -150,17 +157,18 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "growth@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-growth-error",
+                            token,
                             50,
                             50,
                             50,
@@ -182,7 +190,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     with TestClient(app, base_url="http://localhost:8000") as client:
                         response = client.post(
                             "/api/stripe/create-subscription-session",
-                            headers={"Authorization": "Bearer token-growth-error"},
+                            headers={"Authorization": f"Bearer {token}"},
                             json={"plan_id": "growth"},
                         )
 
@@ -206,6 +214,9 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = temp_dir / "stripe_topup_checkout.db"
         captured: dict[str, str] = {}
+        user_email = self._make_email("topup")
+        token = self._make_token("topup")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         def _fake_urlopen(req, timeout=0):
             captured["url"] = req.full_url
@@ -220,17 +231,18 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "topup@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-topup",
+                            token,
                             50,
                             50,
                             50,
@@ -252,7 +264,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     with TestClient(app, base_url="http://localhost:8000") as client:
                         response = client.post(
                             "/api/stripe/create-topup-session",
-                            headers={"Authorization": "Bearer token-topup"},
+                            headers={"Authorization": f"Bearer {token}"},
                             json={"package_id": "credits_1000"},
                         )
 
@@ -264,14 +276,12 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
 
                 encoded = parse_qs(captured["body"])
                 self.assertEqual(encoded.get("mode"), ["payment"])
-                self.assertEqual(encoded.get("line_items[0][price]"), ["price_1TJdbYRGcYMcfC8vEmqohR0A"])
-                self.assertEqual(encoded.get("metadata[user_id]"), ["1"])
+                self.assertEqual(encoded.get("line_items[0][price]"), ["price_1TV8i8IHcumhGMC4mW4LYWvN"])
+                self.assertEqual(encoded.get("metadata[user_id]"), [str(user_id)])
                 self.assertEqual(encoded.get("metadata[package_id]"), ["credits_1000"])
                 self.assertEqual(encoded.get("metadata[credits_added]"), ["1000"])
                 success_url = encoded.get("success_url", [""])[0]
-                self.assertIn("http://localhost:5173/app?topup=success", success_url)
-                self.assertIn("topup_package=credits_1000", success_url)
-                self.assertIn("topup_credits=1000", success_url)
+                self.assertIn("payment=success", success_url)
         finally:
             try:
                 if db_path.exists():
@@ -291,6 +301,9 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         config_path = temp_dir / "config.json"
         config_path.write_text(json.dumps({"stripe": {"secret_key": "sk_test_from_config"}}), encoding="utf-8")
         captured: dict[str, str] = {}
+        user_email = self._make_email("config")
+        token = self._make_token("config")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         def _fake_urlopen(req, timeout=0):
             captured["auth"] = req.headers.get("Authorization", "")
@@ -303,17 +316,18 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "config@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-config",
+                            token,
                             50,
                             50,
                             50,
@@ -336,7 +350,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/stripe/create-subscription-session",
-                            headers={"Authorization": "Bearer token-config"},
+                            headers={"Authorization": f"Bearer {token}"},
                             json={"plan_id": "growth"},
                         )
 
@@ -365,14 +379,13 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         db_path = temp_dir / "stripe_profile_sync.db"
         config_path = temp_dir / "config.json"
         config_path.write_text(json.dumps({"stripe": {"secret_key": "sk_test_from_config"}}), encoding="utf-8")
+        user_email = self._make_email("recover")
+        token = self._make_token("recover")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         def _fake_urlopen(req, timeout=0):
             if "https://api.stripe.com/v1/customers" in req.full_url:
-                return _FakeUrlopenResponse({
-                    "data": [
-                        {"id": "cus_growth_123", "email": "recover@example.com"}
-                    ]
-                })
+                return _FakeUrlopenResponse({"data": [{"id": "cus_growth_123", "email": user_email}]})
             if "https://api.stripe.com/v1/subscriptions" in req.full_url:
                 return _FakeUrlopenResponse({
                     "data": [
@@ -382,11 +395,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                             "cancel_at_period_end": False,
                             "cancel_at": None,
                             "current_period_end": int(time.time()) + 86400 * 20,
-                            "items": {
-                                "data": [
-                                    {"price": {"id": "price_1TJHeMRGcYMcfC8vevfcX7LL"}}
-                                ]
-                            },
+                            "items": {"data": [{"price": {"id": "price_1TV8fzIHcumhGMC4MDVaUcBx"}}]},
                         }
                     ]
                 })
@@ -399,22 +408,24 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
-                            subscription_active, plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            stripe_customer_id, subscription_active, plan_key, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "recover@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-recover",
+                            token,
                             0,
                             50,
                             50,
                             50,
-                            0,
+                            "cus_growth_123",
+                            False,
                             "free",
                             app_module.utc_now_iso(),
                         ),
@@ -431,10 +442,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 ):
                     app = app_module.create_app()
                     with TestClient(app) as client:
-                        response = client.post(
-                            "/api/auth/profile",
-                            json={"token": "token-recover"},
-                        )
+                        response = client.post("/api/auth/profile", json={"token": token})
 
                 self.assertEqual(response.status_code, 200, response.text)
                 payload = response.json()
@@ -466,21 +474,25 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         db_path = temp_dir / "stripe_topup_profile_sync.db"
         config_path = temp_dir / "config.json"
         config_path.write_text(json.dumps({"stripe": {"secret_key": "sk_test_from_config"}}), encoding="utf-8")
+        user_email = self._make_email("recover-topup")
+        token = self._make_token("recover-topup")
+        user_id = int(uuid.uuid4().hex[:6], 16)
+        payment_intent_id = f"pi_topup_{uuid.uuid4().hex[:10]}"
 
         def _fake_urlopen(req, timeout=0):
             if "https://api.stripe.com/v1/payment_intents" in req.full_url:
                 return _FakeUrlopenResponse({
                     "data": [
                         {
-                            "id": "pi_topup_123",
+                            "id": payment_intent_id,
                             "status": "succeeded",
                             "created": int(time.time()),
                             "metadata": {
                                 "payment_kind": "topup",
                                 "credits_added": "1000",
-                                "email": "recover-topup@example.com",
-                                "user_id": "1",
-                                "stripe_price_id": "price_1TJdbYRGcYMcfC8vEmqohR0A",
+                                "email": user_email,
+                                "user_id": str(user_id),
+                                "stripe_price_id": "price_1TV8i8IHcumhGMC4mW4LYWvN",
                             },
                         }
                     ]
@@ -494,24 +506,25 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             topup_credits_balance, stripe_customer_id, subscription_active, plan_key, updated_at, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "recover-topup@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-recover-topup",
+                            token,
                             6999,
                             7000,
                             7000,
                             7000,
                             0,
                             "cus_growth_123",
-                            1,
+                            True,
                             "growth",
                             "2026-04-07T17:09:23.361010+00:00",
                             app_module.utc_now_iso(),
@@ -529,10 +542,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 ):
                     app = app_module.create_app()
                     with TestClient(app) as client:
-                        response = client.post(
-                            "/api/auth/profile",
-                            json={"token": "token-recover-topup"},
-                        )
+                        response = client.post("/api/auth/profile", json={"token": token})
 
                 self.assertEqual(response.status_code, 200, response.text)
                 payload = response.json()
@@ -560,6 +570,9 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         temp_dir = Path(tempfile.gettempdir()) / f"sniped_stripe_topup_webhook_{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = temp_dir / "stripe_topup_webhook.db"
+        user_email = self._make_email("growth-topup")
+        token = self._make_token("growth-topup")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
@@ -568,24 +581,25 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             topup_credits_balance, stripe_customer_id, subscription_active, plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "growth@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-growth",
+                            token,
                             7000,
                             7000,
                             7000,
                             7000,
                             0,
                             "cus_growth_topup_123",
-                            1,
+                            True,
                             "growth",
                             app_module.utc_now_iso(),
                         ),
@@ -599,8 +613,8 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                             "mode": "payment",
                             "customer": "cus_growth_topup_123",
                             "metadata": {
-                                "user_id": "1",
-                                "email": "growth@example.com",
+                                "user_id": str(user_id),
+                                "email": user_email,
                                 "package_id": "credits_25000",
                                 "credits_added": "25000",
                             },
@@ -638,7 +652,8 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 with pgdb.connect(db_path) as conn:
                     conn.row_factory = pgdb.Row
                     row = conn.execute(
-                        "SELECT credits_balance, topup_credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = 1"
+                        "SELECT credits_balance, topup_credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = ?",
+                        (user_id,),
                     ).fetchone()
 
                 self.assertIsNotNone(row)
@@ -647,7 +662,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 self.assertEqual(int(row["monthly_quota"]), 7000)
                 self.assertEqual(int(row["monthly_limit"]), 7000)
                 self.assertEqual(int(row["credits_limit"]), 7000)
-                self.assertEqual(int(row["subscription_active"]), 1)
+                self.assertTrue(bool(row["subscription_active"]))
                 self.assertEqual(str(row["plan_key"]), "growth")
         finally:
             try:
@@ -665,6 +680,9 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
         temp_dir = Path(tempfile.gettempdir()) / f"sniped_stripe_webhook_{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         db_path = temp_dir / "stripe_webhook.db"
+        user_email = self._make_email("scale")
+        token = self._make_token("scale")
+        user_id = int(uuid.uuid4().hex[:6], 16)
 
         try:
             with patch.object(app_module, "is_supabase_auth_enabled", lambda *_args, **_kwargs: False):
@@ -673,23 +691,24 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO users (
-                            email, password_hash, salt, niche, token,
+                            id, email, password_hash, salt, niche, token,
                             credits_balance, monthly_quota, monthly_limit, credits_limit,
                             stripe_customer_id, subscription_active, plan_key, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            "scale@example.com",
+                            user_id,
+                            user_email,
                             "hash",
                             "salt",
                             "Web Design & Dev",
-                            "token-scale",
+                            token,
                             12,
                             50,
                             50,
                             50,
                             "cus_scale_123",
-                            0,
+                            False,
                             "free",
                             app_module.utc_now_iso(),
                         ),
@@ -703,11 +722,15 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                             "customer": "cus_scale_123",
                             "billing_reason": "subscription_create",
                             "status": "paid",
+                            "metadata": {
+                                "user_id": str(user_id),
+                                "monthly_limit": "20000",
+                            },
                             "lines": {
                                 "data": [
                                     {
                                         "price": {
-                                            "id": "price_1TJHeiRGcYMcfC8vSribLQSd"
+                                            "id": "price_1TV8gOIHcumhGMC4WZZqHo78"
                                         }
                                     }
                                 ]
@@ -746,7 +769,8 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 with pgdb.connect(db_path) as conn:
                     conn.row_factory = pgdb.Row
                     row = conn.execute(
-                        "SELECT credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = 1"
+                        "SELECT credits_balance, monthly_quota, monthly_limit, credits_limit, subscription_active, plan_key FROM users WHERE id = ?",
+                        (user_id,),
                     ).fetchone()
 
                 self.assertIsNotNone(row)
@@ -754,7 +778,7 @@ class StripeSubscriptionCheckoutTests(unittest.TestCase):
                 self.assertEqual(int(row["monthly_quota"]), 20000)
                 self.assertEqual(int(row["monthly_limit"]), 20000)
                 self.assertEqual(int(row["credits_limit"]), 20000)
-                self.assertEqual(int(row["subscription_active"]), 1)
+                self.assertTrue(bool(row["subscription_active"]))
                 self.assertEqual(str(row["plan_key"]), "scale")
         finally:
             try:

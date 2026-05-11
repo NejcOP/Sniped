@@ -7896,7 +7896,7 @@ function App({ initialTab = 'leads' }) {
               <div className="flex flex-wrap items-center gap-3">
                 <StatusDot label="API" ok={health === 'online'} />
                 <StatusDot label="SMTP" ok={configHealth.smtp_ok} />
-                <StatusDot label="OpenAI" ok={configHealth.openai_ok} />
+                <StatusDot label="Azure OpenAI" ok={configHealth.openai_ok} />
               </div>
               <div
                 id="credits-display"
@@ -8214,8 +8214,8 @@ function App({ initialTab = 'leads' }) {
                 <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
                   <p className="text-sm font-semibold text-amber-300">AI Signal unavailable</p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {nicheAdvice.error.toLowerCase().includes('openai_api_key')
-                      ? 'OpenAI key is missing on Railway. Set OPENAI_API_KEY and refresh.'
+                    {nicheAdvice.error.toLowerCase().includes('azure_openai') || nicheAdvice.error.toLowerCase().includes('openai_api_key')
+                      ? 'Azure OpenAI is missing on Railway. Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_DEPLOYMENT_NAME, then refresh.'
                       : nicheAdvice.error}
                   </p>
                   <p className="mt-1 text-[11px] text-slate-500">Auto-retry will run in the background every few minutes.</p>
@@ -11260,7 +11260,7 @@ function App({ initialTab = 'leads' }) {
             <form className="max-w-2xl space-y-6" onSubmit={saveConfig}>
               <div>
                 <h3 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
-                  <Settings className="h-4 w-4 text-cyan-400" /> OpenAI
+                  <Settings className="h-4 w-4 text-cyan-400" /> Azure OpenAI
                 </h3>
                 <p className="text-xs text-slate-500">API key is configured from environment-backed server settings.</p>
               </div>
@@ -11543,7 +11543,7 @@ function App({ initialTab = 'leads' }) {
                 <div className="flex gap-3 text-xs">
                   <span className={`flex items-center gap-1.5 ${configHealth.openai_ok ? 'text-emerald-400' : 'text-rose-400'}`}>
                     <span className={`h-1.5 w-1.5 rounded-full ${configHealth.openai_ok ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-                    OpenAI {configHealth.openai_ok ? 'OK' : 'Not set'}
+                    Azure OpenAI {configHealth.openai_ok ? 'OK' : 'Not set'}
                   </span>
                   <span className={`flex items-center gap-1.5 ${configHealth.smtp_ok ? 'text-emerald-400' : 'text-rose-400'}`}>
                     <span className={`h-1.5 w-1.5 rounded-full ${configHealth.smtp_ok ? 'bg-emerald-400' : 'bg-rose-400'}`} />

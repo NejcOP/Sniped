@@ -17,9 +17,9 @@ from typing import Any, Optional
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
-from openai import OpenAI
 from sqlalchemy import bindparam, text
 
+from backend.services.ai_provider import create_sync_ai_client
 from backend.services.prompt_service import PromptFactory
 from backend.scraper.db import get_engine, init_db
 
@@ -243,12 +243,12 @@ class AIMailer:
         self.smtp_accounts_override = list(smtp_accounts_override) if smtp_accounts_override is not None else None
         if smtp_accounts_override is not None:
             self.config["smtp_accounts"] = list(smtp_accounts_override)
-        self.model_name = str(model_name_override or FORCED_AI_MODEL).strip() or FORCED_AI_MODEL
-        api_key = os.environ.get("OPENAI_API_KEY") or self.config.get("openai", {}).get("api_key", "")
-        if not api_key or api_key == "YOUR_OPENAI_API_KEY":
-            raise ValueError("Set a valid OPENAI_API_KEY environment variable.")
-
-        self.client = OpenAI(api_key=api_key)
+        self.client, self.model_name, self.ai_provider = create_sync_ai_client(
+            config_path=self.config_path,
+            model_name_override=model_name_override,
+        )
+        if self.client is None:
+            raise ValueError("Set valid Azure OpenAI environment variables.")
         self.accounts = self._load_accounts()
         self.last_send_summary: dict[str, int] = {
             "requested_limit": 0,
@@ -1862,7 +1862,7 @@ class AIMailer:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AI-personalized cold email sender with OpenAI and rotating SMTP accounts."
+        description="AI-personalized cold email sender with Azure OpenAI and rotating SMTP accounts."
     )
     parser.add_argument(
         "--log-level",

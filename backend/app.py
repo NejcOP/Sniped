@@ -39,7 +39,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from openai import OpenAI
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 
@@ -75,6 +74,7 @@ from backend.services.ai_mailer_service import (
     DEFAULT_SPEED_BODY_TEMPLATE,
     DEFAULT_SPEED_SUBJECT_TEMPLATE,
 )
+from backend.services.ai_provider import AZURE_OPENAI_API_VERSION, create_sync_ai_client, has_any_ai_credentials
 from backend.services.prompt_service import PromptFactory
 from backend.stripe_webhook import extract_payment_refresh_payload
 
@@ -901,7 +901,7 @@ def generate_cold_email_opener_for_niche(
     """
     client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
     if client is None:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+        raise HTTPException(status_code=503, detail="Azure OpenAI deployment is not configured.")
 
     # Get system + user prompts from centralized factory
     factory = PromptFactory()
@@ -923,7 +923,7 @@ def generate_cold_email_opener_for_niche(
         return response.choices[0].message.content.strip().strip('"').strip("'")
     except Exception as exc:
         logging.error("cold_email_opener OpenAI error: %s", exc)
-        raise HTTPException(status_code=502, detail="AI generation failed. Check your OpenAI key.")
+        raise HTTPException(status_code=502, detail="AI generation failed. Check your Azure OpenAI settings.")
 
 
 def normalize_blacklist_domain(raw: Optional[str]) -> Optional[str]:
@@ -3824,9 +3824,9 @@ def reset_due_monthly_credits(db_path: Path, config_path: Path) -> dict[str, int
                     """
                     UPDATE users
                     SET plan_key = 'free',
-                        subscription_active = 0,
+                        subscription_active = FALSE,
                         subscription_status = 'expired',
-                        subscription_cancel_at_period_end = 0,
+                        subscription_cancel_at_period_end = FALSE,
                         monthly_quota = ?,
                         monthly_limit = ?,
                         credits_limit = ?,
@@ -3864,7 +3864,7 @@ def reset_due_monthly_credits(db_path: Path, config_path: Path) -> dict[str, int
                     credits_balance = ?,
                     subscription_start_date = ?,
                     plan_key = 'free',
-                    subscription_active = 0,
+                    subscription_active = FALSE,
                     subscription_status = 'free_active',
                     updated_at = ?
                 WHERE id = ?
@@ -5004,9 +5004,7 @@ def load_config_health(config_path: Path) -> dict:
         config = {}
         file_error = f"Could not read environment settings: {exc}"
 
-    openai_cfg = config.get("openai", {}) if isinstance(config, dict) else {}
-    api_key = str(os.environ.get("OPENAI_API_KEY") or openai_cfg.get("api_key", "") or "").strip()
-    openai_ok = bool(api_key and api_key != "YOUR_OPENAI_API_KEY")
+    openai_ok = has_any_ai_credentials(config_path)
 
     smtp_accounts = config.get("smtp_accounts", []) if isinstance(config, dict) else []
     smtp_ok = False
@@ -5036,6 +5034,7 @@ def load_config_health(config_path: Path) -> dict:
     return {
         "ok": openai_ok and smtp_ok,
         "openai_ok": openai_ok,
+        "azure_openai_ok": openai_ok,
         "smtp_ok": smtp_ok,
         "supabase_ok": supabase_ok,
         "error": effective_error,
@@ -7015,35 +7014,19 @@ def insert_manual_lead_supabase(client: Any, payload: ManualLeadRequest) -> dict
     return {"lead_id": lead_id}
 
 
-def load_openai_client(config_path: Path) -> tuple[Optional[OpenAI], str]:
-    model_name = DEFAULT_AI_MODEL
-    api_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
-
-    try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            cfg = json.load(handle)
-        openai_cfg = cfg.get("openai", {}) if isinstance(cfg, dict) else {}
-        model_name = str(openai_cfg.get("model", DEFAULT_AI_MODEL) or DEFAULT_AI_MODEL).strip()
-        if not api_key:
-            api_key = str(openai_cfg.get("api_key", "") or "").strip()
-    except Exception:
-        pass
-
-    if not api_key or api_key == "YOUR_OPENAI_API_KEY":
+def load_openai_client(config_path: Path) -> tuple[Optional[object], str]:
+    client, model_name, provider = create_sync_ai_client(config_path=config_path, model_name_override=DEFAULT_AI_MODEL)
+    if client is None:
         return None, model_name
-
-    try:
-        return OpenAI(api_key=api_key), model_name
-    except Exception as exc:
-        logging.warning("Could not initialize OpenAI client for niche recommendation: %s", exc)
-        return None, model_name
+    if provider == "azure":
+        logging.info("Azure OpenAI client configured for deployment %s with API version %s.", model_name, AZURE_OPENAI_API_VERSION)
+    return client, model_name
 
 
 def has_any_ai_api_key(config_path: Path) -> bool:
-    openai_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
     anthropic_key = str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip()
 
-    if openai_key and openai_key != "YOUR_OPENAI_API_KEY":
+    if has_any_ai_credentials(config_path):
         return True
     if anthropic_key and anthropic_key != "YOUR_ANTHROPIC_API_KEY":
         return True
@@ -7052,12 +7035,8 @@ def has_any_ai_api_key(config_path: Path) -> bool:
         with config_path.open("r", encoding="utf-8") as handle:
             cfg = json.load(handle)
         if isinstance(cfg, dict):
-            openai_cfg = cfg.get("openai", {}) if isinstance(cfg.get("openai"), dict) else {}
             anthropic_cfg = cfg.get("anthropic", {}) if isinstance(cfg.get("anthropic"), dict) else {}
-            cfg_openai = str(openai_cfg.get("api_key", "") or "").strip()
             cfg_anthropic = str(anthropic_cfg.get("api_key", "") or "").strip()
-            if cfg_openai and cfg_openai != "YOUR_OPENAI_API_KEY":
-                return True
             if cfg_anthropic and cfg_anthropic != "YOUR_ANTHROPIC_API_KEY":
                 return True
     except Exception:
@@ -10032,10 +10011,10 @@ def execute_enrich_task(_app: FastAPI, payload_data: dict) -> None:
                     "performance_score": performance_score,
                 }
 
-        ai_key_configured = bool(getattr(enricher, "openai_api_key", None))
+        ai_key_configured = bool(getattr(enricher, "ai_client", None))
         progress_state["ai_key_configured"] = ai_key_configured
         if not ai_key_configured:
-            progress_state["status_message"] = "OPENAI_API_KEY missing on Railway. Using heuristic enrichment mode."
+            progress_state["status_message"] = "AZURE_OPENAI_API_KEY missing on Railway. Using heuristic enrichment mode."
             update_task_progress(db_path, task_id, progress_state)
 
         phase_labels = {
@@ -11876,7 +11855,9 @@ def create_app() -> FastAPI:
         _required_env = {
             "SUPABASE_URL": "Supabase project URL (required for auth & DB)",
             "DATABASE_URL": "Supabase Postgres connection string (required for pgdb/worker/runtime access)",
-            "OPENAI_API_KEY": "OpenAI key (required for enrichment & mail)",
+            "AZURE_OPENAI_API_KEY": "Azure OpenAI key (required for enrichment & mail)",
+            "AZURE_OPENAI_ENDPOINT": "Azure OpenAI endpoint (required for enrichment & mail)",
+            "AZURE_OPENAI_DEPLOYMENT_NAME": "Azure OpenAI deployment name (required for enrichment & mail)",
         }
         _optional_env = {
             "SUPABASE_KEY": "Shared Supabase API key alias (alternative to service-role/publishable key)",
@@ -12921,8 +12902,8 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "OPENAI_API_KEY is not configured for Market Intelligence. "
-                    "Set it in Railway environment variables."
+                    "AZURE_OPENAI_API_KEY is not configured for Market Intelligence. "
+                    "Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_DEPLOYMENT_NAME in Railway environment variables."
                 ),
             )
 
@@ -14073,7 +14054,7 @@ def create_app() -> FastAPI:
 
         client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
         if client is None:
-            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+            raise HTTPException(status_code=503, detail="Azure OpenAI deployment is not configured.")
 
         user_niche = str(payload.niche_override or "").strip()
 
@@ -16256,7 +16237,7 @@ def create_app() -> FastAPI:
                         UPDATE users
                         SET stripe_customer_id = ?,
                             plan_key = ?,
-                            subscription_active = 1,
+                            subscription_active = TRUE,
                             subscription_status = ?,
                             subscription_cancel_at = ?,
                             subscription_cancel_at_period_end = ?,
@@ -16273,7 +16254,7 @@ def create_app() -> FastAPI:
                             _normalize_plan_key(stripe_recovered.get("plan_key"), fallback="pro"),
                             str(stripe_recovered.get("subscription_status") or "active").strip().lower(),
                             stripe_recovered.get("subscription_cancel_at"),
-                            int(bool(stripe_recovered.get("subscription_cancel_at_period_end"))),
+                            bool(stripe_recovered.get("subscription_cancel_at_period_end")),
                             recovered_limit,
                             recovered_limit,
                             recovered_limit,
@@ -16288,10 +16269,10 @@ def create_app() -> FastAPI:
                     {
                         "stripe_customer_id": str(stripe_recovered.get("stripe_customer_id") or row_data.get("stripe_customer_id") or "").strip(),
                         "plan_key": _normalize_plan_key(stripe_recovered.get("plan_key"), fallback="pro"),
-                        "subscription_active": 1,
+                        "subscription_active": True,
                         "subscription_status": str(stripe_recovered.get("subscription_status") or "active").strip().lower(),
                         "subscription_cancel_at": stripe_recovered.get("subscription_cancel_at") or "",
-                        "subscription_cancel_at_period_end": int(bool(stripe_recovered.get("subscription_cancel_at_period_end"))),
+                        "subscription_cancel_at_period_end": bool(stripe_recovered.get("subscription_cancel_at_period_end")),
                         "monthly_limit": recovered_limit,
                         "topup_credits_balance": existing_topup,
                         "credits_balance": recovered_balance,
@@ -16358,9 +16339,9 @@ def create_app() -> FastAPI:
                     """
                     UPDATE users
                     SET plan_key = 'free',
-                        subscription_active = 0,
+                        subscription_active = FALSE,
                         subscription_status = 'expired',
-                        subscription_cancel_at_period_end = 0,
+                        subscription_cancel_at_period_end = FALSE,
                         monthly_quota = ?,
                         monthly_limit = ?,
                         credits_limit = ?,
@@ -16582,7 +16563,7 @@ def create_app() -> FastAPI:
                 conn.execute(
                     """
                     UPDATE users
-                    SET subscription_active = 1,
+                    SET subscription_active = TRUE,
                         subscription_status = ?,
                         subscription_cancel_at = ?,
                         subscription_cancel_at_period_end = ?,
@@ -17418,7 +17399,7 @@ def create_app() -> FastAPI:
 
         client, model_name = load_openai_client(DEFAULT_CONFIG_PATH)
         if client is None:
-            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+            raise HTTPException(status_code=503, detail="Azure OpenAI deployment is not configured.")
 
         raw_content = str(payload.raw_content or "").strip()
         detected_phones = sorted(
@@ -20487,10 +20468,10 @@ def create_app() -> FastAPI:
             monthly_limit_to_store = current_monthly_limit
             credits_limit_to_store = current_monthly_limit
             subscription_start_date_to_store: Optional[str] = None
-            subscription_active_to_store = int(1 if _coerce_subscription_flag(row["subscription_active"]) else 0)
+            subscription_active_to_store = bool(_coerce_subscription_flag(row["subscription_active"]))
             subscription_status_to_store: Optional[str] = None
             subscription_cancel_at_to_store: Optional[str] = None
-            subscription_cancel_at_period_end_to_store = 0
+            subscription_cancel_at_period_end_to_store = False
             plan_key_to_store = current_plan_key
 
             if is_topup_event:
@@ -20501,10 +20482,10 @@ def create_app() -> FastAPI:
                 monthly_limit_to_store = next_monthly_limit
                 credits_limit_to_store = next_monthly_limit
                 subscription_start_date_to_store = now_iso
-                subscription_active_to_store = 1
+                subscription_active_to_store = True
                 subscription_status_to_store = "active"
                 subscription_cancel_at_to_store = None
-                subscription_cancel_at_period_end_to_store = 0
+                subscription_cancel_at_period_end_to_store = False
                 plan_key_to_store = _resolve_plan_key_from_limit(next_monthly_limit, fallback="pro")
                 if billing_reason == "subscription_update" and next_monthly_limit > current_monthly_limit:
                     # Mid-month upgrade: immediately add only the credit difference
@@ -20515,29 +20496,29 @@ def create_app() -> FastAPI:
 
             if is_subscription_state_event:
                 if deleted_or_terminal and not has_paid_access_until_end:
-                    subscription_active_to_store = 0
+                    subscription_active_to_store = False
                     subscription_status_to_store = "expired"
                     subscription_cancel_at_to_store = cancel_effective_at or now_iso
-                    subscription_cancel_at_period_end_to_store = 0
+                    subscription_cancel_at_period_end_to_store = False
                     plan_key_to_store = "free"
                     monthly_limit_to_store = free_quota
                     credits_limit_to_store = free_quota
                     credits_balance_to_store = free_quota + topup_balance_to_store
                     subscription_start_date_to_store = now_iso
                 elif cancel_at_period_end or (deleted_or_terminal and has_paid_access_until_end):
-                    subscription_active_to_store = 1
+                    subscription_active_to_store = True
                     subscription_status_to_store = "active"
                     subscription_cancel_at_to_store = cancel_effective_at
-                    subscription_cancel_at_period_end_to_store = 1
+                    subscription_cancel_at_period_end_to_store = True
                     plan_key_to_store = current_plan_key if current_plan_key != "free" else "pro"
                 else:
                     monthly_limit_to_store = next_monthly_limit
                     credits_limit_to_store = next_monthly_limit
                     credits_balance_to_store = next_monthly_limit + topup_balance_to_store
-                    subscription_active_to_store = 1
+                    subscription_active_to_store = True
                     subscription_status_to_store = subscription_status_event or "active"
                     subscription_cancel_at_to_store = None
-                    subscription_cancel_at_period_end_to_store = 0
+                    subscription_cancel_at_period_end_to_store = False
                     plan_key_to_store = current_plan_key if current_plan_key != "free" else "pro"
 
             conn.execute(
