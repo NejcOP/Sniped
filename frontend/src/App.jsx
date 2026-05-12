@@ -9582,7 +9582,7 @@ function App({ initialTab = 'leads' }) {
                                     <a
                                       href={lead.website_url}
                                       target="_blank"
-                                      rel="noreferrer"
+                                      rel="noopener noreferrer"
                                       className="inline-flex w-fit items-center gap-1 text-[10px] font-medium text-cyan-300 hover:text-cyan-100"
                                       title="Open website"
                                     >
@@ -9593,7 +9593,7 @@ function App({ initialTab = 'leads' }) {
                                     <a
                                       href={lead.maps_url}
                                       target="_blank"
-                                      rel="noreferrer"
+                                      rel="noopener noreferrer"
                                       className="inline-flex w-fit items-center gap-1 text-[10px] font-medium text-rose-300 hover:text-rose-100"
                                       title="Open Google Maps profile"
                                     >
@@ -12508,7 +12508,7 @@ function App({ initialTab = 'leads' }) {
                       <a
                         href={ld.website_url}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="flex w-full items-center justify-center gap-2 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 py-2.5 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-500/20 hover:text-cyan-100"
                       >
                         <ExternalLink className="h-4 w-4" /> Open Website
@@ -12522,7 +12522,7 @@ function App({ initialTab = 'leads' }) {
                       <a
                         href={ld.maps_url}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="flex w-full items-center justify-center gap-2 rounded-2xl border border-rose-500/30 bg-rose-500/10 py-2.5 text-sm font-semibold text-rose-200 transition hover:bg-rose-500/20 hover:text-rose-100"
                       >
                         <MapPin className="h-4 w-4" /> Open Maps Profile

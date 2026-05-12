@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import re
+import urllib.parse
 from typing import Any, Callable, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -18,9 +19,31 @@ DEFAULT_USER_AGENT = (
 
 
 def _normalize_website_url(raw_url: str) -> str:
+    """Normalize website URL: handle redirects, validate schema, and clean format."""
     value = str(raw_url or "").strip()
     if not value or value.lower() == "none":
         return ""
+    
+    # Extract the actual URL from Google redirects (e.g., /url?q=https://example.com)
+    if "google." in value.lower() and "/url?" in value.lower():
+        try:
+            parsed = urlparse(value)
+            if parsed.query:
+                # Extract 'q' parameter which contains the actual URL
+                qs = parse_qs(parsed.query)
+                if "q" in qs and qs["q"]:
+                    actual_url = qs["q"][0]
+                    if actual_url.startswith(("http://", "https://")):
+                        value = actual_url
+        except Exception:
+            pass
+    
+    # Reject URLs that are primary social media or tracking domains
+    lower_value = value.lower()
+    if any(domain in lower_value for domain in ["yelp.com", "facebook.com", "instagram.com"]):
+        # These should not be stored as the primary website
+        return ""
+    
     if not value.startswith(("http://", "https://")):
         value = f"https://{value}"
     return value

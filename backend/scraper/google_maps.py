@@ -1613,7 +1613,17 @@ class GoogleMapsScraper:
         lowered = str(candidate or "").strip().lower()
         if not lowered.startswith(("http://", "https://")):
             return False
-        blocked_tokens = ["google.", "gstatic.", "/maps/", "consent.google.com", "accounts.google.com"]
+        # Block redirect/tracking URLs and social media as primary website
+        blocked_tokens = [
+            "google.",
+            "gstatic.",
+            "/maps/",
+            "consent.google.com",
+            "accounts.google.com",
+            "yelp.com",  # Avoid Yelp profiles as primary website
+            "facebook.com",  # Avoid Facebook pages as primary website
+            "instagram.com",  # Avoid Instagram as primary website
+        ]
         return not any(token in lowered for token in blocked_tokens)
 
     def _find_external_website_candidate(self, limit: int = 60) -> Optional[str]:
