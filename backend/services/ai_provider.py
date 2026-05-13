@@ -9,8 +9,8 @@ from typing import Any, Optional
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
 
-SUPPORTED_AZURE_API_VERSIONS = ("2024-05-01-preview", "2024-02-01")
-AZURE_OPENAI_API_VERSION = "2024-05-01-preview"
+SUPPORTED_AZURE_API_VERSIONS = ("2024-02-01", "2024-05-01-preview")
+AZURE_OPENAI_API_VERSION = "2024-02-01"
 DEFAULT_AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-4o"
 DEFAULT_LEGACY_AI_MODEL = "gpt-4o-mini"
 

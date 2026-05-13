@@ -7339,7 +7339,11 @@ def get_niche_recommendation(
     performance = extract_keyword_performance(db_path, user_id=user_id)
     heuristic = heuristic_recommendations_from_performance(performance, selected_country)
 
-    client, model_name = load_openai_client(config_path)
+    try:
+        client, model_name = load_openai_client(config_path)
+    except Exception as exc:
+        logging.warning("Niche recommendation AI init failed, using heuristic fallback: %s", exc)
+        client, model_name = None, DEFAULT_AI_MODEL
     if client is None:
         return {
             "source": "heuristic",

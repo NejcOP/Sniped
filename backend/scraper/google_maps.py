@@ -49,6 +49,7 @@ FORCED_WINDOWS_CHROME_UA = (
 )
 GOOGLE_CONSENT_COOKIE = "YES+cb.20240101-00-p0.en+FX+123"
 EMAIL_PATTERN = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
+GOOGLE_MAPS_BASE_URL = "https://www.google.com/maps"
 
 
 class GoogleMapsScraper:
@@ -185,6 +186,7 @@ class GoogleMapsScraper:
             "viewport": {"width": 1366, "height": 768},
             "locale": self.locale,
             "extra_http_headers": {
+                "User-Agent": self.user_agent,
                 "Accept-Language": "en-US,en;q=0.9",
                 "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not.A/Brand";v="99"',
                 "sec-ch-ua-mobile": "?0",
@@ -227,8 +229,8 @@ class GoogleMapsScraper:
                 lambda route, request: route.abort() if self._should_abort_resource(request) else route.continue_(),
             )
         self.page = self._context.new_page()
-        self.page.set_default_timeout(max(5000, min(15000, int(nav_timeout_ms))))
-        self.page.set_default_navigation_timeout(max(5000, min(15000, int(nav_timeout_ms))))
+        self.page.set_default_timeout(max(5000, min(30000, int(nav_timeout_ms))))
+        self.page.set_default_navigation_timeout(max(5000, min(30000, int(nav_timeout_ms))))
         self._apply_stealth()
         self._prime_google_consent_state()
         self._dismiss_google_overlays()
@@ -343,7 +345,7 @@ class GoogleMapsScraper:
             self._playwright = sync_playwright().start()
             # Temporary diagnostic override: force a short launch timeout to detect hard crashes quickly.
             launch_timeout_ms = 10000
-            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "15000") or "15000"))
+            nav_timeout_ms = max(5000, int(os.environ.get("SCRAPE_PROXY_NAV_TIMEOUT_MS", "30000") or "30000"))
             launch_targets = proxy_candidates or [""]
             last_exc: Optional[Exception] = None
             for proxy_candidate in launch_targets:
@@ -373,7 +375,7 @@ class GoogleMapsScraper:
                 raise RuntimeError(f"Browser launch failed after trying {len(launch_targets)} proxy option(s): {last_exc}")
             self._using_shared_browser = False
         if self._browser is not None and self.page is None:
-            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "15000") or "15000")))
+            self._initialize_context_and_page(None, max(5000, int(os.environ.get("SCRAPE_NAV_TIMEOUT_MS", "30000") or "30000")))
         # Skip eager homepage navigation here; scrape() opens target Maps URL directly.
 
     def _seed_google_consent_cookies(self) -> None:
@@ -771,13 +773,13 @@ class GoogleMapsScraper:
         url: str,
         wait_until: str = "domcontentloaded",
         max_retries: int = 1,
-        timeout_ms: int = 15000,
+        timeout_ms: int = 30000,
     ) -> None:
         """Navigate to `url`, detect blocks, and restart session on 403/429 before retrying."""
         assert self.page is not None
         for attempt in range(max_retries + 1):
             try:
-                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 15000)))
+                self.page.goto(url, wait_until=wait_until, timeout=max(5000, int(timeout_ms or 30000)))
             except PlaywrightTimeoutError:
                 logging.warning("Navigation timeout for %s (attempt %d)", url, attempt + 1)
 
@@ -877,11 +879,10 @@ class GoogleMapsScraper:
         cc = (self.country_code or "us").lower()
         encoded = quote_plus(keyword)
         url_candidates = [
-            f"https://www.google.com/maps/search/{encoded}",
-            f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0&gl={cc}",
-            f"https://www.google.com/maps/search/{encoded}?hl=en&authuser=0",
-            f"https://www.google.com/maps?hl=en&authuser=0&gl={cc}&q={encoded}",
-            f"https://{self.google_domain}/maps/search/{encoded}?hl=en&authuser=0",
+            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}",
+            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}?hl=en&authuser=0&gl={cc}",
+            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}?hl=en&authuser=0",
+            f"{GOOGLE_MAPS_BASE_URL}?hl=en&authuser=0&gl={cc}&q={encoded}",
         ]
 
         for url in url_candidates:
@@ -895,7 +896,7 @@ class GoogleMapsScraper:
                     pass
                 random_delay(900, 1700)
                 logging.info("Waiting for results | candidate=%s", url)
-                if self._wait_for_any_result_signal(timeout_ms=9000):
+                if self._wait_for_any_result_signal(timeout_ms=30000):
                     logging.info("Results found | candidate=%s", url)
                     return True
             except Exception as exc:
@@ -907,8 +908,8 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         base_urls = [
-            f"https://www.google.com/maps?hl=en&authuser=0&gl={(self.country_code or 'us').lower()}",
-            f"https://{self.google_domain}/maps?hl=en&authuser=0",
+            f"{GOOGLE_MAPS_BASE_URL}?hl=en&authuser=0&gl={(self.country_code or 'us').lower()}",
+            f"{GOOGLE_MAPS_BASE_URL}?hl=en&authuser=0",
         ]
         for base_url in base_urls:
             try:
@@ -931,7 +932,7 @@ class GoogleMapsScraper:
                 self._accept_consent_if_present()
 
                 logging.info("Waiting for results | searchbox_base=%s", base_url)
-                if self._wait_for_any_result_signal(timeout_ms=9000):
+                if self._wait_for_any_result_signal(timeout_ms=30000):
                     logging.info("Results found | searchbox_base=%s", base_url)
                     return True
             except Exception as exc:
@@ -943,7 +944,7 @@ class GoogleMapsScraper:
         assert self.page is not None
 
         # Always prefer canonical www.google.com Maps search path for stability.
-        fallback_url = f"https://www.google.com/maps/search/{quote_plus(keyword)}"
+        fallback_url = f"{GOOGLE_MAPS_BASE_URL}/search/{quote_plus(keyword)}"
         self._goto_with_retry(fallback_url)
         self._accept_consent_if_present()
         random_delay(1000, 1800)
@@ -953,7 +954,7 @@ class GoogleMapsScraper:
         except Exception:
             pass
 
-        return self._wait_for_any_result_signal(timeout_ms=9000)
+        return self._wait_for_any_result_signal(timeout_ms=30000)
 
     def _build_page_diagnostic(self) -> str:
         assert self.page is not None
@@ -977,7 +978,12 @@ class GoogleMapsScraper:
         filename = f"maps_{self._sanitize_debug_token(reason)}_{int(time.time() * 1000)}.png"
         target_path = str(debug_dir / filename)
         try:
-            self.page.screenshot(path=target_path, full_page=True)
+            try:
+                # Keep screenshot capture independent from slow resource/font loading.
+                self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+            self.page.screenshot(path=target_path, full_page=True, animations="disabled")
             logging.error("Saved scraper debug screenshot: %s", target_path)
             return target_path
         except Exception as exc:
@@ -1347,7 +1353,7 @@ class GoogleMapsScraper:
 
             # Mandatory post-click wait for the details panel root.
             try:
-                self.page.wait_for_selector("[role='main']", timeout=7000)
+                self.page.wait_for_selector("[role='main']", timeout=30000)
             except PlaywrightTimeoutError:
                 logging.warning("Main details panel did not appear after card click attempt=%s", attempt)
                 if attempt == 1:
