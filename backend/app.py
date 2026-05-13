@@ -11827,6 +11827,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_tasks() -> None:
+        startup_started_at = _time.perf_counter()
         logging.basicConfig(
             level=getattr(logging, DEFAULT_LOG_LEVEL, logging.WARNING),
             format="%(asctime)s | %(levelname)s | %(message)s",
@@ -11918,22 +11919,33 @@ def create_app() -> FastAPI:
                 "Postgres runtime is required. Set DATABASE_URL or SUPABASE_DATABASE_URL to the Supabase Postgres connection string."
             )
 
+        async def _timed_startup_step(step_name: str, fn: Callable[..., Any], *args: Any) -> None:
+            step_started_at = _time.perf_counter()
+            print(f"[startup] {step_name} started")
+            logging.info("[startup] %s started", step_name)
+            try:
+                await run_in_threadpool(fn, *args)
+                elapsed_ms = int((_time.perf_counter() - step_started_at) * 1000)
+                print(f"[startup] {step_name} OK ({elapsed_ms}ms)")
+                logging.info("[startup] %s completed in %sms", step_name, elapsed_ms)
+            except Exception:
+                elapsed_ms = int((_time.perf_counter() - step_started_at) * 1000)
+                logging.warning("[startup] %s failed after %sms", step_name, elapsed_ms, exc_info=True)
+                raise
+
         print("[startup] Initialising Supabase tables...")
         try:
-            await run_in_threadpool(ensure_supabase_users_table, DEFAULT_CONFIG_PATH)
-            print("[startup] Supabase users table OK")
+            await _timed_startup_step("Supabase users table init", ensure_supabase_users_table, DEFAULT_CONFIG_PATH)
         except Exception as exc:
             logging.warning("[startup] Supabase table init skipped (non-fatal): %s", exc)
             print(f"[startup] WARNING: Supabase table init skipped: {exc}")
         try:
-            await run_in_threadpool(ensure_system_tables, DEFAULT_DB_PATH)
-            print("[startup] Core system tables OK")
+            await _timed_startup_step("Core system tables init", ensure_system_tables, DEFAULT_DB_PATH)
         except Exception as exc:
             logging.warning("[startup] System table init skipped (non-fatal): %s", exc)
             print(f"[startup] WARNING: System table init skipped: {exc}")
         try:
-            await run_in_threadpool(ensure_dashboard_indexes_startup, DEFAULT_DB_PATH)
-            print("[startup] Dashboard indexes OK")
+            await _timed_startup_step("Dashboard indexes init", ensure_dashboard_indexes_startup, DEFAULT_DB_PATH)
         except Exception as exc:
             logging.warning("[startup] Dashboard index init skipped (non-fatal): %s", exc)
             print(f"[startup] WARNING: Dashboard index init skipped: {exc}")
@@ -11943,7 +11955,9 @@ def create_app() -> FastAPI:
             launch_detached_task(lambda _app, _payload: run_monthly_credit_reset_cycle(_app), app, {})
             if AUTO_DRIP_DISPATCH_ENABLED:
                 launch_detached_task(lambda _app, _payload: run_drip_dispatch_cycle(_app), app, {})
-        print("[startup] Scheduler started â€” app ready")
+        total_startup_ms = int((_time.perf_counter() - startup_started_at) * 1000)
+        print(f"[startup] Scheduler started â€” app ready ({total_startup_ms}ms)")
+        logging.info("[startup] App ready in %sms", total_startup_ms)
 
     @app.on_event("shutdown")
     def shutdown_tasks() -> None:
