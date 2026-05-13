@@ -10790,6 +10790,52 @@ def run_drip_dispatch_cycle(app: FastAPI) -> None:
         logging.info("Drip dispatch sent one lead. Next drip at %s.", next_at.isoformat())
 
 
+def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -> None:
+    """Run job only on the replica that acquires the advisory lock.
+
+    Uses session-level PostgreSQL advisory locks so leadership is coordinated
+    across replicas without extra infrastructure.
+    """
+    try:
+        engine = pg_get_engine(str(DEFAULT_DB_PATH))
+    except Exception as exc:
+        logging.warning("Leader lock setup failed for job %s; running without lock: %s", job_name, exc)
+        job_fn()
+        return
+
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if "postgres" not in dialect:
+        job_fn()
+        return
+
+    acquired = False
+    with engine.connect() as conn:
+        try:
+            acquired = bool(conn.execute(text("SELECT pg_try_advisory_lock(:key_id)"), {"key_id": int(key_id)}).scalar())
+        except Exception as exc:
+            logging.warning("Leader lock acquire failed for job %s; skipping run: %s", job_name, exc)
+            return
+
+        if not acquired:
+            logging.info("Scheduler leader skip for %s: advisory lock held by another replica.", job_name)
+            return
+
+        try:
+            job_fn()
+        finally:
+            try:
+                conn.execute(text("SELECT pg_advisory_unlock(:key_id)"), {"key_id": int(key_id)})
+            except Exception as exc:
+                logging.warning("Leader lock release failed for job %s: %s", job_name, exc)
+
+
+def _leader_job(job_name: str, key_id: int, job_fn: Callable[[], None]) -> Callable[[], None]:
+    def _run() -> None:
+        run_once_as_leader(job_name, key_id, job_fn)
+
+    return _run
+
+
 def start_scheduler(app: FastAPI) -> None:
     existing = getattr(app.state, "scheduler", None)
     if existing is not None:
@@ -10800,8 +10846,17 @@ def start_scheduler(app: FastAPI) -> None:
         daemon=True,
         executors={"default": APSchedulerThreadPoolExecutor(max_workers=SCHEDULER_MAX_WORKERS)},
     )
+    lock_keys = {
+        "autopilot-cycle": 11001,
+        "drip-feed-dispatch": 11002,
+        "uptime-monitor": 11003,
+        "daily-digest": 11004,
+        "weekly-report-digest": 11005,
+        "monthly-report-digest": 11006,
+        "monthly-credit-reset": 11007,
+    }
     scheduler.add_job(
-        lambda: run_autopilot_cycle(app),
+        _leader_job("autopilot-cycle", lock_keys["autopilot-cycle"], lambda: run_autopilot_cycle(app)),
         trigger=IntervalTrigger(minutes=30),
         id="autopilot-cycle",
         replace_existing=True,
@@ -10810,7 +10865,7 @@ def start_scheduler(app: FastAPI) -> None:
     )
     if AUTO_DRIP_DISPATCH_ENABLED:
         scheduler.add_job(
-            lambda: run_drip_dispatch_cycle(app),
+            _leader_job("drip-feed-dispatch", lock_keys["drip-feed-dispatch"], lambda: run_drip_dispatch_cycle(app)),
             trigger=IntervalTrigger(minutes=1),
             id="drip-feed-dispatch",
             replace_existing=True,
@@ -10818,7 +10873,7 @@ def start_scheduler(app: FastAPI) -> None:
             max_instances=1,
         )
     scheduler.add_job(
-        lambda: run_uptime_check(app),
+        _leader_job("uptime-monitor", lock_keys["uptime-monitor"], lambda: run_uptime_check(app)),
         trigger=IntervalTrigger(hours=2),
         id="uptime-monitor",
         replace_existing=True,
@@ -10826,7 +10881,7 @@ def start_scheduler(app: FastAPI) -> None:
         max_instances=1,
     )
     scheduler.add_job(
-        lambda: run_daily_digest(app),
+        _leader_job("daily-digest", lock_keys["daily-digest"], lambda: run_daily_digest(app)),
         trigger=CronTrigger(hour=8, minute=0, timezone="UTC"),
         id="daily-digest",
         replace_existing=True,
@@ -10834,7 +10889,7 @@ def start_scheduler(app: FastAPI) -> None:
         max_instances=1,
     )
     scheduler.add_job(
-        lambda: run_weekly_report_digest(app),
+        _leader_job("weekly-report-digest", lock_keys["weekly-report-digest"], lambda: run_weekly_report_digest(app)),
         trigger=CronTrigger(day_of_week="mon", hour=7, minute=30, timezone="UTC"),
         id="weekly-report-digest",
         replace_existing=True,
@@ -10842,7 +10897,7 @@ def start_scheduler(app: FastAPI) -> None:
         max_instances=1,
     )
     scheduler.add_job(
-        lambda: run_monthly_report_digest(app),
+        _leader_job("monthly-report-digest", lock_keys["monthly-report-digest"], lambda: run_monthly_report_digest(app)),
         trigger=CronTrigger(day=1, hour=7, minute=40, timezone="UTC"),
         id="monthly-report-digest",
         replace_existing=True,
@@ -10850,7 +10905,7 @@ def start_scheduler(app: FastAPI) -> None:
         max_instances=1,
     )
     scheduler.add_job(
-        lambda: run_monthly_credit_reset_cycle(app),
+        _leader_job("monthly-credit-reset", lock_keys["monthly-credit-reset"], lambda: run_monthly_credit_reset_cycle(app)),
         trigger=CronTrigger(hour=0, minute=15, timezone="UTC"),
         id="monthly-credit-reset",
         replace_existing=True,
@@ -10861,10 +10916,34 @@ def start_scheduler(app: FastAPI) -> None:
     app.state.scheduler = scheduler
 
     if RUN_STARTUP_JOBS:
-        launch_detached_task(lambda _app, _payload: run_autopilot_cycle(_app), app, {})
-        launch_detached_task(lambda _app, _payload: run_monthly_credit_reset_cycle(_app), app, {})
+        launch_detached_task(
+            lambda _app, _payload: run_once_as_leader(
+                "autopilot-cycle(startup)",
+                lock_keys["autopilot-cycle"],
+                lambda: run_autopilot_cycle(_app),
+            ),
+            app,
+            {},
+        )
+        launch_detached_task(
+            lambda _app, _payload: run_once_as_leader(
+                "monthly-credit-reset(startup)",
+                lock_keys["monthly-credit-reset"],
+                lambda: run_monthly_credit_reset_cycle(_app),
+            ),
+            app,
+            {},
+        )
         if AUTO_DRIP_DISPATCH_ENABLED:
-            launch_detached_task(lambda _app, _payload: run_drip_dispatch_cycle(_app), app, {})
+            launch_detached_task(
+                lambda _app, _payload: run_once_as_leader(
+                    "drip-feed-dispatch(startup)",
+                    lock_keys["drip-feed-dispatch"],
+                    lambda: run_drip_dispatch_cycle(_app),
+                ),
+                app,
+                {},
+            )
 
 
 def stop_scheduler(app: FastAPI) -> None:
