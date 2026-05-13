@@ -74,7 +74,7 @@ from backend.services.ai_mailer_service import (
     DEFAULT_SPEED_BODY_TEMPLATE,
     DEFAULT_SPEED_SUBJECT_TEMPLATE,
 )
-from backend.services.ai_provider import AZURE_OPENAI_API_VERSION, create_sync_ai_client, has_any_ai_credentials
+from backend.services.ai_provider import create_sync_ai_client, has_any_ai_credentials, resolve_ai_provider_settings
 from backend.services.prompt_service import PromptFactory
 from backend.stripe_webhook import extract_payment_refresh_payload
 
@@ -7019,7 +7019,9 @@ def load_openai_client(config_path: Path) -> tuple[Optional[object], str]:
     if client is None:
         return None, model_name
     if provider == "azure":
-        logging.info("Azure OpenAI client configured for deployment %s with API version %s.", model_name, AZURE_OPENAI_API_VERSION)
+        resolved = resolve_ai_provider_settings(config_path=config_path, model_name_override=DEFAULT_AI_MODEL)
+        resolved_api_version = resolved.api_version if resolved is not None else "unknown"
+        logging.info("Azure OpenAI client configured for deployment %s with API version %s.", model_name, resolved_api_version)
     return client, model_name
 
 

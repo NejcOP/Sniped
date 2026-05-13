@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,8 @@ from typing import Any, Optional
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
 
-AZURE_OPENAI_API_VERSION = "2024-02-15-preview"
+SUPPORTED_AZURE_API_VERSIONS = ("2024-05-01-preview", "2024-02-01")
+AZURE_OPENAI_API_VERSION = "2024-05-01-preview"
 DEFAULT_AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-4o"
 DEFAULT_LEGACY_AI_MODEL = "gpt-4o-mini"
 
@@ -20,6 +22,20 @@ class AIProviderSettings:
     endpoint: str = ""
     deployment_name: str = ""
     api_version: str = AZURE_OPENAI_API_VERSION
+
+
+def _normalize_azure_api_version(raw_value: Any) -> str:
+    normalized = str(raw_value or "").strip()
+    if not normalized:
+        return AZURE_OPENAI_API_VERSION
+    if normalized in SUPPORTED_AZURE_API_VERSIONS:
+        return normalized
+    logging.warning(
+        "Unsupported Azure OpenAI API version '%s'. Falling back to %s.",
+        normalized,
+        AZURE_OPENAI_API_VERSION,
+    )
+    return AZURE_OPENAI_API_VERSION
 
 
 def _read_config(config_path: Optional[Path | str]) -> dict[str, Any]:
@@ -55,17 +71,19 @@ def resolve_ai_provider_settings(
         or DEFAULT_AZURE_OPENAI_DEPLOYMENT_NAME
         or ""
     ).strip()
-    azure_api_version = str(
+    azure_api_version = _normalize_azure_api_version(
         os.environ.get("AZURE_OPENAI_API_VERSION")
+        or os.environ.get("OPENAI_API_VERSION")
         or azure_cfg.get("api_version", "")
+        or openai_cfg.get("api_version", "")
         or AZURE_OPENAI_API_VERSION
-    ).strip() or AZURE_OPENAI_API_VERSION
+    )
 
     if azure_api_key and azure_endpoint:
         return AIProviderSettings(
             provider="azure",
             api_key=azure_api_key,
-            endpoint=azure_endpoint,
+            endpoint=azure_endpoint.rstrip("/"),
             deployment_name=azure_deployment_name or DEFAULT_AZURE_OPENAI_DEPLOYMENT_NAME,
             api_version=azure_api_version,
         )
