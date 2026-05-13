@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from threading import BoundedSemaphore, Event, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock, RLock, Thread
 from typing import Any, Callable, List, Optional
 from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo
@@ -232,7 +232,7 @@ DEFAULT_PROXY_LIST_PATH = ROOT_DIR / "backend" / "proxies.txt"
 AI_DAILY_USAGE_LIMIT = int(os.environ.get("SNIPED_AI_DAILY_USAGE_LIMIT", os.environ.get("LEADFLOW_AI_DAILY_USAGE_LIMIT", "1000")))
 _AI_USAGE_LOCK = Lock()
 _DASHBOARD_SCHEMA_READY = False
-_SCHEMA_INIT_LOCK = Lock()
+_SCHEMA_INIT_LOCK = RLock()
 _SYSTEM_SCHEMA_READY = False
 _USERS_SCHEMA_READY = False
 ENRICH_CONCURRENCY_LIMIT = _read_env_int("ENRICH_CONCURRENCY_LIMIT", 2)
