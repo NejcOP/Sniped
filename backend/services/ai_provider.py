@@ -28,13 +28,12 @@ def _normalize_azure_api_version(raw_value: Any) -> str:
     normalized = str(raw_value or "").strip()
     if not normalized:
         return AZURE_OPENAI_API_VERSION
-    if normalized in SUPPORTED_AZURE_API_VERSIONS:
-        return normalized
-    logging.warning(
-        "Unsupported Azure OpenAI API version '%s'. Falling back to %s.",
-        normalized,
-        AZURE_OPENAI_API_VERSION,
-    )
+    if normalized != AZURE_OPENAI_API_VERSION:
+        logging.warning(
+            "Ignoring Azure API version override '%s'; forcing stable %s.",
+            normalized,
+            AZURE_OPENAI_API_VERSION,
+        )
     return AZURE_OPENAI_API_VERSION
 
 

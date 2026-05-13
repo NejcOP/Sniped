@@ -9427,6 +9427,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
     heartbeat_thread = Thread(target=_scrape_heartbeat, daemon=True)
     heartbeat_thread.start()
+    active_scraper_ref: dict[str, Any] = {"instance": None}
 
     try:
         mark_task_running(db_path, task_id)
@@ -9540,23 +9541,33 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 scrape_stall_limit,
             )
             GoogleMapsScraper = _get_google_maps_scraper_class()
-            with GoogleMapsScraper(
+            scraper = GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
                 user_data_dir=str(user_data_dir),
                 proxy_url=_proxy_url,
                 proxy_urls=_proxy_urls or None,
                 speed_mode=bool(payload_data.get("speed_mode", False)),
-            ) as scraper:
-                progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
-                _safe_update_progress()
-                return scraper.scrape(
-                    keyword=str(payload_data.get("keyword", "")),
-                    max_results=int(payload_data.get("results", 25)),
-                    progress_callback=_on_progress,
-                    max_runtime_seconds=scrape_runtime_limit,
-                    stall_timeout_seconds=scrape_stall_limit,
-                )
+            )
+            active_scraper_ref["instance"] = scraper
+            try:
+                with scraper:
+                    progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
+                    _safe_update_progress()
+                    return scraper.scrape(
+                        keyword=str(payload_data.get("keyword", "")),
+                        max_results=int(payload_data.get("results", 25)),
+                        progress_callback=_on_progress,
+                        max_runtime_seconds=scrape_runtime_limit,
+                        stall_timeout_seconds=scrape_stall_limit,
+                    )
+            finally:
+                try:
+                    scraper.close()
+                except Exception:
+                    logging.debug("[scrape-task:%s] Scraper cleanup in worker finally skipped", task_id)
+                if active_scraper_ref.get("instance") is scraper:
+                    active_scraper_ref["instance"] = None
 
         def _scrape_with_boot_timeout(headless_value: bool):
             timeout_raw = os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS") or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
@@ -9611,6 +9622,13 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     break
 
             if not done.is_set():
+                leaked_scraper = active_scraper_ref.get("instance")
+                if leaked_scraper is not None:
+                    try:
+                        leaked_scraper.close()
+                        logging.warning("[scrape-task:%s] Force-closed scraper after boot timeout to avoid zombie browser.", task_id)
+                    except Exception:
+                        logging.debug("[scrape-task:%s] Failed to force-close scraper after timeout.", task_id)
                 raise TimeoutError(
                     f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow."
                 )
@@ -9651,7 +9669,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 progress_state["status_message"] = "Deep enrichment crawl started..."
                 _safe_update_progress()
 
-                deep_crawl_concurrency = min(10, max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "8") or "8")))
+                deep_crawl_concurrency = min(2, max(1, int(os.environ.get("SCRAPE_DEEP_CRAWL_CONCURRENCY", "2") or "2")))
                 deep_crawl_timeout = max(4, int(os.environ.get("SCRAPE_DEEP_CRAWL_TIMEOUT_SECONDS", "12") or "12"))
 
                 def _on_deep_crawl_progress(done_count: int, total_count: int, lead_name: Optional[str]) -> None:
@@ -9980,6 +9998,15 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             pass
         finish_task_record(db_path, task_id, status="failed", result_payload=fail_payload, error=str(exc))
     finally:
+        leaked_scraper = active_scraper_ref.get("instance")
+        if leaked_scraper is not None:
+            try:
+                leaked_scraper.close()
+                logging.info("[scrape-task:%s] Finalizer closed lingering scraper instance.", task_id)
+            except Exception:
+                logging.debug("[scrape-task:%s] Finalizer cleanup for lingering scraper skipped.", task_id)
+            finally:
+                active_scraper_ref["instance"] = None
         heartbeat_stop.set()
 
 

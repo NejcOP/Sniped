@@ -316,6 +316,7 @@ class GoogleMapsScraper:
             "--disable-gpu",
             "--single-process",
             "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--disable-background-networking",
             "--disable-component-update",
             "--disable-sync",
@@ -459,6 +460,8 @@ class GoogleMapsScraper:
             "--disable-extensions",
             "--disable-gpu",
             "--single-process",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--disable-background-networking",
             "--disable-component-update",
             "--disable-sync",
@@ -876,14 +879,9 @@ class GoogleMapsScraper:
     def _search_via_url_candidates(self, keyword: str) -> bool:
         assert self.page is not None
 
-        cc = (self.country_code or "us").lower()
         encoded = quote_plus(keyword)
-        url_candidates = [
-            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}",
-            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}?hl=en&authuser=0&gl={cc}",
-            f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}?hl=en&authuser=0",
-            f"{GOOGLE_MAPS_BASE_URL}?hl=en&authuser=0&gl={cc}&q={encoded}",
-        ]
+        # Keep a single canonical direct-search URL to avoid proxy/mirror drift.
+        url_candidates = [f"{GOOGLE_MAPS_BASE_URL}/search/{encoded}"]
 
         for url in url_candidates:
             try:
