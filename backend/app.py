@@ -252,6 +252,17 @@ MRR_BY_TIER = {
     "saas": 0,
 }
 
+_SCHEDULER_INSTANCE_ID = str(
+    os.environ.get("SNIPED_INSTANCE_ID")
+    or os.environ.get("RAILWAY_REPLICA_ID")
+    or os.environ.get("RAILWAY_SERVICE_INSTANCE_ID")
+    or os.environ.get("HOSTNAME")
+    or secrets.token_hex(3)
+).strip() or secrets.token_hex(3)
+_LEADER_METRICS_LOCK = Lock()
+_LEADER_JOB_RUN_COUNTS: dict[str, int] = {}
+_LEADER_JOB_SKIP_COUNTS: dict[str, int] = {}
+
 # ---------------------------------------------------------------------------
 # Simple in-memory TTL cache for the /api/leads listing.
 # Avoids hitting the DB on every 10-second poll when data hasn't changed.
@@ -10796,10 +10807,12 @@ def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -
     Uses session-level PostgreSQL advisory locks so leadership is coordinated
     across replicas without extra infrastructure.
     """
+    job_id = str(job_name or f"job-{int(key_id)}").strip() or f"job-{int(key_id)}"
+
     try:
         engine = pg_get_engine(str(DEFAULT_DB_PATH))
     except Exception as exc:
-        logging.warning("Leader lock setup failed for job %s; running without lock: %s", job_name, exc)
+        logging.warning("Leader lock setup failed for job %s; running without lock: %s", job_id, exc)
         job_fn()
         return
 
@@ -10813,20 +10826,31 @@ def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -
         try:
             acquired = bool(conn.execute(text("SELECT pg_try_advisory_lock(:key_id)"), {"key_id": int(key_id)}).scalar())
         except Exception as exc:
-            logging.warning("Leader lock acquire failed for job %s; skipping run: %s", job_name, exc)
+            logging.warning("Leader lock acquire failed for job %s; skipping run: %s", job_id, exc)
             return
 
         if not acquired:
-            logging.info("Scheduler leader skip for %s: advisory lock held by another replica.", job_name)
+            with _LEADER_METRICS_LOCK:
+                _LEADER_JOB_SKIP_COUNTS[job_id] = int(_LEADER_JOB_SKIP_COUNTS.get(job_id, 0)) + 1
+                skip_count = _LEADER_JOB_SKIP_COUNTS[job_id]
+            logging.info("[LEADER-LOCK] SKIP: Job %s is already being handled by another instance.", job_id)
+            logging.info("[LEADER-LOCK] METRIC: Job %s skip count: %s", job_id, skip_count)
             return
+
+        with _LEADER_METRICS_LOCK:
+            _LEADER_JOB_RUN_COUNTS[job_id] = int(_LEADER_JOB_RUN_COUNTS.get(job_id, 0)) + 1
+            run_count = _LEADER_JOB_RUN_COUNTS[job_id]
+        logging.info("[LEADER-LOCK] SUCCESS: Instance %s is now leader for job %s.", _SCHEDULER_INSTANCE_ID, job_id)
+        logging.info("[LEADER-LOCK] METRIC: Job %s run count: %s", job_id, run_count)
 
         try:
             job_fn()
         finally:
             try:
                 conn.execute(text("SELECT pg_advisory_unlock(:key_id)"), {"key_id": int(key_id)})
+                logging.info("[LEADER-LOCK] RELEASED: Instance %s finished job %s.", _SCHEDULER_INSTANCE_ID, job_id)
             except Exception as exc:
-                logging.warning("Leader lock release failed for job %s: %s", job_name, exc)
+                logging.warning("Leader lock release failed for job %s: %s", job_id, exc)
 
 
 def _leader_job(job_name: str, key_id: int, job_fn: Callable[[], None]) -> Callable[[], None]:
