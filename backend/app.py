@@ -8496,6 +8496,12 @@ def _is_task_thread_alive(app: FastAPI, task_id: Optional[int]) -> bool:
 
 
 def reconcile_orphaned_active_tasks(app: FastAPI, db_path: Path) -> None:
+    # In distributed task mode (Supabase/Postgres + multiple replicas),
+    # in-process thread registry is not authoritative across replicas.
+    # Rely on heartbeat/staleness checks instead of local-thread orphan resets.
+    if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return
+
     for task_type in TASK_TYPES:
         latest = fetch_latest_task(db_path, task_type)
         if not latest.get("running"):
