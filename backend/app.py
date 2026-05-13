@@ -2210,181 +2210,183 @@ def ensure_users_table(db_path: Path) -> None:
     global _USERS_SCHEMA_READY
     if _USERS_SCHEMA_READY:
         return
-    try:
-        ensure_blacklist_table(db_path)
-    except Exception:
-        logging.exception("ensure_users_table prerequisites failed")
-        raise
-    with pgdb.connect(db_path) as conn:
+    with _SCHEMA_INIT_LOCK:
+        if _USERS_SCHEMA_READY:
+            return
         try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    email         TEXT    NOT NULL UNIQUE,
-                    password_hash TEXT    NOT NULL,
-                    salt          TEXT    NOT NULL,
-                    niche         TEXT    NOT NULL DEFAULT 'B2B Service Provider',
-                    account_type  TEXT    NOT NULL DEFAULT 'entrepreneur',
-                    display_name  TEXT    NOT NULL DEFAULT '',
-                    contact_name  TEXT    NOT NULL DEFAULT '',
-                    token         TEXT    UNIQUE,
-                    credits INTEGER NOT NULL DEFAULT 0,
-                    credits_balance INTEGER NOT NULL DEFAULT 0,
-                    monthly_quota INTEGER NOT NULL DEFAULT 50,
-                    credits_limit INTEGER NOT NULL DEFAULT 50,
-                    monthly_limit INTEGER NOT NULL DEFAULT 50,
-                    topup_credits_balance INTEGER NOT NULL DEFAULT 0,
-                    subscription_start_date TEXT,
-                    subscription_active INTEGER NOT NULL DEFAULT 0,
-                    subscription_status TEXT,
-                    subscription_cancel_at TEXT,
-                    subscription_cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
-                    plan_key TEXT NOT NULL DEFAULT 'free',
-                    stripe_customer_id TEXT,
-                    quickstart_completed INTEGER NOT NULL DEFAULT 0,
-                    average_deal_value REAL NOT NULL DEFAULT 1000,
-                    smtp_accounts_json TEXT,
-                    reset_token   TEXT,
-                    reset_token_expires_at TEXT,
-                    last_login_at TEXT,
-                    is_admin INTEGER NOT NULL DEFAULT 0,
-                    is_blocked INTEGER NOT NULL DEFAULT 0,
-                    blocked_at TEXT,
-                    blocked_reason TEXT,
-                    created_at    TEXT    NOT NULL,
-                    updated_at    TEXT
-                )
-                """
-            )
-            for col, typedef in [
-                ("account_type", "TEXT NOT NULL DEFAULT 'entrepreneur'"),
-                ("display_name", "TEXT NOT NULL DEFAULT ''"),
-                ("contact_name", "TEXT NOT NULL DEFAULT ''"),
-                ("credits", "INTEGER NOT NULL DEFAULT 0"),
-                ("credits_balance", "INTEGER NOT NULL DEFAULT 0"),
-                ("monthly_quota", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-                ("credits_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-                ("monthly_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
-                ("topup_credits_balance", "INTEGER NOT NULL DEFAULT 0"),
-                ("subscription_start_date", "TEXT"),
-                ("subscription_active", "INTEGER NOT NULL DEFAULT 0"),
-                ("subscription_status", "TEXT"),
-                ("subscription_cancel_at", "TEXT"),
-                ("subscription_cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
-                ("plan_key", "TEXT NOT NULL DEFAULT 'free'"),
-                ("stripe_customer_id", "TEXT"),
-                ("quickstart_completed", "INTEGER NOT NULL DEFAULT 0"),
-                ("average_deal_value", f"REAL NOT NULL DEFAULT {DEFAULT_AVERAGE_DEAL_VALUE}"),
-                ("smtp_accounts_json", "TEXT"),
-                ("reset_token", "TEXT"),
-                ("reset_token_expires_at", "TEXT"),
-                ("last_login_at", "TEXT"),
-                ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
-                ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
-                ("blocked_at", "TEXT"),
-                ("blocked_reason", "TEXT"),
-                ("updated_at", "TEXT"),
-            ]:
-                try:
-                    conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
-                except Exception:
-                    pass
-            if DEFAULT_ADMIN_EMAILS:
-                conn.execute(
-                    "UPDATE users SET is_admin = TRUE WHERE LOWER(COALESCE(email, '')) IN ({})".format(
-                        ",".join(["?"] * len(DEFAULT_ADMIN_EMAILS))
-                    ),
-                    tuple(sorted(DEFAULT_ADMIN_EMAILS)),
-                )
-            conn.commit()
-
-            users_table_exists_row = conn.execute(
-                """
-                SELECT COUNT(*) AS table_count
-                FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = 'users'
-                """
-            ).fetchone()
-            users_table_exists = bool(int((users_table_exists_row or {}).get("table_count", 0))) if isinstance(users_table_exists_row, dict) else bool(int((users_table_exists_row[0] if users_table_exists_row else 0) or 0))
-            if not users_table_exists:
-                logging.warning("ensure_users_table: users table not available after CREATE, skipping update phase.")
-                return
-
-            try:
-                conn.execute("UPDATE users SET credits = COALESCE(credits, COALESCE(credits_balance, 0))")
-            except Exception as exc:
-                logging.warning("ensure_users_table: non-fatal credits sync failed: %s", exc)
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            try:
-                conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
-            except Exception as exc:
-                logging.warning("ensure_users_table: non-fatal credits_balance update failed: %s", exc)
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            conn.execute(f"UPDATE users SET credits_limit = COALESCE(NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-            conn.execute(f"UPDATE users SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-            conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
-            conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
-            conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
-            conn.execute("UPDATE users SET credits = COALESCE(credits_balance, credits, 0)")
-            conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
-            conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, FALSE)")
-            conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, FALSE)")
-            conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, FALSE)")
-            conn.execute(
-                f"UPDATE users SET average_deal_value = CASE WHEN COALESCE(average_deal_value, 0) <= 0 THEN {DEFAULT_AVERAGE_DEAL_VALUE} ELSE average_deal_value END"
-            )
-            conn.execute(
-                """
-                UPDATE users
-                SET plan_key = CASE
-                    WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
-                        THEN LOWER(TRIM(COALESCE(plan_key, '')))
-                    WHEN COALESCE(subscription_active, FALSE) = TRUE
-                        THEN 'pro'
-                    ELSE 'free'
-                END
-                """
-            )
-            conn.execute(
-                f"""
-                UPDATE users
-                SET monthly_quota = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                    monthly_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                    credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
-                    credits_balance = GREATEST(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
-                WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
-                AND COALESCE(subscription_active, FALSE) = FALSE
-                  AND (
-                        COALESCE(NULLIF(monthly_quota, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-                     OR COALESCE(NULLIF(monthly_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-                     OR COALESCE(NULLIF(credits_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
-                  )
-                """
-            )
-            conn.execute(
-                """
-                UPDATE users
-                SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CAST(CURRENT_TIMESTAMP AS TEXT))
-                WHERE updated_at IS NULL OR TRIM(COALESCE(updated_at, '')) = ''
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)")
-            conn.commit()
-            _USERS_SCHEMA_READY = True
+            ensure_blacklist_table(db_path)
         except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            logging.exception("ensure_users_table failed; transaction rolled back")
+            logging.exception("ensure_users_table prerequisites failed")
             raise
+        with pgdb.connect(db_path) as conn:
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS users (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        email         TEXT    NOT NULL UNIQUE,
+                        password_hash TEXT    NOT NULL,
+                        salt          TEXT    NOT NULL,
+                        niche         TEXT    NOT NULL DEFAULT 'B2B Service Provider',
+                        account_type  TEXT    NOT NULL DEFAULT 'entrepreneur',
+                        display_name  TEXT    NOT NULL DEFAULT '',
+                        contact_name  TEXT    NOT NULL DEFAULT '',
+                        token         TEXT    UNIQUE,
+                        credits INTEGER NOT NULL DEFAULT 0,
+                        credits_balance INTEGER NOT NULL DEFAULT 0,
+                        monthly_quota INTEGER NOT NULL DEFAULT 50,
+                        credits_limit INTEGER NOT NULL DEFAULT 50,
+                        monthly_limit INTEGER NOT NULL DEFAULT 50,
+                        topup_credits_balance INTEGER NOT NULL DEFAULT 0,
+                        subscription_start_date TEXT,
+                        subscription_active INTEGER NOT NULL DEFAULT 0,
+                        subscription_status TEXT,
+                        subscription_cancel_at TEXT,
+                        subscription_cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+                        plan_key TEXT NOT NULL DEFAULT 'free',
+                        stripe_customer_id TEXT,
+                        quickstart_completed INTEGER NOT NULL DEFAULT 0,
+                        average_deal_value REAL NOT NULL DEFAULT 1000,
+                        smtp_accounts_json TEXT,
+                        reset_token   TEXT,
+                        reset_token_expires_at TEXT,
+                        last_login_at TEXT,
+                        is_admin INTEGER NOT NULL DEFAULT 0,
+                        is_blocked INTEGER NOT NULL DEFAULT 0,
+                        blocked_at TEXT,
+                        blocked_reason TEXT,
+                        created_at    TEXT    NOT NULL,
+                        updated_at    TEXT
+                    )
+                    """
+                )
+                for col, typedef in [
+                    ("account_type", "TEXT NOT NULL DEFAULT 'entrepreneur'"),
+                    ("display_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("contact_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("credits", "INTEGER NOT NULL DEFAULT 0"),
+                    ("credits_balance", "INTEGER NOT NULL DEFAULT 0"),
+                    ("monthly_quota", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                    ("credits_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                    ("monthly_limit", f"INTEGER NOT NULL DEFAULT {DEFAULT_MONTHLY_CREDIT_LIMIT}"),
+                    ("topup_credits_balance", "INTEGER NOT NULL DEFAULT 0"),
+                    ("subscription_start_date", "TEXT"),
+                    ("subscription_active", "INTEGER NOT NULL DEFAULT 0"),
+                    ("subscription_status", "TEXT"),
+                    ("subscription_cancel_at", "TEXT"),
+                    ("subscription_cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
+                    ("plan_key", "TEXT NOT NULL DEFAULT 'free'"),
+                    ("stripe_customer_id", "TEXT"),
+                    ("quickstart_completed", "INTEGER NOT NULL DEFAULT 0"),
+                    ("average_deal_value", f"REAL NOT NULL DEFAULT {DEFAULT_AVERAGE_DEAL_VALUE}"),
+                    ("smtp_accounts_json", "TEXT"),
+                    ("reset_token", "TEXT"),
+                    ("reset_token_expires_at", "TEXT"),
+                    ("last_login_at", "TEXT"),
+                    ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
+                    ("is_blocked", "INTEGER NOT NULL DEFAULT 0"),
+                    ("blocked_at", "TEXT"),
+                    ("blocked_reason", "TEXT"),
+                    ("updated_at", "TEXT"),
+                ]:
+                    try:
+                        conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+                    except Exception:
+                        pass
+                if DEFAULT_ADMIN_EMAILS:
+                    conn.execute(
+                        "UPDATE users SET is_admin = TRUE WHERE LOWER(COALESCE(email, '')) IN ({})".format(
+                            ",".join(["?"] * len(DEFAULT_ADMIN_EMAILS))
+                        ),
+                        tuple(sorted(DEFAULT_ADMIN_EMAILS)),
+                    )
+                conn.commit()
+
+                users_table_exists_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS table_count
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'users'
+                    """
+                ).fetchone()
+                users_table_exists = bool(int((users_table_exists_row or {}).get("table_count", 0))) if isinstance(users_table_exists_row, dict) else bool(int((users_table_exists_row[0] if users_table_exists_row else 0) or 0))
+                if not users_table_exists:
+                    logging.warning("ensure_users_table: users table not available after CREATE, skipping update phase.")
+                    return
+
+                try:
+                    conn.execute("UPDATE users SET credits = COALESCE(credits, COALESCE(credits_balance, 0))")
+                except Exception as exc:
+                    logging.warning("ensure_users_table: non-fatal credits sync failed: %s", exc)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                try:
+                    conn.execute("UPDATE users SET credits_balance = COALESCE(credits_balance, 0)")
+                except Exception as exc:
+                    logging.warning("ensure_users_table: non-fatal credits_balance update failed: %s", exc)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                conn.execute(f"UPDATE users SET credits_limit = COALESCE(NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+                conn.execute(f"UPDATE users SET monthly_quota = COALESCE(NULLIF(monthly_quota, 0), NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+                conn.execute(f"UPDATE users SET monthly_limit = COALESCE(NULLIF(monthly_limit, 0), NULLIF(credits_limit, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT})")
+                conn.execute("UPDATE users SET monthly_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
+                conn.execute("UPDATE users SET credits_limit = monthly_quota WHERE COALESCE(NULLIF(monthly_quota, 0), 0) > 0")
+                conn.execute("UPDATE users SET credits = COALESCE(credits_balance, credits, 0)")
+                conn.execute("UPDATE users SET topup_credits_balance = COALESCE(topup_credits_balance, 0)")
+                conn.execute("UPDATE users SET subscription_active = COALESCE(subscription_active, FALSE)")
+                conn.execute("UPDATE users SET subscription_cancel_at_period_end = COALESCE(subscription_cancel_at_period_end, FALSE)")
+                conn.execute("UPDATE users SET quickstart_completed = COALESCE(quickstart_completed, FALSE)")
+                conn.execute(
+                    f"UPDATE users SET average_deal_value = CASE WHEN COALESCE(average_deal_value, 0) <= 0 THEN {DEFAULT_AVERAGE_DEAL_VALUE} ELSE average_deal_value END"
+                )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET plan_key = CASE
+                        WHEN LOWER(TRIM(COALESCE(plan_key, ''))) IN ('free', 'hustler', 'growth', 'scale', 'empire', 'pro')
+                            THEN LOWER(TRIM(COALESCE(plan_key, '')))
+                        WHEN COALESCE(subscription_active, FALSE) = TRUE
+                            THEN 'pro'
+                        ELSE 'free'
+                    END
+                    """
+                )
+                conn.execute(
+                    f"""
+                    UPDATE users
+                    SET monthly_quota = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                        monthly_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                        credits_limit = {DEFAULT_MONTHLY_CREDIT_LIMIT},
+                        credits_balance = GREATEST(COALESCE(credits_balance, 0), {DEFAULT_MONTHLY_CREDIT_LIMIT} + COALESCE(topup_credits_balance, 0))
+                    WHERE LOWER(COALESCE(NULLIF(plan_key, ''), 'free')) = 'free'
+                    AND COALESCE(subscription_active, FALSE) = FALSE
+                      AND (
+                            COALESCE(NULLIF(monthly_quota, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                         OR COALESCE(NULLIF(monthly_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                         OR COALESCE(NULLIF(credits_limit, 0), 0) != {DEFAULT_MONTHLY_CREDIT_LIMIT}
+                      )
+                    """
+                )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET updated_at = COALESCE(NULLIF(updated_at, ''), created_at, CAST(CURRENT_TIMESTAMP AS TEXT))
+                    WHERE updated_at IS NULL OR TRIM(COALESCE(updated_at, '')) = ''
+                    """
+                )
+                conn.commit()
+                _USERS_SCHEMA_READY = True
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logging.exception("ensure_users_table failed; transaction rolled back")
+                raise
 
 
 def ensure_lead_history_table(db_path: Path) -> None:
@@ -2788,14 +2790,38 @@ def ensure_dashboard_indexes_startup(db_path: Path) -> None:
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_reset_token ON users(reset_token)",
     ]
+
+    def _is_non_fatal_migration_lock_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        lock_tokens = (
+            "deadlock detected",
+            "lock timeout",
+            "canceling statement due to lock timeout",
+            "could not obtain lock",
+            "statement timeout",
+            "timeout",
+        )
+        return any(token in message for token in lock_tokens)
 
     if _is_postgres_task_store_enabled():
         engine = pg_get_engine()
         # CREATE INDEX CONCURRENTLY must run outside transaction blocks.
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             for ddl in lead_index_sql:
-                conn.execute(text(ddl))
+                try:
+                    conn.execute(text(ddl))
+                except SQLAlchemyOperationalError as exc:
+                    if _is_non_fatal_migration_lock_error(exc):
+                        logging.warning("Startup concurrent index skipped due to lock/timeout: %s", ddl)
+                        continue
+                    raise
+                except Exception as exc:
+                    if _is_non_fatal_migration_lock_error(exc):
+                        logging.warning("Startup concurrent index skipped due to lock/timeout: %s", ddl)
+                        continue
+                    raise
         return
 
     # Local sqlite fallback for dev runs.
@@ -2805,6 +2831,7 @@ def ensure_dashboard_indexes_startup(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_user_scraped_at ON leads(user_id, scraped_at DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_pipeline_stage ON leads(user_id, pipeline_stage)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_client_folder_id ON leads(user_id, client_folder_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token)")
         conn.commit()
 
 
