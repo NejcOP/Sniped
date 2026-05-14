@@ -941,6 +941,40 @@ function resolveSnipedTemplateForSelection(rawNiche, templateKey) {
   return list.find((item) => String(item?.gap || '').trim() === gap) || null
 }
 
+function buildSnipedTemplateSeedPayload() {
+  const slug = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  const items = []
+  for (const [niche, nicheData] of Object.entries(snipedEmailTemplates || {})) {
+    const templates = Array.isArray(nicheData?.templates) ? nicheData.templates : []
+    const nicheCategory = `manus_${slug(niche) || 'general'}`
+    for (const template of templates) {
+      const gap = String(template?.gap || '').trim() || 'No Website'
+      const subject = String(template?.subject || '').trim()
+      const body = String(template?.body || '').trim()
+      const followup = String(template?.followup || '').trim()
+      if (subject && body) {
+        items.push({
+          name: `${niche} - ${gap} - Live`,
+          category: nicheCategory,
+          prompt_text: `${niche} / ${gap} / initial`,
+          subject_template: subject,
+          body_template: body,
+        })
+      }
+      if (followup) {
+        items.push({
+          name: `${niche} - ${gap} - Follow-up`,
+          category: nicheCategory,
+          prompt_text: `${niche} / ${gap} / followup`,
+          subject_template: `Follow-up: ${subject || gap}`,
+          body_template: followup,
+        })
+      }
+    }
+  }
+  return items
+}
+
 const liveMailTemplateCardMetaByNiche = {
   'Web Design & Dev': {
     ghost: { title: 'No Website', description: 'Used when the business has no website. This is your website-first opener.' },
@@ -2386,6 +2420,7 @@ function App({ initialTab = 'leads' }) {
   const [sequenceForm, setSequenceForm] = useState(defaultCampaignSequenceForm)
   const [campaignLoading, setCampaignLoading] = useState(false)
   const [savingSequence, setSavingSequence] = useState(false)
+  const [seedingTemplatePack, setSeedingTemplatePack] = useState(false)
   const [manualLeadForm, setManualLeadForm] = useState(defaultManualLead)
   const [pendingRequest, setPendingRequest] = useState('')
   const [pendingStatusLeadId, setPendingStatusLeadId] = useState(null)
@@ -2437,6 +2472,50 @@ function App({ initialTab = 'leads' }) {
   })
   const [savedSegments, setSavedSegments] = useState([])
   const [loadingSavedSegments, setLoadingSavedSegments] = useState(false)
+  const templatePackSeededRef = useRef(false)
+
+  const seedTemplatePackToSavedTemplates = useCallback(async ({ silent = false } = {}) => {
+    const templates = buildSnipedTemplateSeedPayload()
+    if (!templates.length) {
+      if (!silent) toast.error('No template defaults found to seed.')
+      return { inserted: 0, skipped: 0 }
+    }
+
+    setSeedingTemplatePack(true)
+    try {
+      const data = await fetchJson('/api/mailer/templates/seed-defaults', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templates }),
+        timeoutMs: 15000,
+      })
+      const inserted = Number(data?.inserted || 0)
+      const skipped = Number(data?.skipped || 0)
+      if (!silent) {
+        if (inserted > 0) {
+          toast.success(`Template pack synced: ${inserted} added, ${skipped} skipped.`)
+        } else {
+          toast.success(`Template pack is up to date (${skipped} existing).`)
+        }
+      }
+      return { inserted, skipped }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Template pack sync failed'
+      setLastError(message)
+      if (!silent) toast.error(message)
+      throw error
+    } finally {
+      setSeedingTemplatePack(false)
+    }
+  }, [setLastError])
+
+  useEffect(() => {
+    if (!hasSessionToken || templatePackSeededRef.current) return
+    templatePackSeededRef.current = true
+    seedTemplatePackToSavedTemplates({ silent: true }).catch(() => {
+      // Best-effort sync only; seed failures should not block dashboard UX.
+    })
+  }, [hasSessionToken, seedTemplatePackToSavedTemplates])
 
   const refreshLeads = useCallback(async (options = {}) => {
     const silent = options?.silent !== undefined ? options.silent : true
@@ -2574,6 +2653,8 @@ function App({ initialTab = 'leads' }) {
   const [monthlyReport, setMonthlyReport] = useState(null)
   const [loadingMonthlyReport, setLoadingMonthlyReport] = useState(false)
   const [sendingMonthlyReport, setSendingMonthlyReport] = useState(false)
+  const [aiCostReport, setAiCostReport] = useState(null)
+  const [loadingAiCostReport, setLoadingAiCostReport] = useState(false)
   const [clientFolders, setClientFolders] = useState([])
   const [loadingClientFolders, setLoadingClientFolders] = useState(false)
   const [assigningClientFolderLeadId, setAssigningClientFolderLeadId] = useState(null)
@@ -5527,6 +5608,29 @@ function App({ initialTab = 'leads' }) {
     }
   }, [featureAccess.advanced_reporting])
 
+  const refreshAiCostReport = useCallback(async (options = {}) => {
+    if (!featureAccess.advanced_reporting) {
+      setAiCostReport(null)
+      return null
+    }
+
+    if (!options.silent) {
+      setLoadingAiCostReport(true)
+    }
+    try {
+      const data = await fetchJson('/api/reporting/ai-costs?limit=8')
+      setAiCostReport(data)
+      return data
+    } catch (error) {
+      console.error('[ai-cost-report] fetch failed:', error)
+      return null
+    } finally {
+      if (!options.silent) {
+        setLoadingAiCostReport(false)
+      }
+    }
+  }, [featureAccess.advanced_reporting])
+
   async function downloadMonthlyReportPdf() {
     if (!featureAccess.advanced_reporting) {
       toast('Monthly reports unlock on Business and Elite.', { icon: '🔒' })
@@ -5998,7 +6102,7 @@ function App({ initialTab = 'leads' }) {
       initialRequests.push(fetchMailerCampaignStats({ silent: true }))
     }
     if (activeTab === 'export') {
-      initialRequests.push(refreshWeeklyReport({ silent: true }), refreshMonthlyReport({ silent: true }))
+      initialRequests.push(refreshWeeklyReport({ silent: true }), refreshMonthlyReport({ silent: true }), refreshAiCostReport({ silent: true }))
     }
     if (activeTab === 'clients') {
       initialRequests.push(refreshClientFolders({ silent: true }), refreshClientDashboard({ silent: true }))
@@ -6025,7 +6129,7 @@ function App({ initialTab = 'leads' }) {
         requests.push(fetchMailerCampaignStats({ silent: true }))
       }
       if (activeTab === 'export') {
-        requests.push(refreshWeeklyReport({ silent: true }), refreshMonthlyReport({ silent: true }))
+        requests.push(refreshWeeklyReport({ silent: true }), refreshMonthlyReport({ silent: true }), refreshAiCostReport({ silent: true }))
       }
       if (activeTab === 'clients') {
         requests.push(refreshClientFolders({ silent: true }), refreshClientDashboard({ silent: true }))
@@ -6038,7 +6142,7 @@ function App({ initialTab = 'leads' }) {
       window.clearInterval(fastId)
       window.clearInterval(slowId)
     }
-  }, [activeTab, fetchMailerCampaignStats, fetchTaskState, refreshClientDashboard, refreshClientFolders, refreshCreditsBalance, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
+  }, [activeTab, fetchMailerCampaignStats, fetchTaskState, refreshAiCostReport, refreshClientDashboard, refreshClientFolders, refreshCreditsBalance, refreshLeads, refreshMonthlyReport, refreshWeeklyReport])
 
   function applySavedSegment(segment) {
     const filters = normalizeSavedSegmentFilters(segment?.filters || {})
@@ -7706,12 +7810,14 @@ function App({ initialTab = 'leads' }) {
       void Promise.allSettled([
         refreshWeeklyReport({ silent: true }),
         refreshMonthlyReport({ silent: true }),
+        refreshAiCostReport({ silent: true }),
       ])
     } else {
       setWeeklyReport(null)
       setMonthlyReport(null)
+      setAiCostReport(null)
     }
-  }, [canAdvancedReporting, refreshMonthlyReport, refreshWeeklyReport])
+  }, [canAdvancedReporting, refreshAiCostReport, refreshMonthlyReport, refreshWeeklyReport])
   useEffect(() => {
     if (canClientSuccessDashboard) {
       void Promise.allSettled([
@@ -10715,6 +10821,15 @@ function App({ initialTab = 'leads' }) {
                   <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-xs text-slate-300">
                     <p className="font-semibold uppercase tracking-[0.14em] text-cyan-300">Supported placeholders</p>
                     <p className="mt-2">{'{BusinessName}'} {'{City}'} {'{Niche}'} {'{YourName}'}</p>
+                    <button
+                      type="button"
+                      className="mt-3 inline-flex items-center gap-2 rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-100 transition hover:border-cyan-300/50 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={() => void seedTemplatePackToSavedTemplates({ silent: false })}
+                      disabled={seedingTemplatePack}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${seedingTemplatePack ? 'animate-spin' : ''}`} />
+                      {seedingTemplatePack ? 'Seeding defaults...' : 'Seed defaults now'}
+                    </button>
                   </div>
                 </div>
 
@@ -11894,6 +12009,50 @@ function App({ initialTab = 'leads' }) {
                   <p className="text-[11px] text-slate-500">
                     Sent automatically to: {String(currentUserEmail || 'your account email')}
                   </p>
+                </div>
+              </div>
+
+              <div className="glass-card rounded-2xl p-5 flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-white text-sm flex items-center gap-2">AI Cost Dashboard {!canAdvancedReporting ? <PremiumBadge label="Business+" /> : null}</p>
+                    <p className="text-xs text-slate-400 mt-1">Track total token usage and estimated LLM spend across your leads.</p>
+                  </div>
+                  <button className="btn-secondary" type="button" disabled={!canAdvancedReporting || loadingAiCostReport} onClick={() => void refreshAiCostReport()}>
+                    <RefreshCw className={`h-4 w-4 ${loadingAiCostReport ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+
+                <div className="grid gap-2 text-xs sm:grid-cols-3">
+                  <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 px-3 py-2">
+                    <p className="text-slate-400">Total cost (USD)</p>
+                    <p className="mt-1 text-lg font-semibold text-amber-200">${formatUsd(aiCostReport?.total_cost_usd || 0)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 px-3 py-2">
+                    <p className="text-slate-400">Total tokens</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{formatCreditAmount(aiCostReport?.total_tokens_used || 0)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 px-3 py-2">
+                    <p className="text-slate-400">Billed leads</p>
+                    <p className="mt-1 text-lg font-semibold text-cyan-200">{Number(aiCostReport?.billed_leads_count || 0)}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                  <p className="text-[11px] uppercase tracking-[0.14em] text-slate-500">Top lead spend</p>
+                  {!Array.isArray(aiCostReport?.top_leads) || aiCostReport.top_leads.length === 0 ? (
+                    <p className="mt-2 text-xs text-slate-400">No billed leads yet.</p>
+                  ) : (
+                    <div className="mt-2 space-y-1.5">
+                      {aiCostReport.top_leads.slice(0, 5).map((lead) => (
+                        <div key={String(lead.id)} className="flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate text-slate-300">{lead.business_name || `Lead #${lead.id}`}</span>
+                          <span className="whitespace-nowrap text-amber-200">${formatUsd(lead.cost_usd || 0)} • {formatCreditAmount(lead.tokens_used || 0)} tok</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

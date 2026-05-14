@@ -97,6 +97,11 @@ class LeadRecord(Base):
     pipeline_stage: Mapped[str] = mapped_column(Text, nullable=False, default="Scraped", server_default="Scraped")
     client_folder_id: Mapped[Optional[int]] = mapped_column(Integer)
     qualification_score: Mapped[Optional[float]] = mapped_column(Float)
+    process_status: Mapped[str] = mapped_column(Text, nullable=False, default="PENDING", server_default="PENDING")
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
 
 
 _ENGINE_CACHE: dict[str, Any] = {}

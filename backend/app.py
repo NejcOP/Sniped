@@ -439,6 +439,18 @@ class SavedTemplateRequest(BaseModel):
     body_template: Optional[str] = Field(default=None, max_length=12000)
 
 
+class SavedTemplateSeedItem(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    category: str = Field(default="general", min_length=2, max_length=60)
+    prompt_text: Optional[str] = Field(default=None, max_length=8000)
+    subject_template: Optional[str] = Field(default=None, max_length=300)
+    body_template: Optional[str] = Field(default=None, max_length=12000)
+
+
+class SavedTemplateSeedRequest(BaseModel):
+    templates: list[SavedTemplateSeedItem] = Field(default_factory=list, max_length=200)
+
+
 class CampaignEventRequest(BaseModel):
     lead_id: Optional[int] = None
     event_type: str = Field(..., min_length=3, max_length=40)
@@ -931,6 +943,12 @@ def generate_cold_email_opener_for_niche(
             max_tokens=150,
             temperature=temperature,
         )
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+        cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+        record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="opening_line_llm_usage")
         return response.choices[0].message.content.strip().strip('"').strip("'")
     except Exception as exc:
         logging.error("cold_email_opener OpenAI error: %s", exc)
@@ -1183,6 +1201,11 @@ def ensure_dashboard_columns(db_path: Path) -> None:
         "performance_score": "ALTER TABLE leads ADD COLUMN performance_score REAL",
         "pipeline_stage": "ALTER TABLE leads ADD COLUMN pipeline_stage TEXT DEFAULT 'Scraped'",
         "client_folder_id": "ALTER TABLE leads ADD COLUMN client_folder_id INTEGER",
+        "process_status": "ALTER TABLE leads ADD COLUMN process_status TEXT DEFAULT 'PENDING'",
+        "retry_count": "ALTER TABLE leads ADD COLUMN retry_count INTEGER DEFAULT 0",
+        "last_error": "ALTER TABLE leads ADD COLUMN last_error TEXT",
+        "tokens_used": "ALTER TABLE leads ADD COLUMN tokens_used INTEGER DEFAULT 0",
+        "cost_usd": "ALTER TABLE leads ADD COLUMN cost_usd REAL DEFAULT 0.0",
         "user_id": "ALTER TABLE leads ADD COLUMN user_id TEXT",
         "created_at": "ALTER TABLE leads ADD COLUMN created_at TEXT",
     }
@@ -1213,6 +1236,18 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                 END
                 -- SYSTEM-WIDE: intentionally unscoped.
                 WHERE pipeline_stage IS NULL OR TRIM(COALESCE(pipeline_stage, '')) = ''
+                """
+            )
+            conn.execute(
+                """
+                UPDATE leads
+                SET process_status = CASE
+                    WHEN LOWER(COALESCE(enrichment_status, '')) = 'completed' THEN 'COMPLETED'
+                    WHEN LOWER(COALESCE(enrichment_status, '')) IN ('processing') THEN 'PROCESSING'
+                    WHEN LOWER(COALESCE(enrichment_status, '')) IN ('failed', 'failed_no_url') THEN 'FAILED'
+                    ELSE COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING')
+                END
+                WHERE process_status IS NULL OR TRIM(COALESCE(process_status, '')) = ''
                 """
             )
             conn.commit()
@@ -1682,10 +1717,17 @@ def ensure_worker_audit_table(db_path: Path) -> None:
                 action TEXT NOT NULL,
                 message TEXT,
                 actor TEXT NOT NULL DEFAULT 'system',
+                tokens_used INTEGER,
+                cost_usd REAL,
                 created_at TEXT NOT NULL
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(worker_audit_log)").fetchall()}
+        if "tokens_used" not in columns:
+            conn.execute("ALTER TABLE worker_audit_log ADD COLUMN tokens_used INTEGER")
+        if "cost_usd" not in columns:
+            conn.execute("ALTER TABLE worker_audit_log ADD COLUMN cost_usd REAL")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_worker_audit_created ON worker_audit_log(created_at DESC)"
         )
@@ -1741,6 +1783,8 @@ def add_worker_audit(
     worker_id: Optional[int] = None,
     lead_id: Optional[int] = None,
     actor: str = "system",
+    tokens_used: Optional[int] = None,
+    cost_usd: Optional[float] = None,
 ) -> None:
     if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
         add_worker_audit_supabase(
@@ -1750,6 +1794,8 @@ def add_worker_audit(
             worker_id=worker_id,
             lead_id=lead_id,
             actor=actor,
+            tokens_used=tokens_used,
+            cost_usd=cost_usd,
         )
         return
 
@@ -1757,10 +1803,19 @@ def add_worker_audit(
     with pgdb.connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, tokens_used, cost_usd, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (worker_id, lead_id, action.strip().lower(), message.strip(), actor.strip() or "system", utc_now_iso()),
+            (
+                worker_id,
+                lead_id,
+                action.strip().lower(),
+                message.strip(),
+                actor.strip() or "system",
+                int(tokens_used) if tokens_used is not None else None,
+                float(cost_usd) if cost_usd is not None else None,
+                utc_now_iso(),
+            ),
         )
         conn.commit()
 
@@ -3421,6 +3476,67 @@ def list_saved_mail_templates(db_path: Path, user_id: str, limit: int = 50) -> l
             (user_id, int(limit)),
         ).fetchall()
     return [_normalize_saved_template_row(row) for row in rows]
+
+
+def seed_saved_mail_templates(db_path: Path, user_id: str, templates: list[dict[str, Any]]) -> dict[str, Any]:
+    ensure_mailer_campaign_tables(db_path)
+    now_iso = utc_now_iso()
+    inserted_count = 0
+    skipped_count = 0
+    inserted_items: list[dict[str, Any]] = []
+
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
+        for raw_item in templates:
+            name = str(raw_item.get("name") or "").strip()
+            category = str(raw_item.get("category") or "general").strip() or "general"
+            if len(name) < 2:
+                skipped_count += 1
+                continue
+
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM SavedTemplates
+                WHERE COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+                  AND LOWER(COALESCE(category, 'general')) = LOWER(?)
+                  AND LOWER(name) = LOWER(?)
+                LIMIT 1
+                """,
+                (str(user_id or "legacy"), category, name),
+            ).fetchone()
+            if existing is not None:
+                skipped_count += 1
+                continue
+
+            cursor = conn.execute(
+                """
+                INSERT INTO SavedTemplates (
+                    user_id, name, category, prompt_text, subject_template, body_template, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(user_id or "legacy"),
+                    name,
+                    category,
+                    str(raw_item.get("prompt_text") or "").strip() or None,
+                    str(raw_item.get("subject_template") or "").strip() or None,
+                    str(raw_item.get("body_template") or "").strip() or None,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            row = conn.execute("SELECT * FROM SavedTemplates WHERE id = ? LIMIT 1", (cursor.lastrowid,)).fetchone()
+            inserted_items.append(_normalize_saved_template_row(row))
+            inserted_count += 1
+
+        conn.commit()
+
+    return {
+        "inserted": inserted_count,
+        "skipped": skipped_count,
+        "items": inserted_items,
+    }
 
 
 def record_mailer_campaign_event(db_path: Path, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -5558,13 +5674,59 @@ def _ensure_sslmode_require(db_url: str) -> str:
     scheme = str(parsed.scheme or "").lower()
     if not scheme.startswith("postgres"):
         return raw
-
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     sslmode = str(query.get("sslmode") or "").strip().lower()
     if sslmode == "require":
         return raw
     query["sslmode"] = "require"
     return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def get_ai_cost_dashboard(db_path: Path, user_id: str, limit: int = 20) -> dict[str, Any]:
+    ensure_dashboard_columns(db_path)
+    with pgdb.connect(db_path) as conn:
+        conn.row_factory = pgdb.Row
+        summary_row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(COALESCE(tokens_used, 0)), 0) AS total_tokens_used,
+                COALESCE(SUM(COALESCE(cost_usd, 0.0)), 0.0) AS total_cost_usd,
+                COALESCE(SUM(CASE WHEN COALESCE(cost_usd, 0.0) > 0 OR COALESCE(tokens_used, 0) > 0 THEN 1 ELSE 0 END), 0) AS billed_leads_count
+            FROM leads
+            WHERE COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+            """,
+            (str(user_id or "legacy"),),
+        ).fetchone()
+
+        top_rows = conn.execute(
+            """
+            SELECT
+                id,
+                business_name,
+                COALESCE(tokens_used, 0) AS tokens_used,
+                COALESCE(cost_usd, 0.0) AS cost_usd,
+                COALESCE(process_status, 'PENDING') AS process_status,
+                COALESCE(retry_count, 0) AS retry_count,
+                last_error,
+                status_updated_at
+            FROM leads
+            WHERE COALESCE(NULLIF(user_id, ''), 'legacy') = ?
+              AND (COALESCE(tokens_used, 0) > 0 OR COALESCE(cost_usd, 0.0) > 0)
+            ORDER BY COALESCE(cost_usd, 0.0) DESC, COALESCE(tokens_used, 0) DESC, id DESC
+            LIMIT ?
+            """,
+            (str(user_id or "legacy"), max(1, int(limit))),
+        ).fetchall()
+
+    return {
+        "scope": "user",
+        "user_id": str(user_id or "legacy"),
+        "total_tokens_used": int((summary_row or {}).get("total_tokens_used") or 0),
+        "total_cost_usd": round(float((summary_row or {}).get("total_cost_usd") or 0.0), 8),
+        "billed_leads_count": int((summary_row or {}).get("billed_leads_count") or 0),
+        "top_leads": [dict(row) for row in top_rows],
+        "generated_at": utc_now_iso(),
+    }
 
 
 def ensure_supabase_runtime(context: str = "backend") -> dict[str, Any]:
@@ -6005,6 +6167,8 @@ def add_worker_audit_supabase(
     worker_id: Optional[int] = None,
     lead_id: Optional[int] = None,
     actor: str = "system",
+    tokens_used: Optional[int] = None,
+    cost_usd: Optional[float] = None,
 ) -> None:
     client = get_supabase_client(config_path)
     if client is None:
@@ -6016,12 +6180,70 @@ def add_worker_audit_supabase(
         "action": action.strip().lower(),
         "message": message.strip(),
         "actor": actor.strip() or "system",
+        "tokens_used": int(tokens_used) if tokens_used is not None else None,
+        "cost_usd": float(cost_usd) if cost_usd is not None else None,
         "created_at": utc_now_iso(),
     }
     try:
         client.table("worker_audit_log").insert(payload).execute()
     except Exception as exc:
         logging.warning("Supabase worker audit insert failed: %s", exc)
+
+
+def record_llm_usage_audit(
+    *,
+    tokens_used: int,
+    cost_usd: float,
+    action: str,
+    lead_id: Optional[int] = None,
+    user_id: Optional[str] = None,
+) -> None:
+    if int(tokens_used or 0) <= 0:
+        return
+
+    try:
+        with pgdb.connect(DEFAULT_DB_PATH) as conn:
+            if lead_id:
+                conn.execute(
+                    """
+                    UPDATE leads
+                    SET
+                        tokens_used = COALESCE(tokens_used, 0) + ?,
+                        cost_usd = COALESCE(cost_usd, 0.0) + ?
+                    WHERE id = ?
+                    """,
+                    (int(tokens_used), float(cost_usd), int(lead_id)),
+                )
+            conn.execute(
+                """
+                INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, tokens_used, cost_usd, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    None,
+                    int(lead_id) if lead_id else None,
+                    str(action or "llm_usage").strip().lower(),
+                    f"LLM usage recorded ({int(tokens_used)} tokens)",
+                    "system",
+                    int(tokens_used),
+                    float(cost_usd),
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        logging.debug("Local LLM usage audit write failed: %s", exc)
+
+    if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        add_worker_audit_supabase(
+            DEFAULT_CONFIG_PATH,
+            action=action,
+            message=f"LLM usage recorded ({int(tokens_used)} tokens)",
+            lead_id=lead_id,
+            actor="system",
+            tokens_used=int(tokens_used),
+            cost_usd=float(cost_usd),
+        )
 
 
 def fetch_blacklist_sets_supabase(config_path: Path, user_id: Optional[str] = None) -> tuple[set[str], set[str]]:
@@ -7455,6 +7677,12 @@ search_context: {normalized_search_context or 'none'}
                 {"role": "user", "content": user_prompt},
             ],
         )
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+        cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+        record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="niche_recommendation_llm_usage", user_id=user_id)
 
         content = response.choices[0].message.content or "{}"
         payload = json.loads(content)
@@ -10801,12 +11029,29 @@ def run_drip_dispatch_cycle(app: FastAPI) -> None:
         logging.info("Drip dispatch sent one lead. Next drip at %s.", next_at.isoformat())
 
 
-def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -> None:
-    """Run job only on the replica that acquires the advisory lock.
+def _ensure_scheduler_leader_lock_table(engine: Any) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS scheduler_job_locks (
+                    job_name TEXT PRIMARY KEY,
+                    lock_key INTEGER,
+                    process_status TEXT NOT NULL DEFAULT 'PENDING',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    locked_by TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP::text
+                )
+                """
+            )
+        )
 
-    Uses session-level PostgreSQL advisory locks so leadership is coordinated
-    across replicas without extra infrastructure.
-    """
+
+def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -> None:
+    """Run job only on the replica that row-locks a single scheduler_job_locks row."""
     job_id = str(job_name or f"job-{int(key_id)}").strip() or f"job-{int(key_id)}"
 
     try:
@@ -10821,36 +11066,109 @@ def run_once_as_leader(job_name: str, key_id: int, job_fn: Callable[[], None]) -
         job_fn()
         return
 
-    acquired = False
+    try:
+        _ensure_scheduler_leader_lock_table(engine)
+    except Exception as exc:
+        logging.warning("Scheduler lock table setup failed for job %s; skipping run: %s", job_id, exc)
+        return
+
     with engine.connect() as conn:
+        trans = conn.begin()
         try:
-            acquired = bool(conn.execute(text("SELECT pg_try_advisory_lock(:key_id)"), {"key_id": int(key_id)}).scalar())
-        except Exception as exc:
-            logging.warning("Leader lock acquire failed for job %s; skipping run: %s", job_id, exc)
-            return
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO scheduler_job_locks (job_name, lock_key, process_status, retry_count, updated_at)
+                    VALUES (:job_name, :lock_key, 'PENDING', 0, CURRENT_TIMESTAMP::text)
+                    ON CONFLICT (job_name) DO NOTHING
+                    """
+                ),
+                {"job_name": job_id, "lock_key": int(key_id)},
+            )
+            row = conn.execute(
+                text(
+                    """
+                    SELECT job_name
+                    FROM scheduler_job_locks
+                    WHERE job_name = :job_name
+                    FOR UPDATE SKIP LOCKED
+                    """
+                ),
+                {"job_name": job_id},
+            ).first()
+            if row is None:
+                trans.rollback()
+                with _LEADER_METRICS_LOCK:
+                    _LEADER_JOB_SKIP_COUNTS[job_id] = int(_LEADER_JOB_SKIP_COUNTS.get(job_id, 0)) + 1
+                    skip_count = _LEADER_JOB_SKIP_COUNTS[job_id]
+                logging.info("[LEADER-LOCK] SKIP: Job %s is already being handled by another instance.", job_id)
+                logging.info("[LEADER-LOCK] METRIC: Job %s skip count: %s", job_id, skip_count)
+                return
 
-        if not acquired:
+            conn.execute(
+                text(
+                    """
+                    UPDATE scheduler_job_locks
+                    SET
+                        process_status = 'PROCESSING',
+                        retry_count = COALESCE(retry_count, 0) + 1,
+                        last_error = NULL,
+                        locked_by = :locked_by,
+                        started_at = CURRENT_TIMESTAMP::text,
+                        updated_at = CURRENT_TIMESTAMP::text
+                    WHERE job_name = :job_name
+                    """
+                ),
+                {"job_name": job_id, "locked_by": _SCHEDULER_INSTANCE_ID},
+            )
+
             with _LEADER_METRICS_LOCK:
-                _LEADER_JOB_SKIP_COUNTS[job_id] = int(_LEADER_JOB_SKIP_COUNTS.get(job_id, 0)) + 1
-                skip_count = _LEADER_JOB_SKIP_COUNTS[job_id]
-            logging.info("[LEADER-LOCK] SKIP: Job %s is already being handled by another instance.", job_id)
-            logging.info("[LEADER-LOCK] METRIC: Job %s skip count: %s", job_id, skip_count)
-            return
+                _LEADER_JOB_RUN_COUNTS[job_id] = int(_LEADER_JOB_RUN_COUNTS.get(job_id, 0)) + 1
+                run_count = _LEADER_JOB_RUN_COUNTS[job_id]
+            logging.info("[LEADER-LOCK] SUCCESS: Instance %s is now leader for job %s.", _SCHEDULER_INSTANCE_ID, job_id)
+            logging.info("[LEADER-LOCK] METRIC: Job %s run count: %s", job_id, run_count)
 
-        with _LEADER_METRICS_LOCK:
-            _LEADER_JOB_RUN_COUNTS[job_id] = int(_LEADER_JOB_RUN_COUNTS.get(job_id, 0)) + 1
-            run_count = _LEADER_JOB_RUN_COUNTS[job_id]
-        logging.info("[LEADER-LOCK] SUCCESS: Instance %s is now leader for job %s.", _SCHEDULER_INSTANCE_ID, job_id)
-        logging.info("[LEADER-LOCK] METRIC: Job %s run count: %s", job_id, run_count)
-
-        try:
-            job_fn()
-        finally:
             try:
-                conn.execute(text("SELECT pg_advisory_unlock(:key_id)"), {"key_id": int(key_id)})
+                job_fn()
+                conn.execute(
+                    text(
+                        """
+                        UPDATE scheduler_job_locks
+                        SET
+                            process_status = 'COMPLETED',
+                            finished_at = CURRENT_TIMESTAMP::text,
+                            updated_at = CURRENT_TIMESTAMP::text
+                        WHERE job_name = :job_name
+                        """
+                    ),
+                    {"job_name": job_id},
+                )
+                trans.commit()
                 logging.info("[LEADER-LOCK] RELEASED: Instance %s finished job %s.", _SCHEDULER_INSTANCE_ID, job_id)
-            except Exception as exc:
-                logging.warning("Leader lock release failed for job %s: %s", job_id, exc)
+            except Exception as job_exc:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE scheduler_job_locks
+                        SET
+                            process_status = 'FAILED',
+                            last_error = :last_error,
+                            finished_at = CURRENT_TIMESTAMP::text,
+                            updated_at = CURRENT_TIMESTAMP::text
+                        WHERE job_name = :job_name
+                        """
+                    ),
+                    {"job_name": job_id, "last_error": str(job_exc)[:3000]},
+                )
+                trans.commit()
+                raise
+        except Exception:
+            try:
+                if trans.is_active:
+                    trans.rollback()
+            except Exception:
+                pass
+            raise
 
 
 def _leader_job(job_name: str, key_id: int, job_fn: Callable[[], None]) -> Callable[[], None]:
@@ -11349,6 +11667,12 @@ def _ai_prompt_llm_filters(prompt: str) -> Optional[dict[str, Any]]:
             max_tokens=220,
             temperature=0.1,
         )
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+        cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+        record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="ai_filter_json_llm_usage")
         raw = str(response.choices[0].message.content or "").strip()
         json_text = raw
         if "{" in raw and "}" in raw:
@@ -11448,6 +11772,12 @@ def _ai_prompt_sql_where_clause(prompt: str) -> Optional[str]:
             max_tokens=220,
             temperature=0.1,
         )
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+        cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+        record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="ai_filter_sql_llm_usage")
         return _extract_sql_condition_text(str(response.choices[0].message.content or ""))
     except Exception:
         return None
@@ -14263,6 +14593,12 @@ def create_app() -> FastAPI:
                     max_tokens=400,
                     temperature=0.3,
                 )
+                usage = getattr(response, "usage", None)
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+                cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+                record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="bulk_score_llm_usage")
                 raw_text = response.choices[0].message.content.strip()
                 import re as _re
                 json_match = _re.search(r'\{.*\}', raw_text, _re.DOTALL)
@@ -17463,6 +17799,18 @@ def create_app() -> FastAPI:
         maybe_sync_supabase(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH)
         return {"status": "created", "item": item}
 
+    @app.post("/api/mailer/templates/seed-defaults")
+    def seed_mailer_templates(payload: SavedTemplateSeedRequest, request: Request) -> dict:
+        user_id = require_current_user_id(request)
+        result = seed_saved_mail_templates(
+            DEFAULT_DB_PATH,
+            user_id=user_id,
+            templates=[item.model_dump() for item in payload.templates],
+        )
+        if int(result.get("inserted") or 0) > 0:
+            maybe_sync_supabase(DEFAULT_DB_PATH, DEFAULT_CONFIG_PATH)
+        return {"status": "seeded", **result}
+
     @app.post("/api/mailer/events")
     def create_mailer_event(payload: CampaignEventRequest, request: Request) -> dict:
         user_id = require_current_user_id(request)
@@ -17521,6 +17869,63 @@ def create_app() -> FastAPI:
     def get_mailer_stats(request: Request) -> dict:
         user_id = require_current_user_id(request)
         return get_mailer_campaign_stats(DEFAULT_DB_PATH, user_id=user_id)
+
+    @app.get("/api/reporting/ai-costs")
+    def get_ai_cost_reporting(request: Request, limit: int = Query(default=20, ge=1, le=200)) -> dict:
+        user_id = require_current_user_id(request)
+
+        if is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+            client = get_supabase_request_client(request, DEFAULT_CONFIG_PATH)
+            if client is None:
+                raise HTTPException(status_code=500, detail="Supabase not configured")
+
+            summary_rows = (
+                client.table("leads")
+                .select("tokens_used,cost_usd")
+                .eq("user_id", str(user_id))
+                .limit(50000)
+                .execute()
+                .data
+                or []
+            )
+            total_tokens_used = int(sum(int(row.get("tokens_used") or 0) for row in summary_rows))
+            total_cost_usd = round(sum(float(row.get("cost_usd") or 0.0) for row in summary_rows), 8)
+            billed_leads_count = int(
+                sum(
+                    1
+                    for row in summary_rows
+                    if float(row.get("cost_usd") or 0.0) > 0.0 or int(row.get("tokens_used") or 0) > 0
+                )
+            )
+
+            top_rows = (
+                client.table("leads")
+                .select("id,business_name,tokens_used,cost_usd,process_status,retry_count,last_error,status_updated_at")
+                .eq("user_id", str(user_id))
+                .order("cost_usd", desc=True)
+                .order("tokens_used", desc=True)
+                .limit(int(limit))
+                .execute()
+                .data
+                or []
+            )
+            top_rows = [
+                row
+                for row in top_rows
+                if float(row.get("cost_usd") or 0.0) > 0.0 or int(row.get("tokens_used") or 0) > 0
+            ]
+
+            return {
+                "scope": "user",
+                "user_id": str(user_id),
+                "total_tokens_used": total_tokens_used,
+                "total_cost_usd": total_cost_usd,
+                "billed_leads_count": billed_leads_count,
+                "top_leads": top_rows,
+                "generated_at": utc_now_iso(),
+            }
+
+        return get_ai_cost_dashboard(DEFAULT_DB_PATH, user_id=user_id, limit=int(limit))
 
     @app.post("/api/mailer/cold-outreach")
     def generate_cold_outreach(payload: ColdOutreachRequest, request: Request) -> dict:
@@ -17628,6 +18033,12 @@ def create_app() -> FastAPI:
                 max_tokens=700,
                 temperature=0.35,
             )
+            usage = getattr(response, "usage", None)
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or (prompt_tokens + completion_tokens))
+            cost_usd = round((prompt_tokens / 1000.0) * 0.00015 + (completion_tokens / 1000.0) * 0.0006, 8)
+            record_llm_usage_audit(tokens_used=total_tokens, cost_usd=cost_usd, action="deep_outreach_llm_usage", user_id=user_id)
             raw_text = str(response.choices[0].message.content or "").strip()
             json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
             parsed = json.loads(json_match.group() if json_match else raw_text)

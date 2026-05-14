@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS public.leads (
     open_count BIGINT DEFAULT 0,
     first_opened_at TEXT,
     last_opened_at TEXT,
+    process_status TEXT DEFAULT 'PENDING',
+    retry_count BIGINT DEFAULT 0,
+    last_error TEXT,
+    tokens_used BIGINT DEFAULT 0,
+    cost_usd DOUBLE PRECISION DEFAULT 0.0,
     UNIQUE(business_name, address)
 );
 
@@ -96,6 +101,8 @@ CREATE TABLE IF NOT EXISTS public.worker_audit_log (
     action TEXT NOT NULL,
     message TEXT,
     actor TEXT NOT NULL DEFAULT 'system',
+    tokens_used BIGINT,
+    cost_usd DOUBLE PRECISION,
     created_at TEXT NOT NULL
 );
 

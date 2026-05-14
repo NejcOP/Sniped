@@ -47,6 +47,11 @@ create table if not exists public.leads (
     bounce_reason text,
     phone_formatted text,
     phone_type text,
+    process_status text default 'PENDING',
+    retry_count bigint default 0,
+    last_error text,
+    tokens_used bigint default 0,
+    cost_usd double precision default 0.0,
     user_id text not null default 'legacy',
     unique (business_name, address)
 );
@@ -98,6 +103,8 @@ create table if not exists public.worker_audit_log (
     action text not null,
     message text,
     actor text not null default 'system',
+    tokens_used bigint,
+    cost_usd double precision,
     created_at text not null
 );
 

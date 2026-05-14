@@ -25,6 +25,8 @@ from backend.scraper.db import get_engine, init_db
 
 FORCED_AI_MODEL = "gpt-4o-mini"   # hardcoded — no other models allowed
 _AI_CALL_TIMEOUT = 15.0            # 15s timeout on every call
+LLM_COST_PER_1K_INPUT_USD = 0.00015
+LLM_COST_PER_1K_OUTPUT_USD = 0.0006
 FOLLOW_UP_DELAY_DAYS = 3
 ALLOWED_SENDING_STRATEGIES = {"round_robin", "random"}
 TEST_LEAD_BLOCKED_DOMAINS = {
@@ -271,6 +273,63 @@ class AIMailer:
     def _execute(self, statement, params: Optional[dict[str, Any]] = None) -> None:
         with get_engine().begin() as conn:
             conn.execute(statement, params or {})
+
+    @staticmethod
+    def _extract_llm_usage(response: Any) -> tuple[int, int, int]:
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+        return prompt_tokens, completion_tokens, total_tokens
+
+    @staticmethod
+    def _estimate_llm_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+        input_cost = (max(0, int(prompt_tokens)) / 1000.0) * LLM_COST_PER_1K_INPUT_USD
+        output_cost = (max(0, int(completion_tokens)) / 1000.0) * LLM_COST_PER_1K_OUTPUT_USD
+        return round(input_cost + output_cost, 8)
+
+    def _record_llm_usage(self, *, lead_id: Optional[int], total_tokens: int, cost_usd: float, action: str) -> None:
+        if total_tokens <= 0:
+            return
+        try:
+            with get_engine().begin() as conn:
+                if lead_id:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE leads
+                            SET
+                                tokens_used = COALESCE(tokens_used, 0) + :tokens_used,
+                                cost_usd = COALESCE(cost_usd, 0.0) + :cost_usd
+                            WHERE id = :lead_id
+                            """
+                        ),
+                        {
+                            "lead_id": int(lead_id),
+                            "tokens_used": int(total_tokens),
+                            "cost_usd": float(cost_usd),
+                        },
+                    )
+
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, tokens_used, cost_usd, created_at)
+                        VALUES (NULL, :lead_id, :action, :message, 'system', :tokens_used, :cost_usd, CURRENT_TIMESTAMP::text)
+                        """
+                    ),
+                    {
+                        "lead_id": int(lead_id) if lead_id else None,
+                        "action": str(action or "llm_usage").strip().lower(),
+                        "message": f"LLM usage recorded ({int(total_tokens)} tokens)",
+                        "tokens_used": int(total_tokens),
+                        "cost_usd": float(cost_usd),
+                    },
+                )
+        except Exception as exc:
+            logging.debug("Failed to persist mailer LLM usage audit for lead %s: %s", lead_id, exc)
 
     @staticmethod
     def _deserialize_json_payload(raw_value: Any) -> Any:
@@ -674,6 +733,13 @@ class AIMailer:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
             )
+            prompt_tokens, completion_tokens, total_tokens = self._extract_llm_usage(response)
+            self._record_llm_usage(
+                lead_id=None,
+                total_tokens=total_tokens,
+                cost_usd=self._estimate_llm_cost_usd(prompt_tokens, completion_tokens),
+                action="mailer_generate_cold_outreach",
+            )
             content = response.choices[0].message.content or "{}"
             parsed = json.loads(content)
             subject = str(parsed.get("subject", "")).strip()
@@ -851,6 +917,13 @@ class AIMailer:
                     },
                 ],
             )
+            prompt_tokens, completion_tokens, total_tokens = self._extract_llm_usage(response)
+            self._record_llm_usage(
+                lead_id=int(lead.get("id") or 0) if str(lead.get("id") or "").isdigit() else None,
+                total_tokens=total_tokens,
+                cost_usd=self._estimate_llm_cost_usd(prompt_tokens, completion_tokens),
+                action="mailer_infer_niche",
+            )
             content = response.choices[0].message.content or "{}"
             parsed = json.loads(content)
             niche = str(parsed.get("niche", "")).strip() or "business"
@@ -973,6 +1046,13 @@ class AIMailer:
                     },
                     {"role": "user", "content": "Return JSON with key 'text' only.\n\n" + clean_text},
                 ],
+            )
+            prompt_tokens, completion_tokens, total_tokens = self._extract_llm_usage(response)
+            self._record_llm_usage(
+                lead_id=None,
+                total_tokens=total_tokens,
+                cost_usd=self._estimate_llm_cost_usd(prompt_tokens, completion_tokens),
+                action="mailer_ensure_american_english",
             )
             content = response.choices[0].message.content or "{}"
             payload = json.loads(content)
@@ -1104,6 +1184,8 @@ class AIMailer:
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS first_opened_at text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_opened_at text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS competitive_hook text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS tokens_used bigint DEFAULT 0',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS cost_usd double precision DEFAULT 0.0',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS campaign_sequence_id bigint',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS campaign_step bigint DEFAULT 1',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ab_variant text',
@@ -1120,6 +1202,21 @@ class AIMailer:
                 created_at text NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS worker_audit_log (
+                id bigint generated by default as identity primary key,
+                worker_id bigint,
+                lead_id bigint,
+                action text NOT NULL,
+                message text,
+                actor text NOT NULL DEFAULT 'system',
+                tokens_used bigint,
+                cost_usd double precision,
+                created_at text NOT NULL
+            )
+            """,
+            'ALTER TABLE worker_audit_log ADD COLUMN IF NOT EXISTS tokens_used bigint',
+            'ALTER TABLE worker_audit_log ADD COLUMN IF NOT EXISTS cost_usd double precision',
             'CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_blacklist_kind_value ON lead_blacklist(kind, value)',
             'CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_open_tracking_token ON leads(open_tracking_token)',
             """

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 try:
     import dns.resolver as _dns_resolver  # dnspython
@@ -39,6 +39,8 @@ OPENAI_REQUEST_TIMEOUT_SECONDS = 15.0    # friendly timeout on every AI call
 OPENAI_429_MAX_RETRIES = 3
 OPENAI_429_BACKOFF_BASE_SECONDS = 1.0
 PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 15000
+LLM_COST_PER_1K_INPUT_USD = 0.00015
+LLM_COST_PER_1K_OUTPUT_USD = 0.0006
 
 # Tracking/analytics script URL fragments to block — saves 30-60% of page load time.
 _BLOCK_URL_FRAGMENTS = (
@@ -172,6 +174,64 @@ class LeadEnricher:
         with get_engine().begin() as conn:
             conn.execute(statement, params or {})
 
+    @staticmethod
+    def _extract_llm_usage(response: Any) -> tuple[int, int, int]:
+        usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+        return prompt_tokens, completion_tokens, total_tokens
+
+    @staticmethod
+    def _estimate_llm_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+        input_cost = (max(0, int(prompt_tokens)) / 1000.0) * LLM_COST_PER_1K_INPUT_USD
+        output_cost = (max(0, int(completion_tokens)) / 1000.0) * LLM_COST_PER_1K_OUTPUT_USD
+        return round(input_cost + output_cost, 8)
+
+    def _record_llm_usage(self, *, lead_id: Optional[int], total_tokens: int, cost_usd: float, action: str) -> None:
+        if total_tokens <= 0:
+            return
+        try:
+            with get_engine().begin() as conn:
+                if lead_id:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE leads
+                            SET
+                                tokens_used = COALESCE(tokens_used, 0) + :tokens_used,
+                                cost_usd = COALESCE(cost_usd, 0.0) + :cost_usd
+                            WHERE id = :lead_id AND user_id = :user_id
+                            """
+                        ),
+                        {
+                            "lead_id": int(lead_id),
+                            "user_id": str(self.user_id or "legacy"),
+                            "tokens_used": int(total_tokens),
+                            "cost_usd": float(cost_usd),
+                        },
+                    )
+
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO worker_audit_log (worker_id, lead_id, action, message, actor, tokens_used, cost_usd, created_at)
+                        VALUES (NULL, :lead_id, :action, :message, 'system', :tokens_used, :cost_usd, CURRENT_TIMESTAMP::text)
+                        """
+                    ),
+                    {
+                        "lead_id": int(lead_id) if lead_id else None,
+                        "action": str(action or "llm_usage").strip().lower(),
+                        "message": f"LLM usage recorded ({int(total_tokens)} tokens)",
+                        "tokens_used": int(total_tokens),
+                        "cost_usd": float(cost_usd),
+                    },
+                )
+        except Exception as exc:
+            logging.debug("Failed to persist LLM usage audit for lead %s: %s", lead_id, exc)
+
     def run(
         self,
         limit: Optional[int] = None,
@@ -242,6 +302,9 @@ class LeadEnricher:
                 for lead in leads:
                     try:
                         self._mark_lead_processing(int(lead["id"]))
+                        if not self.check_idempotency(int(lead["id"])):
+                            _emit_progress(processed, with_email, str(lead.get("business_name") or "").strip() or None, "completed_lead")
+                            continue
                         lead_name = str(lead.get("business_name") or "").strip() or f"lead-{lead.get('id')}"
                         _emit_progress(processed, with_email, lead_name, "checking_website")
                         email = None
@@ -319,6 +382,7 @@ class LeadEnricher:
 
                         _emit_progress(processed, with_email, lead_name, "analyzing_ai")
                         ai_score, ai_summary, competitive_hook, deep_intelligence = self._score_lead_priority(
+                            lead_id=int(lead["id"]),
                             business_name=lead["business_name"],
                             website_url=website_url,
                             maps_url=lead.get("maps_url"),
@@ -394,11 +458,11 @@ class LeadEnricher:
                                 lead.get("id"),
                                 save_exc,
                             )
-                            self._mark_lead_failed(int(lead["id"]))
+                            self._mark_lead_failed(int(lead["id"]), error_message=str(save_exc))
                             raise
 
                         if int(updated_rows or 0) <= 0:
-                            self._mark_lead_failed(int(lead["id"]))
+                            self._mark_lead_failed(int(lead["id"]), error_message="Persisted 0 rows after enrichment")
                             logging.warning(
                                 "Lead %s (%s) computed enrichment but persisted 0 rows; marked failed.",
                                 lead_name,
@@ -413,7 +477,7 @@ class LeadEnricher:
                         _emit_progress(processed, with_email, lead_name, "completed_lead")
                     except Exception as exc:
                         lead_name = str(lead["business_name"] or "").strip() or f"lead-{lead['id']}"
-                        self._mark_lead_failed(int(lead["id"]))
+                        self._mark_lead_failed(int(lead["id"]), error_message=str(exc))
                         logging.exception("Skipping lead after enrichment error: %s (%s)", lead_name, exc)
 
                     _emit_progress(processed, with_email, str(lead["business_name"] or "").strip() or None, "enriching")
@@ -720,14 +784,88 @@ class LeadEnricher:
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_formatted text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_type text',
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS enrichment_status text DEFAULT 'pending'",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS process_status text DEFAULT 'PENDING'",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS retry_count bigint DEFAULT 0",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_error text",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tokens_used bigint DEFAULT 0",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS cost_usd double precision DEFAULT 0.0",
         ]
         for statement in statements:
             self._execute(text(statement))
+
+    def check_idempotency(self, lead_id: int) -> bool:
+        row = self._fetchone(
+            text(
+                """
+                SELECT COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') AS process_status
+                FROM leads
+                WHERE id = :lead_id AND user_id = :user_id
+                LIMIT 1
+                """
+            ),
+            {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
+        )
+        current_status = str((row or {}).get("process_status") or "PENDING").strip().upper()
+        if current_status == "COMPLETED":
+            logging.info("Idempotency guard: lead %s already COMPLETED, skipping AI calls.", int(lead_id))
+            return False
+        return True
 
     def _fetch_leads_for_enrichment(self, limit: Optional[int] = None, lead_ids: Optional[list[int]] = None) -> List[dict[str, Any]]:
         scoped_user_id = str(self.user_id or "").strip() or "legacy"
         normalized_ids = [int(x) for x in (lead_ids or []) if str(x).strip().isdigit()]
         params: dict[str, Any] = {}
+        engine = get_engine()
+        dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+
+        if normalized_ids and "postgres" in dialect:
+            statement = text(
+                """
+                WITH candidate AS (
+                    SELECT id
+                    FROM leads
+                    WHERE user_id = :user_id
+                      AND id IN :lead_ids
+                      AND COALESCE(LOWER(enrichment_status), 'pending') != 'completed'
+                      AND COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') IN ('PENDING', 'FAILED')
+                    ORDER BY id ASC
+                    FOR UPDATE SKIP LOCKED
+                ), claimed AS (
+                    UPDATE leads AS l
+                    SET
+                        process_status = 'PROCESSING',
+                        retry_count = COALESCE(l.retry_count, 0) + 1,
+                        last_error = NULL,
+                        enrichment_status = 'processing',
+                        status = 'processing',
+                        status_updated_at = CURRENT_TIMESTAMP::text
+                    FROM candidate c
+                    WHERE l.id = c.id
+                    RETURNING l.id
+                )
+                SELECT
+                    l.id,
+                    l.business_name,
+                    l.website_url,
+                    l.maps_url,
+                    l.email,
+                    l.rating,
+                    l.review_count,
+                    l.google_claimed,
+                    l.linkedin_url,
+                    l.instagram_url,
+                    l.facebook_url,
+                    l.twitter_url,
+                    l.youtube_url,
+                    l.address,
+                    l.search_keyword,
+                    l.phone_number
+                FROM leads l
+                JOIN claimed c ON c.id = l.id
+                ORDER BY l.id ASC
+                """
+            ).bindparams(bindparam("lead_ids", expanding=True))
+            return self._fetchall(statement, {"user_id": scoped_user_id, "lead_ids": normalized_ids[:500]})
 
         if normalized_ids:
             query = """
@@ -768,12 +906,77 @@ class LeadEnricher:
                 params["limit"] = int(limit)
 
             rows = self._fetchall(text(query), params)
+            for row in rows:
+                self._mark_lead_processing(int(row["id"]))
             logging.info(
                 "Lead-id targeted enrichment query matched %s/%s rows",
                 len(rows),
                 len(normalized_ids),
             )
             return rows
+
+        if "postgres" in dialect:
+            limit_clause = " LIMIT :limit" if limit and limit > 0 else ""
+            params = {"user_id": scoped_user_id}
+            if limit and limit > 0:
+                params["limit"] = int(limit)
+            return self._fetchall(
+                text(
+                    f"""
+                    WITH candidate AS (
+                        SELECT id
+                        FROM leads
+                        WHERE
+                            (
+                                LOWER(COALESCE(status, '')) = 'scraped'
+                                OR (
+                                    (email IS NULL OR email = '')
+                                    AND enriched_at IS NULL
+                                )
+                            )
+                            AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
+                            AND COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') IN ('PENDING', 'FAILED')
+                            AND user_id = :user_id
+                        ORDER BY id ASC
+                        FOR UPDATE SKIP LOCKED
+                        {limit_clause}
+                    ), claimed AS (
+                        UPDATE leads AS l
+                        SET
+                            process_status = 'PROCESSING',
+                            retry_count = COALESCE(l.retry_count, 0) + 1,
+                            last_error = NULL,
+                            enrichment_status = 'processing',
+                            status = 'processing',
+                            status_updated_at = CURRENT_TIMESTAMP::text
+                        FROM candidate c
+                        WHERE l.id = c.id
+                        RETURNING l.id
+                    )
+                    SELECT
+                        l.id,
+                        l.business_name,
+                        l.website_url,
+                        l.maps_url,
+                        l.email,
+                        l.rating,
+                        l.review_count,
+                        l.google_claimed,
+                        l.linkedin_url,
+                        l.instagram_url,
+                        l.facebook_url,
+                        l.twitter_url,
+                        l.youtube_url,
+                        l.address,
+                        l.search_keyword,
+                        l.phone_number
+                    FROM leads l
+                    JOIN claimed c ON c.id = l.id
+                    ORDER BY l.id ASC
+                    """
+                ),
+                params,
+            )
 
         query = """
                 SELECT
@@ -813,7 +1016,10 @@ class LeadEnricher:
             query += " LIMIT :limit"
             params["limit"] = int(limit)
 
-        return self._fetchall(text(query), params)
+        rows = self._fetchall(text(query), params)
+        for row in rows:
+            self._mark_lead_processing(int(row["id"]))
+        return rows
 
     def _mark_lead_processing(self, lead_id: int) -> None:
         self._execute(
@@ -821,6 +1027,9 @@ class LeadEnricher:
                 """
                 UPDATE leads
                 SET
+                    process_status = 'PROCESSING',
+                    retry_count = COALESCE(retry_count, 0) + 1,
+                    last_error = NULL,
                     enrichment_status = 'processing',
                     status = 'processing',
                     status_updated_at = CURRENT_TIMESTAMP::text
@@ -830,19 +1039,25 @@ class LeadEnricher:
             {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
         )
 
-    def _mark_lead_failed(self, lead_id: int) -> None:
+    def _mark_lead_failed(self, lead_id: int, error_message: Optional[str] = None) -> None:
         self._execute(
             text(
                 """
                 UPDATE leads
                 SET
+                    process_status = 'FAILED',
+                    last_error = :last_error,
                     enrichment_status = 'failed',
                     status = 'failed',
                     status_updated_at = CURRENT_TIMESTAMP::text
                 WHERE id = :lead_id AND user_id = :user_id
                 """
             ),
-            {"lead_id": int(lead_id), "user_id": str(self.user_id or "legacy")},
+            {
+                "lead_id": int(lead_id),
+                "user_id": str(self.user_id or "legacy"),
+                "last_error": str(error_message or "")[:3000] if error_message else None,
+            },
         )
 
     def _mark_lead_failed_no_url(self, lead_id: int) -> None:
@@ -851,6 +1066,8 @@ class LeadEnricher:
                 """
                 UPDATE leads
                 SET
+                    process_status = 'FAILED',
+                    last_error = 'Missing or invalid website URL',
                     enrichment_status = 'failed_no_url',
                     status = 'failed enrichment',
                     status_updated_at = CURRENT_TIMESTAMP::text
@@ -946,6 +1163,8 @@ class LeadEnricher:
                         ai_description = :ai_description,
                         client_tier = :client_tier,
                         enrichment_data = COALESCE(:enrichment_data, enrichment_data),
+                        process_status = 'COMPLETED',
+                        last_error = NULL,
                         enrichment_status = 'completed',
                         status = :new_status,
                         status_updated_at = CURRENT_TIMESTAMP::text,
@@ -2081,6 +2300,7 @@ class LeadEnricher:
         website_signals: Optional[dict[str, Any]] = None,
         social_profiles: Optional[dict[str, str]] = None,
         social_metrics: Optional[dict[str, dict[str, Any]]] = None,
+        lead_id: Optional[int] = None,
     ) -> tuple[int, str, str, dict]:
         """Return (score 1-10, ai_summary reason, competitive_hook string, deep_intelligence payload)."""
         if not website_url or str(website_url).strip().lower() == "none":
@@ -2260,6 +2480,7 @@ class LeadEnricher:
                     )
                     qual_parsed = asyncio.run(
                         self._score_lead_priority_async(
+                            lead_id=lead_id,
                             system_prompt=qual_system,
                             payload=qual_user,
                             temperature=0.1,
@@ -2351,6 +2572,7 @@ class LeadEnricher:
             }
             parsed = asyncio.run(
                 self._score_lead_priority_async(
+                    lead_id=lead_id,
                     system_prompt=system_prompt,
                     payload=payload,
                     temperature=factory.get_temperature("enrichment"),
@@ -2419,6 +2641,7 @@ class LeadEnricher:
                     )
                     fit_parsed = asyncio.run(
                         self._score_lead_priority_async(
+                            lead_id=lead_id,
                             system_prompt=fit_system,
                             payload=fit_user,
                             temperature=0.2,
@@ -2542,6 +2765,7 @@ class LeadEnricher:
         system_prompt: str,
         payload: dict | str,
         temperature: float,
+        lead_id: Optional[int] = None,
     ) -> dict:
         user_content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         request_payload = {
@@ -2559,6 +2783,13 @@ class LeadEnricher:
                 response = await self.ai_client.chat.completions.create(  # type: ignore[union-attr]
                     **request_payload,
                     timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                )
+                prompt_tokens, completion_tokens, total_tokens = self._extract_llm_usage(response)
+                self._record_llm_usage(
+                    lead_id=lead_id,
+                    total_tokens=total_tokens,
+                    cost_usd=self._estimate_llm_cost_usd(prompt_tokens, completion_tokens),
+                    action="enrichment_llm_usage",
                 )
                 content = response.choices[0].message.content or "{}"
                 parsed = json.loads(content or "{}")
