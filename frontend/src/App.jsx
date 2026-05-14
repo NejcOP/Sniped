@@ -11085,28 +11085,39 @@ function App({ initialTab = 'leads' }) {
                       This preview updates live as you edit the draft and shows how placeholders resolve for a sample lead.
                     </p>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/[0.06] px-3 py-2">
-                        <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
-                        <p className="mt-1 text-sm font-semibold text-cyan-100">Live draft</p>
-                        <div className="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950/60 px-2.5 py-2">
+                      <div className="rounded-xl border border-cyan-500/25 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),rgba(15,23,42,0.92))] px-3 py-2 shadow-[0_18px_36px_rgba(8,15,32,0.24)]">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
+                          <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
+                            Live Manus draft
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm font-semibold text-cyan-50">Ready-to-send copy</p>
+                        <div className="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950/65 px-2.5 py-2.5">
                           <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</p>
-                          <p className="mt-1 text-[12px] leading-6 text-slate-200">
+                          <p className="mt-1 text-[12px] leading-6 text-slate-100">
                             {mailPreviewRaw.subject ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.subject) : 'Select a template to preview the draft.'}
                           </p>
-                          <p className="mt-2 text-[11px] uppercase tracking-[0.12em] text-slate-500">Body</p>
-                          <pre className="mt-1 max-h-[84px] overflow-auto whitespace-pre-wrap break-words font-sans text-[12px] leading-6 text-slate-200">
+                          <p className="mt-3 text-[11px] uppercase tracking-[0.12em] text-slate-500">Body</p>
+                          <pre className="mt-1 max-h-[94px] overflow-auto whitespace-pre-wrap break-words font-sans text-[12px] leading-6 text-slate-100">
                             {mailPreviewRaw.body ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.body) : 'Draft body will appear here.'}
                           </pre>
                         </div>
                       </div>
-                      <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2">
+                      <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 shadow-[0_18px_36px_rgba(91,33,182,0.12)]">
                         <p className="text-[11px] uppercase tracking-[0.12em] text-violet-300">Tone of Voice</p>
-                        <p className="mt-1 text-sm font-semibold text-white">{toneProfile.dominantLabel} · {toneProfile.dominantScore}%</p>
-                        <div className="mail-tone-bars mt-2">
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-white">{toneProfile.dominantLabel} - {toneProfile.dominantScore}%</p>
+                          <span className="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-100">
+                            Ideal Manus fit
+                          </span>
+                        </div>
+                        <div className="mail-tone-bars mt-3">
                           {Object.entries(toneProfile.scores).map(([label, score]) => (
                             <div key={label} className="tone-row">
                               <span>{label}</span>
-                              <div className="tone-track"><div className="tone-fill" style={{ width: `${score}%` }} /></div>
+                              <div className="tone-track"><div className={`tone-fill tone-fill-${String(label).toLowerCase()}`} style={{ width: `${score}%` }} /></div>
+                              <span className="tone-score">{score}%</span>
                             </div>
                           ))}
                         </div>

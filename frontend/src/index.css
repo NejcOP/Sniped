@@ -768,7 +768,7 @@
 
   .tone-row {
     display: grid;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto 1fr auto;
     gap: 0.45rem;
     align-items: center;
     font-size: 0.66rem;
@@ -791,6 +791,29 @@
     background: linear-gradient(90deg, #4f46e5, #7c3aed);
     box-shadow: 0 0 10px rgba(124, 58, 237, 0.55);
     transition: width 0.5s ease;
+  }
+
+  .tone-fill-professional {
+    background: linear-gradient(90deg, #06b6d4, #2563eb);
+    box-shadow: 0 0 10px rgba(37, 99, 235, 0.48);
+  }
+
+  .tone-fill-helpful {
+    background: linear-gradient(90deg, #10b981, #14b8a6);
+    box-shadow: 0 0 10px rgba(20, 184, 166, 0.42);
+  }
+
+  .tone-fill-urgent {
+    background: linear-gradient(90deg, #f59e0b, #ef4444);
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.38);
+  }
+
+  .tone-score {
+    min-width: 2.5rem;
+    text-align: right;
+    font-size: 0.62rem;
+    font-weight: 700;
+    color: #ddd6fe;
   }
 
   .preview-skeleton {
