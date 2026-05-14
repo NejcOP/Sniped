@@ -7,6 +7,7 @@ import {
   Bell,
   Briefcase,
   Building2,
+  Check,
   CheckCircle2,
   ChevronDown,
   Clipboard,
@@ -1458,6 +1459,62 @@ function scoreHeatTone(score) {
 function normalizeTierValue(tier) {
   const t = String(tier || '').trim().toLowerCase()
   return t === 'premium_ads' ? 'premium_ads' : 'standard'
+}
+
+function deriveToneProfile(subject, body) {
+  const text = `${subject || ''} ${body || ''}`.toLowerCase()
+  const urgentHits = ['urgent', 'immediately', 'losing', 'penalized', 'quick question'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+  const helpfulHits = ['help', 'show', 'walkthrough', 'plan', 'open to', 'no pressure'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+  const professionalHits = ['strategy', 'business', 'local', 'conversion', 'google'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
+
+  const scores = {
+    Professional: Math.min(100, 30 + professionalHits * 14),
+    Urgent: Math.min(100, 20 + urgentHits * 18),
+    Helpful: Math.min(100, 25 + helpfulHits * 15),
+  }
+
+  const dominant = Object.entries(scores).sort((a, b) => b[1] - a[1])[0] || ['Professional', 0]
+  return {
+    dominantLabel: dominant[0],
+    dominantScore: dominant[1],
+    scores,
+  }
+}
+
+function deriveManusTemplateToneProfile(templateKey) {
+  const key = String(templateKey || '').trim().toLowerCase()
+  const presets = {
+    ghost: { Professional: 90, Helpful: 82, Urgent: 44 },
+    golden: { Professional: 91, Helpful: 80, Urgent: 48 },
+    competitor: { Professional: 90, Helpful: 78, Urgent: 46 },
+    speed: { Professional: 89, Helpful: 84, Urgent: 43 },
+  }
+  const scores = presets[key]
+  if (!scores) return null
+  return {
+    dominantLabel: 'Professional',
+    dominantScore: Number(scores.Professional || 90),
+    scores,
+  }
+}
+
+function renderTemplateWithPlaceholderHighlights(text) {
+  if (!text) return 'No content'
+  const parts = text.split(/(\{[^}]+\})/g)
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.match(/^\{[^}]+\}$/)) {
+          return (
+            <span key={i} className="rounded px-1 bg-cyan-500/10 text-cyan-400 font-medium">
+              {part}
+            </span>
+          )
+        }
+        return <span key={i}>{part}</span>
+      })}
+    </>
+  )
 }
 
 const qualifiedLeadStatuses = new Set([
@@ -7678,6 +7735,15 @@ function App({ initialTab = 'leads' }) {
     [selectedUserNiche],
   )
 
+  const toneProfile = useMemo(() => {
+    const hasManusTemplate = Boolean(resolveSnipedTemplateForSelection(selectedUserNiche, activeLiveMailTemplateKey))
+    if (hasManusTemplate) {
+      const preset = deriveManusTemplateToneProfile(activeLiveMailTemplateKey)
+      if (preset) return preset
+    }
+    return deriveToneProfile(mailPreview.subject, mailPreview.body)
+  }, [activeLiveMailTemplateKey, mailPreview.subject, mailPreview.body, selectedUserNiche])
+
   const applySnipedTemplateSelection = useCallback((templateKey) => {
     const selectedCard = liveMailTemplateCards.find((card) => card.key === templateKey) || liveMailTemplateCards[0]
     if (!selectedCard) return
@@ -11008,7 +11074,8 @@ function App({ initialTab = 'leads' }) {
                   )}
                 </div>
 
-                <div className="mt-4 space-y-4">
+                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                  <div className="space-y-4">
                     <label className="field-label">
                       <span className="mb-1.5 block">Optional Mail Footer</span>
                       <textarea
@@ -11030,6 +11097,63 @@ function App({ initialTab = 'leads' }) {
                         ))}
                       </div>
                     </div>
+                  </div>
+
+                  <div className="border-l border-cyan-500/20 bg-slate-900/40 p-4">
+                    <div className="space-y-4">
+                      {toneProfile && (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <Shield className="h-4 w-4 text-cyan-400" />
+                            <p className="text-sm font-semibold text-white">Professional Alignment: {toneProfile.dominantScore}%</p>
+                            {toneProfile.dominantScore >= 85 && (
+                              <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-1 text-xs font-semibold text-emerald-100">
+                                <Check className="h-3 w-3" />
+                                Ideal Manus Fit
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="space-y-2">
+                            {Object.entries(toneProfile.scores).map(([label, score]) => (
+                              <div key={label} className="tone-row text-xs">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-400">{label}</span>
+                                  <span className="font-medium text-slate-200">{score}%</span>
+                                </div>
+                                <div className="mt-1 h-1.5 rounded-full bg-slate-700/50">
+                                  <div
+                                    className={`tone-fill h-full rounded-full transition-all duration-500 ${
+                                      label === 'Professional' ? 'bg-cyan-500' :
+                                      label === 'Helpful' ? 'bg-emerald-500' :
+                                      'bg-amber-500'
+                                    }`}
+                                    style={{ width: `${score}%` }}
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      <div className="border-t border-slate-700/50 pt-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Live Preview</p>
+                        <div className="mt-3 space-y-2 rounded-lg bg-slate-950/50 p-3 text-sm leading-6 text-slate-300">
+                          <div>
+                            <span className="text-[11px] uppercase tracking-[0.1em] text-slate-500">Subject:</span>
+                            <p className="mt-1 text-white">{renderTemplateWithPlaceholderHighlights(mailPreview.subject || 'Subject preview')}</p>
+                          </div>
+                          <div className="border-t border-slate-700/50 pt-2">
+                            <span className="text-[11px] uppercase tracking-[0.1em] text-slate-500">Body Preview:</span>
+                            <pre className="mt-1 max-h-[120px] overflow-auto whitespace-pre-wrap break-words font-sans text-[12px] text-slate-300">
+                              {renderTemplateWithPlaceholderHighlights(mailPreview.body || 'Body preview')}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">
