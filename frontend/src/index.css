@@ -790,7 +790,7 @@
     border-radius: 9999px;
     background: linear-gradient(90deg, #4f46e5, #7c3aed);
     box-shadow: 0 0 10px rgba(124, 58, 237, 0.55);
-    transition: width 0.32s ease;
+    transition: width 0.5s ease;
   }
 
   .preview-skeleton {

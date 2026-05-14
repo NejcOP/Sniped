@@ -1455,6 +1455,43 @@ function deriveToneProfile(subject, body) {
   }
 }
 
+function deriveManusTemplateToneProfile(templateKey) {
+  const key = String(templateKey || '').trim().toLowerCase()
+  const presets = {
+    ghost: { Professional: 90, Helpful: 82, Urgent: 44 },
+    golden: { Professional: 91, Helpful: 80, Urgent: 48 },
+    competitor: { Professional: 90, Helpful: 78, Urgent: 46 },
+    speed: { Professional: 89, Helpful: 84, Urgent: 43 },
+  }
+  const scores = presets[key]
+  if (!scores) return null
+  return {
+    dominantLabel: 'Professional',
+    dominantScore: Number(scores.Professional || 90),
+    scores,
+  }
+}
+
+function renderTemplateWithPlaceholderHighlights(text) {
+  const value = String(text || '')
+  if (!value) return null
+  const placeholderRegex = /(\{BusinessName\}|\{City\}|\{Niche\}|\{YourName\})/g
+  return value.split(placeholderRegex).map((part, idx) => {
+    const isPlaceholder = templatePlaceholderTokens.includes(part)
+    if (!isPlaceholder) {
+      return <span key={`preview-plain-${idx}`}>{part}</span>
+    }
+    return (
+      <span
+        key={`preview-ph-${idx}`}
+        className="rounded bg-cyan-500/15 px-1 py-0.5 font-semibold text-cyan-200 ring-1 ring-cyan-400/35"
+      >
+        {part}
+      </span>
+    )
+  })
+}
+
 function buildSparkPoints(values, width = 160, height = 44) {
   const safe = Array.isArray(values) && values.length ? values : [0]
   const max = Math.max(...safe, 1)
@@ -2826,6 +2863,7 @@ function App({ initialTab = 'leads' }) {
   const [refreshingDashboard, setRefreshingDashboard] = useState(false)
   const [lastManualRefreshAt, setLastManualRefreshAt] = useState(null)
   const [mailPreview, setMailPreview] = useState({ subject: '', body: '', generatedAt: null })
+  const [mailPreviewRaw, setMailPreviewRaw] = useState({ subject: '', body: '' })
   const [leadEmailDraft, setLeadEmailDraft] = useState({ leadId: null, templateKey: 'ghost', subject: '', body: '' })
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
@@ -7635,10 +7673,14 @@ function App({ initialTab = 'leads' }) {
     if (revenueProgress >= 25) return '\u26A1 Gaining momentum'
     return '\uD83C\uDF31 Getting started'
   }, [revenueProgress])
-  const toneProfile = useMemo(
-    () => deriveToneProfile(mailPreview.subject, mailPreview.body),
-    [mailPreview.subject, mailPreview.body],
-  )
+  const toneProfile = useMemo(() => {
+    const hasManusTemplate = Boolean(resolveSnipedTemplateForSelection(selectedUserNiche, activeLiveMailTemplateKey))
+    if (hasManusTemplate) {
+      const preset = deriveManusTemplateToneProfile(activeLiveMailTemplateKey)
+      if (preset) return preset
+    }
+    return deriveToneProfile(mailPreview.subject, mailPreview.body)
+  }, [activeLiveMailTemplateKey, mailPreview.subject, mailPreview.body, selectedUserNiche])
   const previewSenderName = currentUserName || configForm.smtp_accounts?.[0]?.from_name || currentUserEmail || 'Your sender name'
   const previewSenderEmail = currentUserEmail || configForm.smtp_accounts?.[0]?.email || 'sender@domain.com'
   const userInitial = String(displayName || currentUserEmail || 'U').trim().charAt(0).toUpperCase() || 'U'
@@ -7767,6 +7809,10 @@ function App({ initialTab = 'leads' }) {
 
     const signature = String(configForm.mail_signature || '').trim()
     const payloadBody = signature ? `${rawBody}\n\n${signature}` : rawBody
+    setMailPreviewRaw({
+      subject: rawSubject,
+      body: payloadBody,
+    })
 
     setMailPreview({
       subject: replaceTemplatePlaceholders(rawSubject, sampleVars),
@@ -11039,9 +11085,19 @@ function App({ initialTab = 'leads' }) {
                       This preview updates live as you edit the draft and shows how placeholders resolve for a sample lead.
                     </p>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+                      <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/[0.06] px-3 py-2">
                         <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
-                        <p className="mt-1 text-sm text-slate-300">Live draft</p>
+                        <p className="mt-1 text-sm font-semibold text-cyan-100">Live draft</p>
+                        <div className="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950/60 px-2.5 py-2">
+                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</p>
+                          <p className="mt-1 text-[12px] leading-6 text-slate-200">
+                            {mailPreviewRaw.subject ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.subject) : 'Select a template to preview the draft.'}
+                          </p>
+                          <p className="mt-2 text-[11px] uppercase tracking-[0.12em] text-slate-500">Body</p>
+                          <pre className="mt-1 max-h-[84px] overflow-auto whitespace-pre-wrap break-words font-sans text-[12px] leading-6 text-slate-200">
+                            {mailPreviewRaw.body ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.body) : 'Draft body will appear here.'}
+                          </pre>
+                        </div>
                       </div>
                       <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2">
                         <p className="text-[11px] uppercase tracking-[0.12em] text-violet-300">Tone of Voice</p>
