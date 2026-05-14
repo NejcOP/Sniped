@@ -11109,8 +11109,7 @@ function App({ initialTab = 'leads' }) {
                     </p>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
                       <div className="rounded-xl border border-cyan-500/25 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),rgba(15,23,42,0.92))] px-3 py-2 shadow-[0_18px_36px_rgba(8,15,32,0.24)]">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Generated</p>
+                        <div className="flex items-center justify-end gap-3">
                           <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
                             Live Manus draft
                           </span>
