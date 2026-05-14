@@ -11114,7 +11114,6 @@ function App({ initialTab = 'leads' }) {
                             Live Manus draft
                           </span>
                         </div>
-                        <p className="mt-1 text-sm font-semibold text-cyan-50">Ready-to-send copy</p>
                         <div className="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950/65 px-2.5 py-2.5">
                           <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</p>
                           <p className="mt-1 text-[12px] leading-6 text-slate-100">
