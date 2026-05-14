@@ -1435,62 +1435,6 @@ function extractCommunicationBody(item) {
     .trim()
 }
 
-function deriveToneProfile(subject, body) {
-  const text = `${subject || ''} ${body || ''}`.toLowerCase()
-  const urgentHits = ['urgent', 'immediately', 'losing', 'penalized', 'quick question'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
-  const helpfulHits = ['help', 'show', 'walkthrough', 'plan', 'open to', 'no pressure'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
-  const professionalHits = ['strategy', 'business', 'local', 'conversion', 'google'].reduce((sum, token) => sum + (text.includes(token) ? 1 : 0), 0)
-
-  const scores = {
-    Professional: Math.min(100, 30 + professionalHits * 14),
-    Urgent: Math.min(100, 20 + urgentHits * 18),
-    Helpful: Math.min(100, 25 + helpfulHits * 15),
-  }
-
-  const dominant = Object.entries(scores).sort((a, b) => b[1] - a[1])[0] || ['Professional', 0]
-  return {
-    dominantLabel: dominant[0],
-    dominantScore: dominant[1],
-    scores,
-  }
-}
-
-function deriveManusTemplateToneProfile(templateKey) {
-  const key = String(templateKey || '').trim().toLowerCase()
-  const presets = {
-    ghost: { Professional: 90, Helpful: 82, Urgent: 44 },
-    golden: { Professional: 91, Helpful: 80, Urgent: 48 },
-    competitor: { Professional: 90, Helpful: 78, Urgent: 46 },
-    speed: { Professional: 89, Helpful: 84, Urgent: 43 },
-  }
-  const scores = presets[key]
-  if (!scores) return null
-  return {
-    dominantLabel: 'Professional',
-    dominantScore: Number(scores.Professional || 90),
-    scores,
-  }
-}
-
-function renderTemplateWithPlaceholderHighlights(text) {
-  const value = String(text || '')
-  if (!value) return null
-  const placeholderRegex = /(\{BusinessName\}|\{City\}|\{Niche\}|\{YourName\})/g
-  return value.split(placeholderRegex).map((part, idx) => {
-    const isPlaceholder = templatePlaceholderTokens.includes(part)
-    if (!isPlaceholder) {
-      return <span key={`preview-plain-${idx}`}>{part}</span>
-    }
-    return (
-      <span
-        key={`preview-ph-${idx}`}
-        className="rounded bg-cyan-500/15 px-1 py-0.5 font-semibold text-cyan-200 ring-1 ring-cyan-400/35"
-      >
-        {part}
-      </span>
-    )
-  })
-}
 
 function buildSparkPoints(values, width = 160, height = 44) {
   const safe = Array.isArray(values) && values.length ? values : [0]
@@ -2863,7 +2807,6 @@ function App({ initialTab = 'leads' }) {
   const [refreshingDashboard, setRefreshingDashboard] = useState(false)
   const [lastManualRefreshAt, setLastManualRefreshAt] = useState(null)
   const [mailPreview, setMailPreview] = useState({ subject: '', body: '', generatedAt: null })
-  const [mailPreviewRaw, setMailPreviewRaw] = useState({ subject: '', body: '' })
   const [leadEmailDraft, setLeadEmailDraft] = useState({ leadId: null, templateKey: 'ghost', subject: '', body: '' })
   const [emailPreviewLead, setEmailPreviewLead] = useState(null)
   const [aiSummaryPreviewLead, setAiSummaryPreviewLead] = useState(null)
@@ -7673,14 +7616,6 @@ function App({ initialTab = 'leads' }) {
     if (revenueProgress >= 25) return '\u26A1 Gaining momentum'
     return '\uD83C\uDF31 Getting started'
   }, [revenueProgress])
-  const toneProfile = useMemo(() => {
-    const hasManusTemplate = Boolean(resolveSnipedTemplateForSelection(selectedUserNiche, activeLiveMailTemplateKey))
-    if (hasManusTemplate) {
-      const preset = deriveManusTemplateToneProfile(activeLiveMailTemplateKey)
-      if (preset) return preset
-    }
-    return deriveToneProfile(mailPreview.subject, mailPreview.body)
-  }, [activeLiveMailTemplateKey, mailPreview.subject, mailPreview.body, selectedUserNiche])
   const previewSenderName = currentUserName || configForm.smtp_accounts?.[0]?.from_name || currentUserEmail || 'Your sender name'
   const previewSenderEmail = currentUserEmail || configForm.smtp_accounts?.[0]?.email || 'sender@domain.com'
   const userInitial = String(displayName || currentUserEmail || 'U').trim().charAt(0).toUpperCase() || 'U'
@@ -7809,10 +7744,6 @@ function App({ initialTab = 'leads' }) {
 
     const signature = String(configForm.mail_signature || '').trim()
     const payloadBody = signature ? `${rawBody}\n\n${signature}` : rawBody
-    setMailPreviewRaw({
-      subject: rawSubject,
-      body: payloadBody,
-    })
 
     setMailPreview({
       subject: replaceTemplatePlaceholders(rawSubject, sampleVars),
@@ -11077,8 +11008,7 @@ function App({ initialTab = 'leads' }) {
                   )}
                 </div>
 
-                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                  <div className="space-y-4">
+                <div className="mt-4 space-y-4">
                     <label className="field-label">
                       <span className="mb-1.5 block">Optional Mail Footer</span>
                       <textarea
@@ -11100,89 +11030,6 @@ function App({ initialTab = 'leads' }) {
                         ))}
                       </div>
                     </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-cyan-500/20 bg-slate-900/70 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300">Preview (sample lead)</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-400">
-                      This preview updates live as you edit the draft and shows how placeholders resolve for a sample lead.
-                    </p>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-xl border border-cyan-500/25 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),rgba(15,23,42,0.92))] px-3 py-2 shadow-[0_18px_36px_rgba(8,15,32,0.24)]">
-                        <div className="flex items-center justify-end gap-3">
-                          <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
-                            Live Manus draft
-                          </span>
-                        </div>
-                        <div className="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950/65 px-2.5 py-2.5">
-                          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</p>
-                          <p className="mt-1 text-[12px] leading-6 text-slate-100">
-                            {mailPreviewRaw.subject ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.subject) : 'Select a template to preview the draft.'}
-                          </p>
-                          <p className="mt-3 text-[11px] uppercase tracking-[0.12em] text-slate-500">Body</p>
-                          <pre className="mt-1 max-h-[94px] overflow-auto whitespace-pre-wrap break-words font-sans text-[12px] leading-6 text-slate-100">
-                            {mailPreviewRaw.body ? renderTemplateWithPlaceholderHighlights(mailPreviewRaw.body) : 'Draft body will appear here.'}
-                          </pre>
-                        </div>
-                      </div>
-                      <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 shadow-[0_18px_36px_rgba(91,33,182,0.12)]">
-                        <p className="text-[11px] uppercase tracking-[0.12em] text-violet-300">Tone of Voice</p>
-                        <div className="mt-1 flex items-center justify-between gap-2">
-                          <p className="text-sm font-semibold text-white">{toneProfile.dominantLabel} - {toneProfile.dominantScore}%</p>
-                          <span className="rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-100">
-                            Ideal Manus fit
-                          </span>
-                        </div>
-                        <div className="mail-tone-bars mt-3">
-                          {Object.entries(toneProfile.scores).map(([label, score]) => (
-                            <div key={label} className="tone-row">
-                              <span>{label}</span>
-                              <div className="tone-track"><div className={`tone-fill tone-fill-${String(label).toLowerCase()}`} style={{ width: `${score}%` }} /></div>
-                              <span className="tone-score">{score}%</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 overflow-hidden rounded-[24px] border border-white/10 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900 shadow-[0_24px_80px_rgba(8,15,32,0.45)]">
-                      <div className="border-b border-white/10 bg-white/[0.03] px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full bg-rose-400/80" />
-                          <span className="h-2.5 w-2.5 rounded-full bg-amber-300/80" />
-                          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/80" />
-                          <p className="ml-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Outgoing Draft</p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4 px-4 py-4">
-                        <div className="grid gap-2 rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-sm text-slate-300">
-                          <div className="flex items-start gap-3">
-                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">From</span>
-                            <div>
-                              <p className="font-medium text-white">{previewSenderName}</p>
-                              <p className="text-xs text-slate-500">{previewSenderEmail}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">To</span>
-                            <div>
-                              <p className="font-medium text-white">Business Owner</p>
-                              <p className="text-xs text-slate-500">owner@business.com</p>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <span className="w-12 shrink-0 text-[11px] uppercase tracking-[0.12em] text-slate-500">Subject</span>
-                            <p className="font-medium text-white">{mailPreview.subject || 'Subject preview will appear here.'}</p>
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-                          <pre className="min-h-[260px] whitespace-pre-wrap break-words font-sans text-[14px] leading-7 text-slate-200">{mailPreview.body || 'Preview body will appear here.'}</pre>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
                 <div className="mt-5 flex flex-wrap items-center gap-3">
