@@ -1276,7 +1276,7 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                     WHEN LOWER(COALESCE(enrichment_status, '')) = 'processing' THEN :processing_status
                     WHEN LOWER(COALESCE(enrichment_status, '')) IN ('failed', 'failed_no_url') THEN :failed_status
                     ELSE :pending_status
-                END
+                END::lead_process_status
                 WHERE process_status IS NULL
                 """,
                 {
