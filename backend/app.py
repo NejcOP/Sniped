@@ -8803,6 +8803,50 @@ def reconcile_orphaned_active_tasks(app: FastAPI, db_path: Path) -> None:
         logging.warning("Auto-reset orphaned task: id=%s type=%s", task_id, task_type)
 
 
+def reset_stale_scrape_task_for_user(app: FastAPI, db_path: Path, user_id: str) -> Optional[int]:
+    latest = fetch_latest_task(db_path, "scrape", user_id=user_id)
+    if not latest.get("running"):
+        return None
+
+    task_id = latest.get("id")
+    if task_id is None:
+        return None
+
+    if (not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH)) and _is_task_thread_alive(app, int(task_id)):
+        return None
+
+    stale_after_seconds = max(30, int(os.environ.get("SCRAPE_RELAUNCH_STALE_SECONDS", "120") or "120"))
+    reference_time = _task_reference_time(latest)
+    if reference_time is None:
+        age_seconds = stale_after_seconds + 1
+    else:
+        age_seconds = (datetime.now(timezone.utc) - reference_time).total_seconds()
+
+    if age_seconds < stale_after_seconds:
+        return None
+
+    latest_result = latest.get("result") if isinstance(latest.get("result"), dict) else {}
+    result_payload = dict(latest_result)
+    result_payload["phase"] = "failed"
+    result_payload["status_message"] = "Previous scrape task was stale and has been reset."
+    result_payload["stale_reset"] = True
+
+    finish_task_record(
+        db_path,
+        int(task_id),
+        status="failed",
+        result_payload=result_payload,
+        error="Auto-reset stale scrape task before relaunch.",
+    )
+    logging.warning(
+        "Auto-reset stale scrape task before enqueue | task_id=%s user_id=%s age=%ss",
+        int(task_id),
+        str(user_id or ""),
+        int(age_seconds),
+    )
+    return int(task_id)
+
+
 def enqueue_task(
     app: FastAPI,
     background_tasks: Optional[BackgroundTasks],
@@ -9682,6 +9726,12 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         "inserted": 0,
         "status_message": f"Scraped 0/{requested_total}",
     }
+    no_progress_timeout_seconds = max(30, int(os.environ.get("SCRAPE_NO_PROGRESS_TIMEOUT_SECONDS", "120") or "120"))
+    progress_tracker: dict[str, Any] = {
+        "last_activity_at": datetime.now(timezone.utc),
+        "found": 0,
+        "scanned": 0,
+    }
     heartbeat_stop = Event()
 
     def _safe_update_progress() -> None:
@@ -9759,13 +9809,23 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         def _on_progress(current_found: int, total_to_find: int, scanned_count: int, _lead: Any) -> None:
             try:
+                found_value = int(current_found)
+                scanned_value = int(scanned_count)
+                if (
+                    found_value > int(progress_tracker.get("found") or 0)
+                    or scanned_value > int(progress_tracker.get("scanned") or 0)
+                ):
+                    progress_tracker["last_activity_at"] = datetime.now(timezone.utc)
+                progress_tracker["found"] = max(int(progress_tracker.get("found") or 0), found_value)
+                progress_tracker["scanned"] = max(int(progress_tracker.get("scanned") or 0), scanned_value)
+
                 progress_state["phase"] = "processing"
-                progress_state["current_found"] = int(current_found)
+                progress_state["current_found"] = found_value
                 progress_state["total_to_find"] = int(total_to_find or requested_total)
-                progress_state["scanned_count"] = int(scanned_count)
+                progress_state["scanned_count"] = scanned_value
                 progress_state["status_message"] = (
-                    f"Scraped {int(current_found)}/{int(total_to_find or requested_total)}"
-                    f" (scanned {int(scanned_count)})"
+                    f"Scraped {found_value}/{int(total_to_find or requested_total)}"
+                    f" (scanned {scanned_value})"
                 )
                 # Keep heartbeat_ts fresh on every progress update so orphan
                 # detection never fires while the scrape is actively running.
@@ -9898,6 +9958,23 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                         f" (scanned {progress_state.get('scanned_count', 0)})"
                     )
                 _safe_update_progress()
+
+                idle_seconds = int((datetime.now(timezone.utc) - progress_tracker["last_activity_at"]).total_seconds())
+                if idle_seconds >= int(no_progress_timeout_seconds):
+                    leaked_scraper = active_scraper_ref.get("instance")
+                    if leaked_scraper is not None:
+                        try:
+                            leaked_scraper.close()
+                            logging.warning(
+                                "[scrape-task:%s] Force-closed scraper after no-progress timeout (%ss).",
+                                task_id,
+                                int(no_progress_timeout_seconds),
+                            )
+                        except Exception:
+                            logging.debug("[scrape-task:%s] Failed to force-close scraper on no-progress timeout.", task_id)
+                    raise TimeoutError(
+                        f"Scrape stalled with no progress for {int(no_progress_timeout_seconds)}s"
+                    )
 
                 if elapsed_wait >= int(boot_timeout_seconds):
                     break
@@ -16172,6 +16249,7 @@ def create_app() -> FastAPI:
         db_path = resolve_path(payload.db_path, DEFAULT_DB_PATH)
         try:
             ensure_scrape_tables(db_path)
+            reset_stale_scrape_task_for_user(app, db_path, user_id)
         except Exception as _db_exc:
             logging.exception("[scrape] DB init error: %s", _db_exc)
             raise HTTPException(status_code=500, detail=f"Database offline: {_db_exc}")
