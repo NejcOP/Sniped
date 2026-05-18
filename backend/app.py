@@ -1100,6 +1100,31 @@ def _derive_pipeline_stage(
     return derived_stage
 
 
+LEAD_PROCESS_VALID_STATUSES = ("PENDING", "PROCESSING", "COMPLETED", "FAILED")
+
+
+def normalize_lead_process_status(value: Any, fallback: str = "PENDING") -> str:
+    normalized_fallback = str(fallback or "PENDING").strip().upper() or "PENDING"
+    if normalized_fallback not in LEAD_PROCESS_VALID_STATUSES:
+        normalized_fallback = "PENDING"
+
+    normalized_value = str(value or "").strip().upper()
+    if normalized_value in LEAD_PROCESS_VALID_STATUSES:
+        return normalized_value
+    return normalized_fallback
+
+
+def derive_lead_process_status(enrichment_status: Any) -> str:
+    normalized_enrichment = str(enrichment_status or "").strip().lower()
+    if normalized_enrichment == "completed":
+        return "COMPLETED"
+    if normalized_enrichment == "processing":
+        return "PROCESSING"
+    if normalized_enrichment in {"failed", "failed_no_url"}:
+        return "FAILED"
+    return "PENDING"
+
+
 def row_to_task_dict(row: Optional[Any], task_type: str) -> dict:
     if row is None:
         return {
@@ -1212,6 +1237,11 @@ def ensure_dashboard_columns(db_path: Path) -> None:
 
     with pgdb.connect(db_path) as conn:
         try:
+            pending_status = normalize_lead_process_status("PENDING")
+            processing_status = normalize_lead_process_status(derive_lead_process_status("processing"))
+            completed_status = normalize_lead_process_status(derive_lead_process_status("completed"))
+            failed_status = normalize_lead_process_status(derive_lead_process_status("failed"))
+
             columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
             for column_name, statement in optional_columns.items():
                 if column_name not in columns:
@@ -1242,13 +1272,19 @@ def ensure_dashboard_columns(db_path: Path) -> None:
                 """
                 UPDATE leads
                 SET process_status = CASE
-                    WHEN LOWER(COALESCE(enrichment_status, '')) = 'completed' THEN 'COMPLETED'
-                    WHEN LOWER(COALESCE(enrichment_status, '')) IN ('processing') THEN 'PROCESSING'
-                    WHEN LOWER(COALESCE(enrichment_status, '')) IN ('failed', 'failed_no_url') THEN 'FAILED'
-                    ELSE COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING')
+                    WHEN LOWER(COALESCE(enrichment_status, '')) = 'completed' THEN :completed_status
+                    WHEN LOWER(COALESCE(enrichment_status, '')) = 'processing' THEN :processing_status
+                    WHEN LOWER(COALESCE(enrichment_status, '')) IN ('failed', 'failed_no_url') THEN :failed_status
+                    ELSE :pending_status
                 END
-                WHERE process_status IS NULL OR TRIM(COALESCE(process_status, '')) = ''
-                """
+                WHERE process_status IS NULL
+                """,
+                {
+                    "pending_status": pending_status,
+                    "processing_status": processing_status,
+                    "completed_status": completed_status,
+                    "failed_status": failed_status,
+                },
             )
             conn.commit()
             _DASHBOARD_SCHEMA_READY = True

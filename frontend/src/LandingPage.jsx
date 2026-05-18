@@ -1,191 +1,205 @@
 import { useCallback, useEffect, useState } from 'react'
+import { AnimatePresence, motion as Motion } from 'framer-motion'
 import { useLocation } from 'react-router-dom'
 import { getStoredValue } from './authStorage.js'
 import Footer from './Footer'
 import MarketingNavbar from './MarketingNavbar'
 
 const API_BASE = ''
+const DEMO_VIDEO_EMBED_URL = String(import.meta.env.VITE_DEMO_VIDEO_URL || 'https://www.youtube.com/embed/ysz5S6PUM-U?rel=0').trim()
 
-const FEATURE_SUMMARY = [
-  {
-    title: 'Search and Scrape',
-    desc: 'Find and extract high-fit leads with live contact data in minutes.',
+// Default A/B variant. Can be overridden with ?hero=control|aggressive|benefit
+const DEFAULT_HERO_VARIANT = 'control'
+
+const HERO_VARIANTS = {
+  control: {
+    headline: 'Find leads with a reason to reply',
+    subheadline:
+      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
   },
-  {
-    title: 'AI Enrichment',
-    desc: 'Generate contextual lead insights and personalized openers automatically.',
+  aggressive: {
+    headline: 'Stop sending cold emails with no reason. Sniped writes the outreach angle for you.',
+    subheadline:
+      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
   },
-  {
-    title: 'Email Automation',
-    desc: 'Launch safe, sequence-based outreach with deliverability-focused controls.',
+  benefit: {
+    headline: 'Start 3.4x more conversations with audit-backed outbound.',
+    subheadline:
+      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
   },
-]
+}
+
+const HOW_IT_WORKS_CONTAINER_VARIANTS = {
+  hidden: {},
+  visible: {
+    transition: {
+      staggerChildren: 0.14,
+      delayChildren: 0.08,
+    },
+  },
+}
+
+const HOW_IT_WORKS_ITEM_VARIANTS = {
+  hidden: { opacity: 0, x: -24, y: 20 },
+  visible: {
+    opacity: 1,
+    x: 0,
+    y: 0,
+    transition: {
+      duration: 0.5,
+      ease: [0.22, 1, 0.36, 1],
+    },
+  },
+}
+
+function trackLandingEvent(eventName, payload = {}) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  if (Array.isArray(window.dataLayer)) {
+    window.dataLayer.push({ event: eventName, ...payload })
+  }
+
+  if (typeof window.gtag === 'function') {
+    window.gtag('event', eventName, payload)
+  }
+}
 
 const TRUST_METRICS = [
-  { value: '12M+', label: 'Leads processed' },
-  { value: '89%', label: 'Open-rate lift with AI enrichment' },
-  { value: '3.4x', label: 'More replies in first 30 days' },
-  { value: '195+', label: 'Countries covered' },
+  { value: '12M+', label: 'Businesses scanned for visible gaps' },
+  { value: '89%', label: 'Teams report higher reply quality' },
+  { value: '3.4x', label: 'Reply lift with audit-backed intros' },
+  { value: '195+', label: 'Countries with active Sniped users' },
 ]
 
-const PLATFORM_PILLARS = [
+const HOW_IT_WORKS_STEPS = [
   {
-    title: 'Acquisition Layer',
-    text: 'Source high-intent companies by niche, region, and buying signals with resilient anti-bot collection.',
+    title: 'Step 1: Find the gap',
+    text: 'Sniped scans niches and locations to find businesses with visible conversion or visibility problems.',
   },
   {
-    title: 'Intelligence Layer',
-    text: 'Analyze websites, offers, and positioning so every contact gets relevant outreach context in seconds.',
+    title: 'Step 2: Build the audit',
+    text: 'AI turns each gap into a simple explanation, proof, and recommended outreach angle.',
   },
   {
-    title: 'Execution Layer',
-    text: 'Run multi-step campaigns with adaptive pacing, inbox protection, and behavior-based follow-up logic.',
+    title: 'Step 3: Send better outreach',
+    text: 'Launch cold emails that start with relevance instead of generic sales pitches.',
   },
 ]
 
-const PROCESS_STEPS = [
+const EMAIL_COMPARISON = {
+  generic: 'Hi, we help businesses grow online. Do you need a new website?',
+  sniped:
+    'Hi, I was checking {Niche} businesses in {City} and could not find a clear website for {BusinessName}. That usually means ready-to-buy customers choose competitors that look easier to trust. Want me to send a quick homepage concept?',
+}
+
+const AUDIT_USE_CASES = [
   {
-    title: 'Define ICP',
-    text: 'Set location, niche, and quality constraints once. Sniped keeps your list clean and aligned with revenue goals.',
+    title: 'Web Design',
+    text: 'Find businesses with no website or slow mobile UX.',
+    badge: 'Missing Trust Layer',
   },
   {
-    title: 'Launch Search + Enrichment',
-    text: 'Extract contact records, score opportunities, and generate custom openers from real business signals.',
+    title: 'SEO',
+    text: 'Find companies being outranked by competitors.',
+    badge: 'Visibility Gap',
   },
   {
-    title: 'Activate Campaigns',
-    text: 'Send sequences with deliverability-aware pacing and live optimization based on opens, clicks, and replies.',
-  },
-  {
-    title: 'Close and Scale',
-    text: 'Push hot leads to your CRM, assign owners automatically, and repeat winning playbooks by region or vertical.',
+    title: 'Paid Ads',
+    text: 'Find prospects where paid clicks leak due to weak landing pages.',
+    badge: 'Leaking Ad Spend',
   },
 ]
 
 const APP_PREVIEW_PANELS = [
   {
-    title: 'Live Lead Pipeline',
-    stat: '248 new leads',
-    note: 'Synced in the last 24h',
+    title: 'Gap Scanner',
+    stat: '248 audited leads',
+    note: 'Matched by niche, city, and conversion signals',
   },
   {
-    title: 'AI Personalization',
+    title: 'Gold Audit Builder',
     stat: '92% relevance score',
-    note: 'Context built from site + niche signals',
+    note: 'Proof points pulled from website + competitor signals',
   },
   {
-    title: 'Campaign Health',
+    title: 'Outbound Engine',
     stat: '41% open rate',
-    note: 'Adaptive send windows are active',
-  },
-]
-
-const GLOBAL_REACH_STATS = [
-  {
-    value: '195+',
-    label: 'Countries supported',
-    detail: 'Teams run Sniped campaigns across Europe, US, LATAM, and APAC.',
-  },
-  {
-    value: '4.2M+',
-    label: 'Outreach emails launched',
-    detail: 'Automated sequences with personalization and deliverability-safe pacing.',
-  },
-  {
-    value: '78K+',
-    label: 'Qualified meetings generated',
-    detail: 'Booked calls from AI-scored leads and niche-focused targeting.',
+    note: 'Cold emails launched from audit-backed angles',
   },
 ]
 
 const PRICING_PLANS = [
   {
-    name: 'Free',
-    planId: 'free',
-    subtitle: 'The Starter',
-    price: '$0',
-    period: '/mo',
-    valueProp: 'Start sniping for free.',
-    credits: '50 Credits/mo',
-    trigger: 'Risk-free entry',
-    features: [
-      'Basic AI Lead Search',
-      'Google Maps & LinkedIn indexing',
-      'Personal dashboard',
-      'Standard search speed',
-    ],
-    accent: 'slate',
-  },
-  {
-    name: 'Basic',
+    name: 'Starter',
     planId: 'hustler',
-    subtitle: 'The Hustler',
+    subtitle: 'Gold Audit Foundations',
     price: '$49.99',
     period: '/mo',
-    valueProp: 'For solo entrepreneurs ready to scale.',
+    valueProp: 'Launch targeted outreach with core audit signals.',
     credits: '2,000 Credits/mo',
-    trigger: 'Best first upgrade',
+    trigger: 'First outbound system',
     features: [
-      'AI Email Personalization (Hyper-relevant)',
-      'Verified Email Discovery (99% Accuracy)',
-      'Export to CSV/Excel/JSON',
-      'Access to 50M+ global B2B database',
-      'Direct Email Support',
+      'Gap-based lead discovery by niche + city',
+      'Core Gold Audit explanations and outreach angles',
+      'Verified contact discovery',
+      'CSV export for outreach workflows',
     ],
     accent: 'blue',
   },
   {
-    name: 'Pro',
+    name: 'Growth',
     planId: 'growth',
-    subtitle: 'The Growth',
+    subtitle: 'Audit-Led Pipeline',
     price: '$79.99',
     period: '/mo',
-    valueProp: 'One closed deal pays for the whole year.',
+    valueProp: 'Scale reply-focused campaigns with deeper proof.',
     credits: '7,000 Credits/mo',
-    trigger: 'Most Popular',
+    trigger: 'Most popular',
     features: [
-      'Deep Company Analysis (Employee count, Revenue, Tech stack)',
-      'Priority AI Processing (3x faster results)',
-      'Advanced Niche Filtering (Industry, Location, Seniority)',
-      'Dedicated Proxy Rotation (Bypass all search limits)',
-      'Bulk Export & CRM Integration',
+      'Expanded Gold Audit signal coverage',
+      'Priority AI processing for faster list delivery',
+      'Advanced niche + geo filtering',
+      'Campaign-ready email personalization',
+      'Bulk export + CRM handoff',
     ],
     accent: 'neon',
     popular: true,
   },
   {
-    name: 'Business',
+    name: 'Agency',
     planId: 'scale',
-    subtitle: 'The Scale',
+    subtitle: 'Team Audit Operations',
     price: '$99.99',
     period: '/mo',
-    valueProp: 'Built for high-performance sales teams.',
+    valueProp: 'Run multi-client outbound from one audit engine.',
     credits: '20,000 Credits/mo',
-    trigger: 'Team acceleration',
+    trigger: 'Agency throughput',
     features: [
-      'Automated Outreach Drip Campaigns (Send from app)',
-      'AI Lead Scoring (Identifies hot prospects)',
-      'Multi-User Access (Team Collaboration)',
-      'Custom Webhook Support',
-      'Advanced Analytics & ROI Tracking',
+      'Multi-user collaboration and assignment',
+      'Automation workflows for repeated outreach',
+      'AI lead scoring and segment prioritization',
+      'Reporting dashboards for account performance',
+      'Webhook + integrations for agency stack',
     ],
     accent: 'indigo',
   },
   {
     name: 'Elite',
     planId: 'empire',
-    subtitle: 'The Empire',
+    subtitle: 'Enterprise Audit Command',
     price: '$149.99',
     period: '/mo',
-    valueProp: 'Full market domination.',
+    valueProp: 'Maximum audit volume for serious outbound teams.',
     credits: '100,000 Credits/mo',
-    trigger: 'Category domination',
+    trigger: 'High-volume precision',
     features: [
-      'Unlimited Database Access (Up to 100k credits)',
-      'Custom AI Model Training for your specific niche',
-      '24/7 Priority Concierge & Success Manager',
-      'Dedicated IP for Outreach',
-      'Early access to all Beta features (Mobile App coming soon)',
+      'Up to 100k credits for large prospect pools',
+      'Premium model routing for high-fit outreach',
+      'Priority support and launch guidance',
+      'Advanced deliverability controls',
+      'Early access to advanced outbound features',
     ],
     accent: 'cyan',
   },
@@ -233,6 +247,20 @@ async function fetchJson(path, options) {
 export default function LandingPage() {
   const location = useLocation()
   const [loadingPlanId, setLoadingPlanId] = useState('')
+  const [isVideoModalOpen, setIsVideoModalOpen] = useState(false)
+  const requestedHeroVariant = String(new URLSearchParams(location.search).get('hero') || '').trim().toLowerCase()
+  const activeHeroVariant = Object.prototype.hasOwnProperty.call(HERO_VARIANTS, requestedHeroVariant)
+    ? requestedHeroVariant
+    : DEFAULT_HERO_VARIANT
+  const heroCopy = HERO_VARIANTS[activeHeroVariant] || HERO_VARIANTS.control
+
+  const closeVideoModal = useCallback(() => {
+    trackLandingEvent('landing_demo_modal_closed', {
+      source: 'landing',
+      hero_variant: activeHeroVariant,
+    })
+    setIsVideoModalOpen(false)
+  }, [activeHeroVariant])
 
   const startPlanCheckout = useCallback(async (planId) => {
     const normalizedPlanId = String(planId || '').trim().toLowerCase()
@@ -298,6 +326,27 @@ export default function LandingPage() {
     }
   }, [location.pathname, location.search])
 
+  useEffect(() => {
+    if (!isVideoModalOpen) {
+      return undefined
+    }
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        closeVideoModal()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [isVideoModalOpen, closeVideoModal])
+
   return (
     <div className="min-h-screen text-white" style={{ background: '#020617' }}>
       <MarketingNavbar />
@@ -305,21 +354,41 @@ export default function LandingPage() {
       <section className="pt-32 pb-20 px-6">
         <div className="max-w-5xl mx-auto text-center">
           <p className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-yellow-500/30 bg-yellow-500/10 text-yellow-400 text-xs font-semibold mb-8">
-            AI-Powered Outbound Platform
+            Gold Audit Outbound Engine
           </p>
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold leading-tight tracking-tight mb-6">
-            Build a pipeline that closes like a premium agency
+            {heroCopy.headline}
           </h1>
           <p className="text-lg text-slate-400 max-w-3xl mx-auto mb-10 leading-relaxed">
-            Search, enrich, score, and automate outreach from a single command surface built for serious growth teams.
+            {heroCopy.subheadline}
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <a href="/get-started" className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-yellow-500 text-slate-900 font-bold hover:bg-yellow-400 transition-colors text-center">
-              Start Free Trial
+            <a
+              href="/signup"
+              onClick={() => {
+                trackLandingEvent('landing_primary_cta_clicked', {
+                  cta: 'find_my_first_50_leads',
+                  destination: '/signup',
+                  hero_variant: activeHeroVariant,
+                })
+              }}
+              className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-yellow-500 text-slate-900 font-bold hover:bg-yellow-400 transition-colors text-center"
+            >
+              Find My First 50 Leads
             </a>
-            <a href="/features" className="w-full sm:w-auto px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white transition-colors text-center">
-              Explore Features
-            </a>
+            <button
+              type="button"
+              onClick={() => {
+                trackLandingEvent('landing_demo_modal_opened', {
+                  source: 'hero_secondary_cta',
+                  hero_variant: activeHeroVariant,
+                })
+                setIsVideoModalOpen(true)
+              }}
+              className="w-full sm:w-auto px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white transition-colors text-center"
+            >
+              Watch 2-Min Demo
+            </button>
           </div>
 
           <div className="mt-12 grid grid-cols-2 lg:grid-cols-4 gap-4 text-left">
@@ -333,22 +402,75 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="features" className="py-20 px-6">
+      <section id="how-it-works" className="py-20 px-6 bg-slate-900/40 border-y border-white/5">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Core Product Areas</h2>
+            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">How it works</h2>
             <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              Every feature has its own dedicated page with full details.
+              Problem. Mechanism. Outcome. Sniped turns visible market gaps into outreach your prospects recognize as relevant.
             </p>
           </div>
 
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-            {FEATURE_SUMMARY.map((item) => (
-              <div key={item.title} className="rounded-2xl border border-white/10 bg-slate-900/60 p-6">
-                <h3 className="font-bold text-white mb-2">{item.title}</h3>
-                <p className="text-sm text-slate-400 leading-relaxed">{item.desc}</p>
-              </div>
+          <Motion.div
+            className="grid lg:grid-cols-3 gap-5"
+            variants={HOW_IT_WORKS_CONTAINER_VARIANTS}
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, amount: 0.35 }}
+          >
+            {HOW_IT_WORKS_STEPS.map((step) => (
+              <Motion.div
+                key={step.title}
+                variants={HOW_IT_WORKS_ITEM_VARIANTS}
+                className="rounded-2xl border border-white/10 bg-slate-900/60 p-6"
+              >
+                <p className="text-xs uppercase tracking-widest text-yellow-400">Workflow</p>
+                <h3 className="font-bold text-white mt-2 mb-2">{step.title}</h3>
+                <p className="text-sm text-slate-400 leading-relaxed">{step.text}</p>
+              </Motion.div>
             ))}
+          </Motion.div>
+        </div>
+      </section>
+
+      <section id="email-proof" className="py-20 px-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Before/After Cold Email</h2>
+            <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
+              The difference is simple: generic outreach asks for attention, audit-backed outreach earns it.
+            </p>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-5">
+            <Motion.div
+              className="rounded-2xl border border-rose-400/30 bg-rose-950/20 p-6"
+              initial={{ opacity: 0, y: 22 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, amount: 0.4 }}
+              transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <p className="text-xs uppercase tracking-widest text-rose-300">Generic</p>
+              <p className="mt-3 text-sm leading-relaxed text-slate-200">
+                {EMAIL_COMPARISON.generic}
+              </p>
+            </Motion.div>
+            <Motion.div
+              className="rounded-2xl border border-yellow-400/40 bg-yellow-950/20 p-6"
+              initial={{ opacity: 0, y: 22, boxShadow: '0 0 0 rgba(250,204,21,0)' }}
+              whileInView={{
+                opacity: 1,
+                y: 0,
+                boxShadow: '0 0 0 1px rgba(250,204,21,0.24), 0 0 34px rgba(250,204,21,0.17)',
+              }}
+              viewport={{ once: true, amount: 0.4 }}
+              transition={{ duration: 0.55, delay: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <p className="text-xs uppercase tracking-widest text-yellow-300">Sniped</p>
+              <p className="mt-3 text-sm leading-relaxed text-slate-100">
+                {EMAIL_COMPARISON.sniped}
+              </p>
+            </Motion.div>
           </div>
         </div>
       </section>
@@ -356,51 +478,30 @@ export default function LandingPage() {
       <section className="py-20 px-6 bg-slate-900/40 border-y border-white/5">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Built as a Full Outbound System</h2>
+            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">Built for agencies that sell through audits</h2>
             <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              Sniped is not a single tool. It is a complete operating layer for prospecting, personalization, and campaign execution.
+              Choose your lane, detect the right gap, and start outreach from evidence instead of assumptions.
             </p>
           </div>
 
-          <div className="grid lg:grid-cols-3 gap-5">
-            {PLATFORM_PILLARS.map((pillar) => (
-              <div key={pillar.title} className="rounded-2xl border border-white/10 bg-slate-900/70 p-6">
-                <p className="text-xs uppercase tracking-widest text-yellow-400">Platform Pillar</p>
-                <h3 className="mt-2 text-xl font-bold text-white">{pillar.title}</h3>
-                <p className="mt-3 text-sm text-slate-400 leading-relaxed">{pillar.text}</p>
+          <div className="grid md:grid-cols-3 gap-5">
+            {AUDIT_USE_CASES.map((card) => (
+              <div key={card.title} className="rounded-2xl border border-white/10 bg-slate-900/60 p-6">
+                <p className="text-xs uppercase tracking-widest text-cyan-300">{card.badge}</p>
+                <h3 className="mt-2 text-xl font-bold text-white">{card.title}</h3>
+                <p className="mt-3 text-sm text-slate-400 leading-relaxed">{card.text}</p>
               </div>
             ))}
           </div>
         </div>
       </section>
 
-      <section className="py-20 px-6">
+      <section id="app-preview" className="py-20 px-6 bg-slate-950/70 border-y border-yellow-500/20">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">How Teams Execute in Sniped</h2>
+            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">The audit-backed outbound command center</h2>
             <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              A practical workflow designed for agencies, SDR teams, and founders who need speed with quality control.
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-5">
-            {PROCESS_STEPS.map((step, index) => (
-              <div key={step.title} className="rounded-2xl border border-white/10 bg-slate-900/60 p-6">
-                <p className="text-xs uppercase tracking-wider text-yellow-300">Step {index + 1}</p>
-                <h3 className="mt-2 text-xl font-bold text-white">{step.title}</h3>
-                <p className="mt-3 text-sm text-slate-400 leading-relaxed">{step.text}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="py-20 px-6 bg-slate-950/70 border-y border-yellow-500/20">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">A Quick Look Inside The App</h2>
-            <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              Sniped gives your team one command center for acquisition, AI enrichment, and outreach performance.
+              Move from detected gap to outreach angle to launch-ready email flow without switching tools.
             </p>
           </div>
 
@@ -447,13 +548,16 @@ export default function LandingPage() {
             Pricing
           </p>
           <h2 className="mt-4 text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
-            Choose the credit engine that matches your growth stage
+            Plans built for audit-backed outbound growth
           </h2>
           <p className="mx-auto mt-4 max-w-2xl text-slate-300">
-            Modern outbound infrastructure with AI search, enrichment, and automation — wrapped in a premium dark SaaS experience.
+            Professional tiers for teams moving from raw lead lists to high-relevance outbound.
+          </p>
+          <p className="mx-auto mt-3 max-w-2xl text-sm text-yellow-200/90">
+            Not for spam: Sniped is built for targeted B2B outreach, not mass spam.
           </p>
 
-          <div className="mt-12 grid gap-6 text-left sm:grid-cols-2 xl:grid-cols-5">
+          <div className="mt-12 grid gap-6 text-left sm:grid-cols-2 xl:grid-cols-4">
             {PRICING_PLANS.map((plan) => {
               const accentClass =
                 plan.accent === 'neon'
@@ -521,7 +625,7 @@ export default function LandingPage() {
                           : 'border border-white/10 bg-slate-800/80 text-white shadow-[0_14px_30px_rgba(15,23,42,0.3)] hover:border-yellow-300/40 hover:bg-slate-700/80'
                       }`}
                     >
-                      {loadingPlanId === plan.planId ? 'Redirecting…' : (plan.planId === 'free' ? 'Start Free' : 'Buy Now')}
+                      {loadingPlanId === plan.planId ? 'Redirecting...' : `Choose ${plan.name}`}
                     </button>
                   </div>
                 </div>
@@ -531,29 +635,49 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="py-20 px-6 border-y border-white/5 bg-slate-950/60">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center mb-12">
-            <p className="inline-flex px-3 py-1 rounded-full border border-yellow-500/30 bg-yellow-500/10 text-yellow-300 text-xs font-semibold uppercase tracking-wider">
-              Global Reach
-            </p>
-            <h2 className="mt-4 text-3xl sm:text-4xl font-extrabold tracking-tight">Helping teams in 195+ countries</h2>
-            <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              Sniped powers prospecting and outbound execution for founders, sales teams, and agencies around the world.
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-5">
-            {GLOBAL_REACH_STATS.map((item) => (
-              <div key={item.label} className="rounded-2xl border border-white/10 bg-slate-900/70 p-6">
-                <p className="text-4xl font-extrabold text-yellow-300">{item.value}</p>
-                <p className="mt-2 text-sm font-semibold uppercase tracking-wider text-slate-300">{item.label}</p>
-                <p className="mt-3 text-sm text-slate-400 leading-relaxed">{item.detail}</p>
+      <AnimatePresence>
+        {isVideoModalOpen && (
+          <Motion.div
+            className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/85 px-4 py-8 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={closeVideoModal}
+          >
+            <Motion.div
+              className="w-full max-w-4xl rounded-2xl border border-white/15 bg-slate-950 p-4 sm:p-6 shadow-[0_30px_90px_rgba(2,6,23,0.9)]"
+              initial={{ opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-yellow-300">2-Min Demo</p>
+                <button
+                  type="button"
+                  onClick={closeVideoModal}
+                  className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-yellow-300/40 hover:text-white"
+                >
+                  Close
+                </button>
               </div>
-            ))}
-          </div>
-        </div>
-      </section>
+
+              <div className="relative overflow-hidden rounded-xl border border-white/10 bg-slate-900" style={{ paddingTop: '56.25%' }}>
+                <iframe
+                  title="Sniped demo video"
+                  src={DEMO_VIDEO_EMBED_URL}
+                  className="absolute inset-0 h-full w-full"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+              <p className="mt-3 text-xs text-slate-400">Set VITE_DEMO_VIDEO_URL to replace this placeholder YouTube/Vimeo embed URL.</p>
+            </Motion.div>
+          </Motion.div>
+        )}
+      </AnimatePresence>
 
       <Footer />
     </div>
