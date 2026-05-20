@@ -797,7 +797,7 @@ class LeadEnricher:
         row = self._fetchone(
             text(
                 """
-                SELECT COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') AS process_status
+                SELECT COALESCE(process_status::text, 'PENDING') AS process_status
                 FROM leads
                 WHERE id = :lead_id AND user_id = :user_id
                 LIMIT 1
@@ -827,7 +827,7 @@ class LeadEnricher:
                     WHERE user_id = :user_id
                       AND id IN :lead_ids
                       AND COALESCE(LOWER(enrichment_status), 'pending') != 'completed'
-                      AND COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') IN ('PENDING', 'FAILED')
+                      AND COALESCE(process_status::text, 'PENDING') IN ('PENDING', 'FAILED')
                     ORDER BY id ASC
                     FOR UPDATE SKIP LOCKED
                 ), claimed AS (
@@ -935,7 +935,7 @@ class LeadEnricher:
                                 )
                             )
                             AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
-                            AND COALESCE(NULLIF(UPPER(process_status), ''), 'PENDING') IN ('PENDING', 'FAILED')
+                            AND COALESCE(process_status::text, 'PENDING') IN ('PENDING', 'FAILED')
                             AND user_id = :user_id
                         ORDER BY id ASC
                         FOR UPDATE SKIP LOCKED
