@@ -833,7 +833,7 @@ class LeadEnricher:
                 ), claimed AS (
                     UPDATE leads AS l
                     SET
-                        process_status = 'PROCESSING',
+                        process_status = 'PROCESSING'::public.lead_process_status,
                         retry_count = COALESCE(l.retry_count, 0) + 1,
                         last_error = NULL,
                         enrichment_status = 'processing',
@@ -943,7 +943,7 @@ class LeadEnricher:
                     ), claimed AS (
                         UPDATE leads AS l
                         SET
-                            process_status = 'PROCESSING',
+                            process_status = 'PROCESSING'::public.lead_process_status,
                             retry_count = COALESCE(l.retry_count, 0) + 1,
                             last_error = NULL,
                             enrichment_status = 'processing',
