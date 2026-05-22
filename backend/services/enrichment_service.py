@@ -827,7 +827,7 @@ class LeadEnricher:
                     WHERE user_id = :user_id
                       AND id IN :lead_ids
                       AND COALESCE(LOWER(enrichment_status), 'pending') != 'completed'
-                      AND COALESCE(process_status::text, 'PENDING') IN ('PENDING', 'FAILED')
+                      AND COALESCE(NULLIF(UPPER(process_status::text), ''), 'PENDING') IN ('PENDING', 'FAILED')
                     ORDER BY id ASC
                     FOR UPDATE SKIP LOCKED
                 ), claimed AS (
@@ -935,7 +935,7 @@ class LeadEnricher:
                                 )
                             )
                             AND LOWER(COALESCE(enrichment_status, 'pending')) IN ('pending', 'failed')
-                            AND COALESCE(process_status::text, 'PENDING') IN ('PENDING', 'FAILED')
+                            AND COALESCE(NULLIF(UPPER(process_status::text), ''), 'PENDING') IN ('PENDING', 'FAILED')
                             AND user_id = :user_id
                         ORDER BY id ASC
                         FOR UPDATE SKIP LOCKED

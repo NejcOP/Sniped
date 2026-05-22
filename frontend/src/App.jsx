@@ -9991,8 +9991,8 @@ function App({ initialTab = 'leads' }) {
                             </div>
                           </td>
                           {/* Actions — icon-only buttons */}
-                          <td className="td-cell" style={{overflow: 'visible'}}>
-                            <div className="flex items-center justify-center gap-2" style={{flexShrink: 0, flexWrap: 'nowrap'}}>
+                          <td className="td-cell">
+                            <div className="mx-auto flex max-w-[13rem] flex-wrap items-center justify-center gap-1.5 sm:max-w-[14.5rem] sm:gap-2">
                               {showRevokedFlash && (
                                 <span className="inline-flex items-center rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2 py-1 text-[10px] font-semibold text-emerald-100">
                                   Revoked

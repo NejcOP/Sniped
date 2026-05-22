@@ -13,19 +13,19 @@ const DEFAULT_HERO_VARIANT = 'control'
 
 const HERO_VARIANTS = {
   control: {
-    headline: 'Find leads with a reason to reply',
+    headline: 'Turn Google Maps into a pipeline of hot B2B leads in one click.',
     subheadline:
-      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
+      'Automated scraping and AI sales audits that turn Google Maps prospects into reply-ready B2B opportunities in minutes.',
   },
   aggressive: {
-    headline: 'Stop sending cold emails with no reason. Sniped writes the outreach angle for you.',
+    headline: 'Turn Google Maps into a pipeline of hot B2B leads in one click.',
     subheadline:
-      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
+      'Automated scraping and AI sales audits that turn Google Maps prospects into reply-ready B2B opportunities in minutes.',
   },
   benefit: {
-    headline: 'Start 3.4x more conversations with audit-backed outbound.',
+    headline: 'Turn Google Maps into a pipeline of hot B2B leads in one click.',
     subheadline:
-      'Sniped finds businesses with visible gaps - no website, weak SEO, slow pages, competitor gaps - and turns them into audit-backed cold emails your prospects actually care about.',
+      'Automated scraping and AI sales audits that turn Google Maps prospects into reply-ready B2B opportunities in minutes.',
   },
 }
 
@@ -75,16 +75,16 @@ const TRUST_METRICS = [
 
 const HOW_IT_WORKS_STEPS = [
   {
-    title: 'Step 1: Find the gap',
-    text: 'Sniped scans niches and locations to find businesses with visible conversion or visibility problems.',
+    title: '1. Enter location and niche',
+    text: 'The scraper finds businesses on Google Maps based on your target location and niche.',
   },
   {
-    title: 'Step 2: Build the audit',
-    text: 'AI turns each gap into a simple explanation, proof, and recommended outreach angle.',
+    title: '2. AI runs the audit',
+    text: 'Our model analyzes their websites, finds key issues, and highlights sales opportunities.',
   },
   {
-    title: 'Step 3: Send better outreach',
-    text: 'Launch cold emails that start with relevance instead of generic sales pitches.',
+    title: '3. Send the offer',
+    text: 'Get ready-to-use data and actionable insights so you can close deals faster.',
   },
 ]
 
@@ -205,6 +205,29 @@ const PRICING_PLANS = [
   },
 ]
 
+const FAQ_ITEMS = [
+  {
+    question: 'Kaj je Sniped.io?',
+    answer:
+      'Sniped.io je avtomatizirano B2B orodje za iskanje leadov, ki zdruzi Google Maps scraping in AI prodajne avdite za hitrejsi outreach.',
+  },
+  {
+    question: 'Kako deluje AI enrichment?',
+    answer:
+      'AI enrichment analizira javno dostopne podatke o podjetjih in njihovih spletnih straneh, nato pa pripravi uporabne uvide za personalizirano prodajno ponudbo.',
+  },
+  {
+    question: 'Ali potrebujem svoj Google API ključ?',
+    answer:
+      'Ne. Platforma je zasnovana tako, da lahko zacnes brez lastnega Google API kljuca in takoj testiras tok od leada do ponudbe.',
+  },
+  {
+    question: 'Je Sniped.io primeren za agencije in freelancerje?',
+    answer:
+      'Da. Sniped.io je narejen za agencije in freelancerje, ki zelijo hitro graditi B2B pipeline z manj rocnega dela.',
+  },
+]
+
 const VALID_PAID_PLAN_IDS = new Set(
   PRICING_PLANS
     .map((plan) => String(plan?.planId || '').trim().toLowerCase())
@@ -248,6 +271,8 @@ export default function LandingPage() {
   const location = useLocation()
   const [loadingPlanId, setLoadingPlanId] = useState('')
   const [isVideoModalOpen, setIsVideoModalOpen] = useState(false)
+  const [waitlistEmail, setWaitlistEmail] = useState('')
+  const [waitlistNotice, setWaitlistNotice] = useState('')
   const requestedHeroVariant = String(new URLSearchParams(location.search).get('hero') || '').trim().toLowerCase()
   const activeHeroVariant = Object.prototype.hasOwnProperty.call(HERO_VARIANTS, requestedHeroVariant)
     ? requestedHeroVariant
@@ -261,6 +286,17 @@ export default function LandingPage() {
     })
     setIsVideoModalOpen(false)
   }, [activeHeroVariant])
+
+  const joinWaitlist = useCallback((event) => {
+    event.preventDefault()
+    const normalizedEmail = String(waitlistEmail || '').trim()
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      setWaitlistNotice('Please enter a valid email address.')
+      return
+    }
+    setWaitlistNotice('Thanks! You have been added to the AppSumo waitlist.')
+    setWaitlistEmail('')
+  }, [waitlistEmail])
 
   const startPlanCheckout = useCallback(async (planId) => {
     const normalizedPlanId = String(planId || '').trim().toLowerCase()
@@ -352,43 +388,68 @@ export default function LandingPage() {
       <MarketingNavbar />
 
       <section className="pt-32 pb-20 px-6">
-        <div className="max-w-5xl mx-auto text-center">
-          <p className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-yellow-500/30 bg-yellow-500/10 text-yellow-400 text-xs font-semibold mb-8">
+        <div className="max-w-6xl mx-auto">
+          <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr]">
+            <div className="text-center lg:text-left">
+              <p className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-yellow-500/30 bg-yellow-500/10 text-yellow-400 text-xs font-semibold mb-8">
             Gold Audit Outbound Engine
-          </p>
-          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold leading-tight tracking-tight mb-6">
-            {heroCopy.headline}
-          </h1>
-          <p className="text-lg text-slate-400 max-w-3xl mx-auto mb-10 leading-relaxed">
-            {heroCopy.subheadline}
-          </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <a
-              href="/signup"
-              onClick={() => {
-                trackLandingEvent('landing_primary_cta_clicked', {
-                  cta: 'find_my_first_50_leads',
-                  destination: '/signup',
-                  hero_variant: activeHeroVariant,
-                })
-              }}
-              className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-yellow-500 text-slate-900 font-bold hover:bg-yellow-400 transition-colors text-center"
-            >
-              Find My First 50 Leads
-            </a>
-            <button
-              type="button"
-              onClick={() => {
-                trackLandingEvent('landing_demo_modal_opened', {
-                  source: 'hero_secondary_cta',
-                  hero_variant: activeHeroVariant,
-                })
-                setIsVideoModalOpen(true)
-              }}
-              className="w-full sm:w-auto px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white transition-colors text-center"
-            >
-              Watch 2-Min Demo
-            </button>
+              </p>
+              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold leading-tight tracking-tight mb-6">
+                {heroCopy.headline}
+              </h1>
+              <p className="text-lg text-slate-400 max-w-3xl mx-auto lg:mx-0 mb-10 leading-relaxed">
+                {heroCopy.subheadline}
+              </p>
+              <div className="flex flex-col sm:flex-row items-center lg:items-start justify-center lg:justify-start gap-4">
+                <a
+                  href="/signup"
+                  onClick={() => {
+                    trackLandingEvent('landing_primary_cta_clicked', {
+                      cta: 'find_my_first_50_leads',
+                      destination: '/signup',
+                      hero_variant: activeHeroVariant,
+                    })
+                  }}
+                  className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-yellow-500 text-slate-900 font-bold hover:bg-yellow-400 transition-colors text-center"
+                >
+                  Find My First 50 Leads
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    trackLandingEvent('landing_demo_modal_opened', {
+                      source: 'hero_secondary_cta',
+                      hero_variant: activeHeroVariant,
+                    })
+                    setIsVideoModalOpen(true)
+                  }}
+                  className="w-full sm:w-auto px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white transition-colors text-center"
+                >
+                  Watch 2-Min Demo
+                </button>
+              </div>
+
+              <div className="mt-4 flex items-center justify-center lg:justify-start gap-2 text-sm text-slate-300">
+                <span className="text-yellow-300 tracking-[0.08em]">★★★★★</span>
+                <span>Trusted by 50+ agencies and freelancers for faster B2B growth.</span>
+              </div>
+            </div>
+
+            <div className="relative overflow-hidden rounded-3xl border border-white/15 bg-slate-950/90 p-3 shadow-[0_20px_60px_rgba(2,6,23,0.7)]">
+              <div className="mb-2 flex items-center justify-between px-1">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-yellow-300">60-sec Demo</p>
+                <p className="text-[11px] text-slate-500">Paste your video URL later</p>
+              </div>
+              <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-slate-900" style={{ paddingTop: '56.25%' }}>
+                <iframe
+                  title="Sniped landing demo"
+                  src={DEMO_VIDEO_EMBED_URL}
+                  className="absolute inset-0 h-full w-full"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+            </div>
           </div>
 
           <div className="mt-12 grid grid-cols-2 lg:grid-cols-4 gap-4 text-left">
@@ -407,7 +468,7 @@ export default function LandingPage() {
           <div className="text-center mb-12">
             <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight">How it works</h2>
             <p className="mt-4 text-slate-400 max-w-2xl mx-auto">
-              Problem. Mechanism. Outcome. Sniped turns visible market gaps into outreach your prospects recognize as relevant.
+              Three clear steps from Google Maps leads to a deal-ready offer.
             </p>
           </div>
 
@@ -430,6 +491,66 @@ export default function LandingPage() {
               </Motion.div>
             ))}
           </Motion.div>
+        </div>
+      </section>
+
+      <section id="appsumo-waitlist" className="py-16 px-6 border-b border-white/5 bg-[linear-gradient(180deg,rgba(2,6,23,0.92),rgba(12,18,34,0.98))]">
+        <div className="max-w-4xl mx-auto rounded-3xl border border-yellow-500/25 bg-slate-950/70 p-6 sm:p-8 shadow-[0_24px_70px_rgba(2,6,23,0.7)]">
+          <p className="inline-flex rounded-full border border-yellow-400/35 bg-yellow-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-yellow-200">
+            AppSumo Waitlist
+          </p>
+          <h3 className="mt-4 text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+            We are preparing for our official AppSumo launch!
+          </h3>
+          <p className="mt-3 text-slate-300 leading-relaxed">
+            Join the waitlist to secure an exclusive Lifetime Deal discount when we go live.
+          </p>
+
+          <form className="mt-6 flex flex-col sm:flex-row gap-3" onSubmit={joinWaitlist}>
+            <input
+              type="email"
+              value={waitlistEmail}
+              onChange={(event) => {
+                setWaitlistEmail(event.target.value)
+                if (waitlistNotice) setWaitlistNotice('')
+              }}
+              placeholder="Enter your email"
+              className="flex-1 rounded-2xl border border-white/15 bg-slate-900/80 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:border-yellow-300/60 focus:outline-none"
+              aria-label="Email for AppSumo waitlist"
+            />
+            <button
+              type="submit"
+              className="rounded-2xl bg-yellow-500 px-6 py-3 text-sm font-bold text-slate-900 transition-colors hover:bg-yellow-400"
+            >
+              Join the waitlist
+            </button>
+          </form>
+          {waitlistNotice ? (
+            <p className="mt-3 text-sm text-cyan-200">{waitlistNotice}</p>
+          ) : null}
+        </div>
+      </section>
+
+      <section id="faq" className="py-20 px-6 bg-slate-950/65 border-b border-white/5">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-10">
+            <p className="inline-flex rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-200">
+              FAQ
+            </p>
+            <h2 className="mt-4 text-3xl sm:text-4xl font-extrabold tracking-tight text-white">Pogosta vprašanja</h2>
+          </div>
+
+          <div className="space-y-3">
+            {FAQ_ITEMS.map((item) => (
+              <details key={item.question} className="group rounded-2xl border border-white/10 bg-slate-900/70 px-5 py-4">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-left text-base font-semibold text-white marker:content-none">
+                  <span>{item.question}</span>
+                  <span className="pointer-events-none text-cyan-300 transition-transform group-open:rotate-45">+</span>
+                </summary>
+                <p className="mt-3 text-sm leading-relaxed text-slate-300">{item.answer}</p>
+              </details>
+            ))}
+          </div>
         </div>
       </section>
 

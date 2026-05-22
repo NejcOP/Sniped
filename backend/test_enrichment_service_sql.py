@@ -47,9 +47,9 @@ class LeadEnricherSqlRegressionTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertIn("WITH candidate AS (", captured["sql"])
-        self.assertIn("COALESCE(process_status::text, 'PENDING') IN ('PENDING', 'FAILED')", captured["sql"])
+        self.assertIn("COALESCE(NULLIF(UPPER(process_status::text), ''), 'PENDING') IN ('PENDING', 'FAILED')", captured["sql"])
         self.assertIn("process_status = 'PROCESSING'::public.lead_process_status", captured["sql"])
-        self.assertNotIn("UPPER(process_status)", captured["sql"])
+        self.assertNotIn("UPPER(process_status)", captured["sql"].replace("UPPER(process_status::text)", ""))
         self.assertEqual(captured["params"]["user_id"], "user-1")
         self.assertEqual(captured["params"]["limit"], 5)
 

@@ -9703,10 +9703,13 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
     if not task_user_id:
         raise RuntimeError("Missing user_id in scrape task payload. Refusing to write unscoped leads.")
     keyword = str(payload_data.get("keyword", "") or "").strip()
+    niches = ["avtohisa", "vulkanizer", "avto deli", "avtoservis", "frizerski salon", "zobozdravnik"]
+    keywords_to_scrape = [keyword] if keyword else list(niches)
+    keyword = keywords_to_scrape[0] if keywords_to_scrape else ""
     logging.info(
-        "[scrape-task:%s] Starting scrape task | keyword=%r | results=%s | country=%s",
+        "[scrape-task:%s] Starting scrape task | niches=%s | results=%s | country=%s",
         task_id,
-        keyword,
+        keywords_to_scrape,
         int(payload_data.get("results", 25)),
         country_value,
     )
@@ -9870,7 +9873,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         scrape_runtime_limit = max(60, int(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "300") or "300"))
         scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
 
-        def _scrape_once(headless_value: bool):
+        def _scrape_once(headless_value: bool, scrape_keyword: str):
             progress_state["status_message"] = "Launching browser..."
             _safe_update_progress()
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
@@ -9893,10 +9896,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             active_scraper_ref["instance"] = scraper
             try:
                 with scraper:
-                    progress_state["status_message"] = f"Browser launched. Searching for {keyword}..."
+                    progress_state["status_message"] = f"Browser launched. Searching for {scrape_keyword}..."
                     _safe_update_progress()
                     return scraper.scrape(
-                        keyword=str(payload_data.get("keyword", "")),
+                        keyword=str(scrape_keyword or "").strip(),
                         max_results=int(payload_data.get("results", 25)),
                         progress_callback=_on_progress,
                         max_runtime_seconds=scrape_runtime_limit,
@@ -9910,7 +9913,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 if active_scraper_ref.get("instance") is scraper:
                     active_scraper_ref["instance"] = None
 
-        def _scrape_with_boot_timeout(headless_value: bool):
+        def _scrape_with_boot_timeout(headless_value: bool, scrape_keyword: str):
             timeout_raw = os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS") or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
             default_timeout_seconds = int(scrape_runtime_limit + max(90, scrape_stall_limit * 2))
             if str(timeout_raw or "").strip():
@@ -9926,7 +9929,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
             def _target() -> None:
                 try:
-                    result_box["leads"] = _scrape_once(headless_value)
+                    result_box["leads"] = _scrape_once(headless_value, scrape_keyword)
                 except Exception as exc:
                     error_box["exc"] = exc
                 finally:
@@ -9988,7 +9991,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     except Exception:
                         logging.debug("[scrape-task:%s] Failed to force-close scraper after timeout.", task_id)
                 raise TimeoutError(
-                    f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow."
+                    f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow (keyword={scrape_keyword})."
                 )
 
             if "exc" in error_box:
@@ -9997,14 +10000,55 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
             return result_box.get("leads") or []
 
         try:
-            leads = _scrape_with_boot_timeout(requested_headless)
-            logging.info("[scrape-task:%s] Scrape thread returned leads=%s", task_id, len(leads))
+            leads: list[Any] = []
+            for niche_idx, niche_keyword in enumerate(keywords_to_scrape):
+                keyword = str(niche_keyword or "").strip()
+                if not keyword:
+                    continue
+
+                progress_state["status_message"] = f"Starting niche {niche_idx + 1}/{len(keywords_to_scrape)}: {keyword}"
+                _safe_update_progress()
+
+                niche_leads = _scrape_with_boot_timeout(requested_headless, keyword)
+                for lead in niche_leads:
+                    # Persist niche ownership by writing search_keyword explicitly.
+                    try:
+                        setattr(lead, "search_keyword", keyword)
+                    except Exception:
+                        pass
+                leads.extend(niche_leads)
+                logging.info(
+                    "[scrape-task:%s] Niche scrape returned leads=%s | niche=%r",
+                    task_id,
+                    len(niche_leads),
+                    keyword,
+                )
+
+                if niche_idx < len(keywords_to_scrape) - 1:
+                    progress_state["status_message"] = f"Cooling down before next niche... ({keyword})"
+                    _safe_update_progress()
+                    time.sleep(3)
+
+            logging.info("[scrape-task:%s] Combined scrape returned leads=%s", task_id, len(leads))
         except Exception as scrape_exc:
             # Non-headless sessions can be interrupted by consent/ad popups or manual window close.
             msg = str(scrape_exc).lower()
             if (not requested_headless) and ("has been closed" in msg or "target page" in msg):
                 logging.warning("Scrape interrupted in visible browser; retrying once in headless mode.")
-                leads = _scrape_with_boot_timeout(True)
+                leads = []
+                for niche_idx, niche_keyword in enumerate(keywords_to_scrape):
+                    keyword = str(niche_keyword or "").strip()
+                    if not keyword:
+                        continue
+                    niche_leads = _scrape_with_boot_timeout(True, keyword)
+                    for lead in niche_leads:
+                        try:
+                            setattr(lead, "search_keyword", keyword)
+                        except Exception:
+                            pass
+                    leads.extend(niche_leads)
+                    if niche_idx < len(keywords_to_scrape) - 1:
+                        time.sleep(3)
                 logging.info("[scrape-task:%s] Fallback scrape thread returned leads=%s", task_id, len(leads))
             else:
                 raise
@@ -10108,24 +10152,34 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
         # Safety repair: if any rows for this scrape keyword were saved under legacy/user_id=1,
         # re-assign them to the authenticated task owner so they are visible in Lead Management.
-        if keyword and task_user_id and task_user_id not in {"1", "legacy"}:
+        keywords_to_repair = sorted(
+            {
+                str(getattr(lead, "search_keyword", "") or "").strip()
+                for lead in leads
+                if str(getattr(lead, "search_keyword", "") or "").strip()
+            }
+        ) or [k for k in keywords_to_scrape if str(k or "").strip()]
+
+        if keywords_to_repair and task_user_id and task_user_id not in {"1", "legacy"}:
             try:
                 with pgdb.connect(db_path) as conn:
-                    repaired_local = conn.execute(
-                        """
-                        UPDATE leads
-                        SET user_id = ?
-                        WHERE search_keyword = ?
-                          AND TRIM(COALESCE(user_id, '')) IN ('1', 'legacy')
-                        """,
-                        (task_user_id, keyword),
-                    ).rowcount or 0
+                    repaired_local = 0
+                    for repair_keyword in keywords_to_repair:
+                        repaired_local += conn.execute(
+                            """
+                            UPDATE leads
+                            SET user_id = ?
+                            WHERE search_keyword = ?
+                              AND TRIM(COALESCE(user_id, '')) IN ('1', 'legacy')
+                            """,
+                            (task_user_id, repair_keyword),
+                        ).rowcount or 0
                     conn.commit()
                 if int(repaired_local) > 0:
                     logging.warning(
-                        "[scrape-task:%s] Repaired local leads user_id for keyword=%r -> user_id=%s rows=%s",
+                        "[scrape-task:%s] Repaired local leads user_id for keywords=%s -> user_id=%s rows=%s",
                         task_id,
-                        keyword,
+                        keywords_to_repair,
                         task_user_id,
                         int(repaired_local),
                     )
@@ -10136,24 +10190,25 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 sb_admin = get_supabase_admin_client(DEFAULT_CONFIG_PATH) or get_supabase_client(DEFAULT_CONFIG_PATH)
                 if sb_admin is not None:
                     repaired_remote = 0
-                    for orphan_uid in ("1", "legacy"):
-                        orphan_rows = supabase_select_rows(
-                            sb_admin,
-                            "leads",
-                            columns="id",
-                            filters={"search_keyword": keyword, "user_id": orphan_uid},
-                        )
-                        for row in orphan_rows:
-                            row_id = row.get("id")
-                            if row_id is None:
-                                continue
-                            sb_admin.table("leads").update({"user_id": task_user_id}).eq("id", row_id).execute()
-                            repaired_remote += 1
+                    for repair_keyword in keywords_to_repair:
+                        for orphan_uid in ("1", "legacy"):
+                            orphan_rows = supabase_select_rows(
+                                sb_admin,
+                                "leads",
+                                columns="id",
+                                filters={"search_keyword": repair_keyword, "user_id": orphan_uid},
+                            )
+                            for row in orphan_rows:
+                                row_id = row.get("id")
+                                if row_id is None:
+                                    continue
+                                sb_admin.table("leads").update({"user_id": task_user_id}).eq("id", row_id).execute()
+                                repaired_remote += 1
                     if repaired_remote > 0:
                         logging.warning(
-                            "[scrape-task:%s] Repaired Supabase leads user_id for keyword=%r -> user_id=%s rows=%s",
+                            "[scrape-task:%s] Repaired Supabase leads user_id for keywords=%s -> user_id=%s rows=%s",
                             task_id,
-                            keyword,
+                            keywords_to_repair,
                             task_user_id,
                             int(repaired_remote),
                         )
@@ -10168,20 +10223,21 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         _safe_update_progress()
 
         with pgdb.connect(db_path) as conn:
-            conn.execute(
-                """
-                UPDATE leads
-                SET status = 'scraped', status_updated_at = CURRENT_TIMESTAMP
-                WHERE
-                    search_keyword = ?
-                    AND user_id = ?
-                    AND LOWER(COALESCE(status, '')) IN ('', 'pending')
-                """,
-                (
-                    str(payload_data.get("keyword", "")).strip(),
-                    task_user_id,
-                ),
-            )
+            for scraped_keyword in keywords_to_repair:
+                conn.execute(
+                    """
+                    UPDATE leads
+                    SET status = 'scraped', status_updated_at = CURRENT_TIMESTAMP
+                    WHERE
+                        search_keyword = ?
+                        AND user_id = ?
+                        AND LOWER(COALESCE(status, '')) IN ('', 'pending')
+                    """,
+                    (
+                        scraped_keyword,
+                        task_user_id,
+                    ),
+                )
             conn.commit()
 
         blacklisted_synced = sync_blacklisted_leads(db_path)
@@ -10280,16 +10336,20 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 if not saved_lead_ids and inserted > 0:
                     with pgdb.connect(db_path) as conn:
                         conn.row_factory = pgdb.Row
-                        fallback_rows = conn.execute(
-                            """
-                            SELECT id
-                            FROM leads
-                            WHERE user_id = ? AND search_keyword = ?
-                            ORDER BY id DESC
-                            LIMIT ?
-                            """,
-                            (task_user_id, keyword, int(max(1, inserted))),
-                        ).fetchall()
+                        fallback_rows = []
+                        for fallback_keyword in keywords_to_repair:
+                            fallback_rows.extend(
+                                conn.execute(
+                                    """
+                                    SELECT id
+                                    FROM leads
+                                    WHERE user_id = ? AND search_keyword = ?
+                                    ORDER BY id DESC
+                                    LIMIT ?
+                                    """,
+                                    (task_user_id, fallback_keyword, int(max(1, inserted))),
+                                ).fetchall()
+                            )
                         saved_lead_ids = [int(row["id"]) for row in fallback_rows if row and row["id"] is not None]
             except Exception as lead_id_exc:
                 logging.warning("[scrape-task:%s] Could not resolve saved lead IDs for enrichment handoff: %s", task_id, lead_id_exc)

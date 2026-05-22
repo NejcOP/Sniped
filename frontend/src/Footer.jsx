@@ -1,6 +1,24 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Linkedin, Github, Twitter, ArrowUp } from 'lucide-react'
+import { Linkedin, Instagram, ArrowUp } from 'lucide-react'
+
+function XIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+      <path d="M4 4L20 20" />
+      <path d="M20 4L4 20" />
+    </svg>
+  )
+}
+
+function TikTokIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+      <path d="M14 4v8.5a3.5 3.5 0 1 1-3.5-3.5" />
+      <path d="M14 7c1 .9 2.2 1.5 3.5 1.6" />
+    </svg>
+  )
+}
 
 export default function Footer() {
   const [showBackToTop, setShowBackToTop] = useState(false)
@@ -50,22 +68,31 @@ export default function Footer() {
                 <Linkedin className="w-5 h-5" />
               </a>
               <a
-                href="https://twitter.com"
+                href="https://x.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-10 h-10 rounded-lg border border-slate-700 flex items-center justify-center text-slate-400 hover:text-yellow-400 hover:border-yellow-500/50 transition-colors"
                 aria-label="X (Twitter)"
               >
-                <Twitter className="w-5 h-5" />
+                <XIcon className="w-5 h-5" />
               </a>
               <a
-                href="https://github.com"
+                href="https://instagram.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-10 h-10 rounded-lg border border-slate-700 flex items-center justify-center text-slate-400 hover:text-yellow-400 hover:border-yellow-500/50 transition-colors"
-                aria-label="GitHub"
+                aria-label="Instagram"
               >
-                <Github className="w-5 h-5" />
+                <Instagram className="w-5 h-5" />
+              </a>
+              <a
+                href="https://tiktok.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-10 h-10 rounded-lg border border-slate-700 flex items-center justify-center text-slate-400 hover:text-yellow-400 hover:border-yellow-500/50 transition-colors"
+                aria-label="TikTok"
+              >
+                <TikTokIcon className="w-5 h-5" />
               </a>
             </div>
           </div>
