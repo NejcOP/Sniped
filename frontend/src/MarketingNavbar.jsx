@@ -19,10 +19,7 @@ export default function MarketingNavbar() {
     <nav className="fixed top-0 inset-x-0 z-50 bg-slate-950/90 backdrop-blur-xl border-b border-white/10">
       <div className="max-w-7xl mx-auto px-6 lg:px-8 h-16 flex items-center justify-between">
         <a href="/?stay=1" className="flex items-center gap-2 group" aria-label="Go to Sniped landing page">
-          <span className="w-8 h-8 rounded-lg bg-yellow-500 flex items-center justify-center text-slate-900 font-black text-sm">S</span>
-          <span className="font-extrabold text-xl tracking-tight text-white">
-            Sni<span className="text-yellow-400">ped</span>
-          </span>
+          <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-8 w-auto rounded-md" />
         </a>
 
         <div className="hidden md:flex items-center gap-8">

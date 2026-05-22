@@ -7948,10 +7948,7 @@ function App({ initialTab = 'leads' }) {
         <div className="dashboard-sidebar-shell">
           <div className="mb-3 flex items-center gap-2.5 px-1 pt-1">
             <a href="/?stay=1" className="flex items-center gap-2.5 group" title="Go to landing page">
-              <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-xl group-hover:opacity-80 transition-opacity" style={{background: 'linear-gradient(135deg, #d9a406, #FFC107)'}}>
-                <Zap className="h-3.5 w-3.5" style={{color: '#0a1422'}} />
-              </span>
-              <span className="text-[0.875rem] font-bold tracking-[-0.025em] text-white group-hover:text-yellow-300 transition-colors">Sni<span style={{color: '#FFC107'}}>ped</span></span>
+              <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-8 w-auto rounded-md" />
             </a>
           </div>
           <div>
@@ -8018,8 +8015,8 @@ function App({ initialTab = 'leads' }) {
         <header className="topbar sticky top-4 z-40 xl:hidden">
           <div className="topbar-shell">
             <div className="flex flex-wrap items-center gap-3">
-              <a href="/?stay=1" className="topbar-nav topbar-nav-active">
-                <Zap className="h-4 w-4" style={{color:'#D4AF37'}} /> Sni<span style={{color:'#D4AF37'}}>ped</span>
+              <a href="/?stay=1" className="topbar-nav topbar-nav-active px-2 py-1.5">
+                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-7 w-auto rounded-md" />
               </a>
               {visibleMainNavItems.map((item) => {
                 const Icon = item.icon
@@ -8539,7 +8536,7 @@ function App({ initialTab = 'leads' }) {
 
           <div className="workflow-grid mt-4">
             <WorkflowCard
-              icon={<Database className="h-5 w-5" />}
+              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
               step="01"
               title="Search & Scrape"
               summary={`${workflowStats.scraped} leads waiting for enrichment`}
@@ -8658,7 +8655,7 @@ function App({ initialTab = 'leads' }) {
             </WorkflowCard>
 
             <WorkflowCard
-              icon={<Sparkles className="h-5 w-5" />}
+              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
               step="02"
               title={<span className="flex items-center gap-2">AI Enrichment</span>}
               summary={`${workflowStats.scraped} raw leads need scoring and email discovery`}
@@ -8762,7 +8759,7 @@ function App({ initialTab = 'leads' }) {
 
             <div id="automation-card">
               <WorkflowCard
-                icon={<Send className="h-5 w-5" />}
+                icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
                 step="03"
                 title={<span className="flex items-center gap-2">Launch Mailer</span>}
                 summary={`${livePendingMailCount} leads waiting for outreach`}
