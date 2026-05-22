@@ -7948,7 +7948,7 @@ function App({ initialTab = 'leads' }) {
         <div className="dashboard-sidebar-shell">
           <div className="mb-3 flex items-center gap-2.5 px-1 pt-1">
             <a href="/?stay=1" className="flex items-center gap-2.5 group" title="Go to landing page">
-              <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-11 w-auto rounded-md" />
+              <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-12 w-auto rounded-md" />
             </a>
           </div>
           <div>
@@ -8016,7 +8016,7 @@ function App({ initialTab = 'leads' }) {
           <div className="topbar-shell">
             <div className="flex flex-wrap items-center gap-3">
               <a href="/?stay=1" className="topbar-nav topbar-nav-active px-2 py-1.5">
-                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-9 w-auto rounded-md" />
+                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-10 w-auto rounded-md" />
               </a>
               {visibleMainNavItems.map((item) => {
                 const Icon = item.icon

@@ -44,7 +44,7 @@ export default function Footer() {
           <div className="space-y-6">
             <div>
               <Link to="/" className="flex items-center gap-2 group mb-4">
-                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-10 w-auto rounded-md" />
+                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-11 w-auto rounded-md" />
               </Link>
               <p className="text-sm text-slate-400 leading-relaxed">
                 The world's most powerful AI-driven outbound engine. Built for agencies and winners. From Kranj to the World.
