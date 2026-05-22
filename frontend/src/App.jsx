@@ -8430,11 +8430,23 @@ function App({ initialTab = 'leads' }) {
                 </div>
                 <TerminalSquare className="h-4 w-4 text-cyan-300" />
               </div>
-              <div className="mt-3 grid gap-2">
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-300">Queued Mail: <strong className="text-white">{stats.queued_mail_count}</strong></div>
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-300">Replies: <strong className="text-white">{Number(stats.replies_count || 0)}</strong></div>
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-300">Open Rate: <strong className="text-white">{Number(stats.open_rate || 0).toFixed(1)}%</strong></div>
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-300">Last Refresh: <strong className="text-white">{lastManualRefreshAt ? new Date(lastManualRefreshAt).toLocaleTimeString() : 'Auto'}</strong></div>
+              <div className="mt-3 grid grid-cols-2 gap-2.5">
+                <div className="rounded-xl border border-slate-700/70 bg-slate-950/85 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-400">Queued Mail</p>
+                  <p className="mt-1 text-2xl font-bold leading-none text-white">{stats.queued_mail_count}</p>
+                </div>
+                <div className="rounded-xl border border-slate-700/70 bg-slate-950/85 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-400">Replies</p>
+                  <p className="mt-1 text-2xl font-bold leading-none text-white">{Number(stats.replies_count || 0)}</p>
+                </div>
+                <div className="rounded-xl border border-slate-700/70 bg-slate-950/85 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-400">Open Rate</p>
+                  <p className="mt-1 text-2xl font-bold leading-none text-white">{Number(stats.open_rate || 0).toFixed(1)}%</p>
+                </div>
+                <div className="rounded-xl border border-slate-700/70 bg-slate-950/85 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-400">Last Refresh</p>
+                  <p className="mt-1 text-2xl font-bold leading-none text-white">{lastManualRefreshAt ? new Date(lastManualRefreshAt).toLocaleTimeString() : 'Auto'}</p>
+                </div>
               </div>
 
               <div className="activity-log activity-log-panel mt-3 max-h-[220px] overflow-auto rounded-xl border border-slate-700/50 bg-slate-950/90 p-3">
