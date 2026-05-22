@@ -44,12 +44,7 @@ export default function Footer() {
           <div className="space-y-6">
             <div>
               <Link to="/" className="flex items-center gap-2 group mb-4">
-                <span className="w-8 h-8 rounded-lg bg-yellow-500 flex items-center justify-center text-slate-900 font-black text-sm shadow-[0_0_16px_rgba(234,179,8,0.4)]">
-                  L
-                </span>
-                <span className="font-extrabold text-lg tracking-tight text-white">
-                  Lead<span className="text-yellow-400">Flow</span>
-                </span>
+                <img src="/logos/sniped-logo-final.svg" alt="Sniped" className="h-10 w-auto rounded-md" />
               </Link>
               <p className="text-sm text-slate-400 leading-relaxed">
                 The world's most powerful AI-driven outbound engine. Built for agencies and winners. From Kranj to the World.
