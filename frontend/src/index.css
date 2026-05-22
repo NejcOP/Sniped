@@ -1098,7 +1098,8 @@
   }
 
   .activity-log {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: "JetBrains Mono", "IBM Plex Mono", "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-ligatures: none;
   }
 
   .activity-log-panel {
@@ -1106,19 +1107,25 @@
   }
 
   .activity-line {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 0.65rem;
-    border-bottom: 1px solid rgba(51, 65, 85, 0.35);
-    padding: 0.5rem 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    padding: 0.3rem 0;
     font-size: 0.72rem;
-    line-height: 1.55;
+    line-height: 1.5;
+    white-space: nowrap;
   }
 
-  .activity-line:last-child {
-    border-bottom: 0;
+  .activity-time {
+    color: #38bdf8;
+    flex: 0 0 auto;
   }
 
-  .activity-time { color: #38bdf8; }
-  .activity-text { color: #cbd5e1; }
+  .activity-text {
+    color: #cbd5e1;
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+    text-overflow: clip;
+  }
 }

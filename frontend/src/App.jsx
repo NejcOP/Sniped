@@ -8449,7 +8449,7 @@ function App({ initialTab = 'leads' }) {
                 </div>
               </div>
 
-              <div className="activity-log activity-log-panel mt-3 max-h-[220px] overflow-auto rounded-xl border border-slate-700/50 bg-slate-950/90 p-3">
+              <div className="activity-log activity-log-panel mt-3 max-h-[220px] overflow-auto rounded-2xl border border-slate-800/80 bg-[#020617]/95 p-3.5">
                 {activityFeed.length === 0 ? (
                   <div className="text-xs text-slate-500">No activity yet. Start a campaign step to populate the feed.</div>
                 ) : activityFeed.slice(0, 12).map((item, index) => (
