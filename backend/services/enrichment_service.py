@@ -271,6 +271,41 @@ class LeadEnricher:
 
         _emit_progress(0, 0, None, "starting")
 
+        prepared_leads: list[dict[str, Any]] = []
+        for lead in leads:
+            lead_id = int(lead["id"])
+            lead_name = str(lead.get("business_name") or "").strip() or f"lead-{lead_id}"
+            try:
+                self._mark_lead_processing(lead_id)
+                if not self.check_idempotency(lead_id):
+                    _emit_progress(processed, with_email, lead_name, "completed_lead")
+                    continue
+
+                website_url, website_source = self._resolve_business_website_url(
+                    lead_id=lead_id,
+                    business_name=lead_name,
+                    raw_website_url=lead.get("website_url"),
+                    maps_url=lead.get("maps_url"),
+                    address=str(lead.get("address") or ""),
+                    search_keyword=str(lead.get("search_keyword") or ""),
+                    email=lead.get("email"),
+                )
+                prepared_leads.append(
+                    {
+                        "lead": lead,
+                        "lead_name": lead_name,
+                        "website_url": website_url,
+                        "website_source": website_source,
+                    }
+                )
+            except Exception as exc:
+                self._mark_lead_failed(lead_id, error_message=str(exc))
+                logging.exception("Failed to prepare lead for enrichment: %s (%s)", lead_name, exc)
+
+        website_audits: dict[int, tuple[Optional[str], bool, str, dict[str, Any]]] = {}
+        if self.speed_mode and prepared_leads:
+            website_audits = self._audit_website_batch([item for item in prepared_leads if item.get("website_url")])
+
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=self.headless,
@@ -299,13 +334,12 @@ class LeadEnricher:
             apply_stealth(page)
 
             try:
-                for lead in leads:
+                for item in prepared_leads:
+                    lead = item["lead"]
+                    lead_name = str(item["lead_name"])
+                    website_url = item.get("website_url")
+                    website_source = item.get("website_source")
                     try:
-                        self._mark_lead_processing(int(lead["id"]))
-                        if not self.check_idempotency(int(lead["id"])):
-                            _emit_progress(processed, with_email, str(lead.get("business_name") or "").strip() or None, "completed_lead")
-                            continue
-                        lead_name = str(lead.get("business_name") or "").strip() or f"lead-{lead.get('id')}"
                         _emit_progress(processed, with_email, lead_name, "checking_website")
                         email = None
                         insecure_site = False
@@ -320,19 +354,19 @@ class LeadEnricher:
                         }
                         social_metrics: dict[str, dict[str, Any]] = {}
 
-                        website_url, website_source = self._resolve_business_website_url(
-                            lead_id=int(lead["id"]),
-                            business_name=lead_name,
-                            raw_website_url=lead.get("website_url"),
-                            maps_url=lead.get("maps_url"),
-                            address=str(lead.get("address") or ""),
-                            search_keyword=str(lead.get("search_keyword") or ""),
-                            email=lead.get("email"),
-                        )
                         if website_url:
                             if website_source == "recovered":
                                 logging.info("Recovered real website URL for %s: %s", lead_name, website_url)
-                            email, insecure_site, website_excerpt, website_signals = self._audit_website(page=page, website_url=website_url)
+                            if self.speed_mode:
+                                email, insecure_site, website_excerpt, website_signals = website_audits.get(
+                                    int(lead["id"]),
+                                    (None, False, "", {}),
+                                )
+                            else:
+                                email, insecure_site, website_excerpt, website_signals = self._audit_website(
+                                    page=page,
+                                    website_url=website_url,
+                                )
                             _emit_progress(processed, with_email, lead_name, "discovering_email")
                             if not email:
                                 recovered_email = self._recover_email_with_ai_or_search(
@@ -351,7 +385,6 @@ class LeadEnricher:
                                 existing_profiles=social_profiles,
                                 website_signals=website_signals,
                             )
-                            # Skip social metrics in speed mode — saves ~5-15s per lead.
                             if not self.speed_mode:
                                 social_metrics = self._collect_social_metrics(context=context, social_profiles=social_profiles)
                         else:
@@ -370,7 +403,6 @@ class LeadEnricher:
                             insecure_site=insecure_site,
                         )
 
-                        # ── Email MX verification ───────────────────────────
                         email_invalid = False
                         if email and not self._verify_email_mx(email):
                             logging.warning(
@@ -411,10 +443,9 @@ class LeadEnricher:
                                 )
                         client_tier = self._infer_client_tier(ai_score)
 
-                        # ── Golden Lead alert ───────────────────────────────
                         if ai_score >= 9:
                             logging.warning(
-                                "\u2605 GOLDEN LEAD FOUND: %s | score=%s | tier=%s | email=%s",
+                                "★ GOLDEN LEAD FOUND: %s | score=%s | tier=%s | email=%s",
                                 lead["business_name"], ai_score, client_tier, email or "no email",
                             )
 
@@ -476,13 +507,12 @@ class LeadEnricher:
                             with_email += 1
                         _emit_progress(processed, with_email, lead_name, "completed_lead")
                     except Exception as exc:
-                        lead_name = str(lead["business_name"] or "").strip() or f"lead-{lead['id']}"
                         self._mark_lead_failed(int(lead["id"]), error_message=str(exc))
                         logging.exception("Skipping lead after enrichment error: %s (%s)", lead_name, exc)
 
-                    _emit_progress(processed, with_email, str(lead["business_name"] or "").strip() or None, "enriching")
-
-                    random_delay(250, 700)
+                    _emit_progress(processed, with_email, lead_name, "enriching")
+                    if not self.speed_mode:
+                        random_delay(250, 700)
             finally:
                 try:
                     context.close()
@@ -1214,6 +1244,89 @@ class LeadEnricher:
 
         query += " ORDER BY business_name ASC"
         return self._fetchall(text(query), params)
+
+    @staticmethod
+    def _speed_mode_worker_count(total_leads: int) -> int:
+        if total_leads <= 0:
+            return 1
+        if total_leads < 5:
+            return total_leads
+        return min(8, total_leads)
+
+    @staticmethod
+    def _discover_contact_page_from_html(page_html: str, base_url: str) -> Optional[str]:
+        for href in re.findall(r'href=["\']([^"\']+)["\']', page_html or "", flags=re.IGNORECASE):
+            raw_href = unescape(str(href or "").strip())
+            if not raw_href or raw_href.startswith("mailto:") or raw_href.startswith("javascript:"):
+                continue
+            absolute_url = urljoin(base_url, raw_href)
+            lower_url = absolute_url.lower()
+            if "contact" in lower_url or "kontakt" in lower_url:
+                return absolute_url
+        return None
+
+    @staticmethod
+    def _fetch_url_text(website_url: str, timeout_seconds: int = 8) -> tuple[Optional[str], Optional[str]]:
+        try:
+            request = urllib.request.Request(website_url, headers={"User-Agent": MODERN_USER_AGENT})
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+                final_url = str(getattr(response, "geturl", lambda: website_url)() or website_url).strip()
+                return html, final_url
+        except Exception as exc:
+            logging.debug("Fast website audit failed for %s: %s", website_url, exc)
+            return None, None
+
+    def _audit_website_fast(self, website_url: str) -> tuple[Optional[str], bool, str, dict[str, Any]]:
+        page_html, final_url = self._fetch_url_text(website_url)
+        if not page_html:
+            return None, not website_url.lower().startswith("https://"), "", {}
+
+        resolved_url = final_url or website_url
+        insecure_site = not resolved_url.lower().startswith("https://")
+        website_signals = self._extract_website_signals(page_html=page_html, base_url=resolved_url, website_url=website_url)
+
+        emails = self._extract_emails(page_html)
+        if emails:
+            return self._pick_best_email(emails), insecure_site, self._extract_page_excerpt(page_html), website_signals
+
+        contact_page = self._discover_contact_page_from_html(page_html, resolved_url)
+        if contact_page:
+            contact_html, contact_final_url = self._fetch_url_text(contact_page)
+            if contact_html:
+                contact_signals = self._extract_website_signals(
+                    page_html=contact_html,
+                    base_url=contact_final_url or contact_page,
+                    website_url=website_url,
+                )
+                website_signals = self._merge_website_signals(website_signals, contact_signals)
+                contact_emails = self._extract_emails(contact_html)
+                if contact_emails:
+                    return self._pick_best_email(contact_emails), insecure_site, self._extract_page_excerpt(contact_html), website_signals
+
+        return None, insecure_site, self._extract_page_excerpt(page_html), website_signals
+
+    def _audit_website_batch(
+        self,
+        targets: list[dict[str, Any]],
+    ) -> dict[int, tuple[Optional[str], bool, str, dict[str, Any]]]:
+        if not targets:
+            return {}
+
+        worker_count = self._speed_mode_worker_count(len(targets))
+        results: dict[int, tuple[Optional[str], bool, str, dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(self._audit_website_fast, str(item.get("website_url") or "")): int(item["lead"]["id"])
+                for item in targets
+            }
+            for future, lead_id in futures.items():
+                try:
+                    results[lead_id] = future.result()
+                except Exception as exc:
+                    logging.warning("Fast website audit failed for lead %s: %s", lead_id, exc)
+                    results[lead_id] = (None, False, "", {})
+        return results
 
     def _audit_website(self, page, website_url: str) -> tuple[Optional[str], bool, str, dict[str, Any]]:
         try:
