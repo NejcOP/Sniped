@@ -207,24 +207,24 @@ const PRICING_PLANS = [
 
 const FAQ_ITEMS = [
   {
-    question: 'Kaj je Sniped.io?',
+    question: 'What is Sniped.io?',
     answer:
-      'Sniped.io je avtomatizirano B2B orodje za iskanje leadov, ki zdruzi Google Maps scraping in AI prodajne avdite za hitrejsi outreach.',
+      'Sniped.io is an automated B2B lead generation tool that combines Google Maps scraping and AI sales audits for faster outreach.',
   },
   {
-    question: 'Kako deluje AI enrichment?',
+    question: 'How does AI enrichment work?',
     answer:
-      'AI enrichment analizira javno dostopne podatke o podjetjih in njihovih spletnih straneh, nato pa pripravi uporabne uvide za personalizirano prodajno ponudbo.',
+      'AI enrichment analyzes publicly available company and website data, then prepares actionable insights for personalized sales offers.',
   },
   {
-    question: 'Ali potrebujem svoj Google API ključ?',
+    question: 'Do I need my own Google API key?',
     answer:
-      'Ne. Platforma je zasnovana tako, da lahko zacnes brez lastnega Google API kljuca in takoj testiras tok od leada do ponudbe.',
+      'No. The platform is designed so you can start without your own Google API key and immediately test the lead-to-offer flow.',
   },
   {
-    question: 'Je Sniped.io primeren za agencije in freelancerje?',
+    question: 'Is Sniped.io suitable for agencies and freelancers?',
     answer:
-      'Da. Sniped.io je narejen za agencije in freelancerje, ki zelijo hitro graditi B2B pipeline z manj rocnega dela.',
+      'Yes. Sniped.io is built for agencies and freelancers who want to quickly build a B2B pipeline with less manual work.',
   },
 ]
 
@@ -524,7 +524,7 @@ export default function LandingPage() {
             <p className="inline-flex rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-200">
               FAQ
             </p>
-            <h2 className="mt-4 text-3xl sm:text-4xl font-extrabold tracking-tight text-white">Pogosta vprašanja</h2>
+            <h2 className="mt-4 text-3xl sm:text-4xl font-extrabold tracking-tight text-white">Frequently Asked Questions</h2>
           </div>
 
           <div className="space-y-3">
