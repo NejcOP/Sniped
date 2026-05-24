@@ -414,19 +414,6 @@ export default function LandingPage() {
                 >
                   Find My First 50 Leads
                 </a>
-                <button
-                  type="button"
-                  onClick={() => {
-                    trackLandingEvent('landing_demo_modal_opened', {
-                      source: 'hero_secondary_cta',
-                      hero_variant: activeHeroVariant,
-                    })
-                    setIsVideoModalOpen(true)
-                  }}
-                  className="w-full sm:w-auto px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white transition-colors text-center"
-                >
-                  Watch 2-Min Demo
-                </button>
               </div>
 
               <div className="mt-4 flex items-center justify-center lg:justify-start gap-2 text-sm text-slate-300">
