@@ -665,7 +665,7 @@ export default function LandingPage() {
             Not for spam: Sniped is built for targeted B2B outreach, not mass spam.
           </p>
 
-          <div className="mt-12 grid gap-6 text-left sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-12 grid items-stretch gap-6 text-left sm:grid-cols-2 xl:grid-cols-4">
             {PRICING_PLANS.map((plan) => {
               const accentClass =
                 plan.accent === 'neon'
@@ -681,7 +681,7 @@ export default function LandingPage() {
               return (
                 <div
                   key={plan.name}
-                  className={`relative flex h-full flex-col overflow-hidden rounded-[28px] border p-6 backdrop-blur-xl ${accentClass} ${plan.popular ? 'xl:-translate-y-3' : ''}`}
+                  className={`relative flex h-full flex-col overflow-hidden rounded-[28px] border p-6 pb-8 backdrop-blur-xl ${accentClass} ${plan.popular ? 'xl:-translate-y-3' : ''}`}
                 >
                   <div className="absolute inset-0 bg-gradient-to-b from-white/[0.06] via-transparent to-transparent" />
                   {plan.popular && (
@@ -690,44 +690,46 @@ export default function LandingPage() {
                     </div>
                   )}
 
-                  <div className="relative flex h-full flex-col">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{plan.name}</p>
-                        <h3 className="mt-2 text-2xl font-bold text-white">{plan.subtitle}</h3>
+                  <div className="relative flex h-full flex-col justify-between">
+                    <div>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-[0.22em] text-slate-400">{plan.name}</p>
+                          <h3 className="mt-2 text-2xl font-bold text-white">{plan.subtitle}</h3>
+                        </div>
+                        <span className="rounded-full border border-white/10 bg-slate-950/60 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-yellow-200">
+                          {plan.trigger}
+                        </span>
                       </div>
-                      <span className="rounded-full border border-white/10 bg-slate-950/60 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-yellow-200">
-                        {plan.trigger}
-                      </span>
-                    </div>
 
-                    <div className="mt-6">
-                      <div className="flex items-end gap-1">
-                        <span className="text-5xl font-extrabold text-white">{plan.price}</span>
-                        <span className="mb-1 text-base font-semibold text-slate-400">{plan.period}</span>
+                      <div className="mt-6">
+                        <div className="flex items-end gap-1">
+                          <span className="text-5xl font-extrabold text-white">{plan.price}</span>
+                          <span className="mb-1 text-base font-semibold text-slate-400">{plan.period}</span>
+                        </div>
+                        <p className="mt-3 text-sm font-medium leading-6 text-slate-200">{plan.valueProp}</p>
                       </div>
-                      <p className="mt-3 text-sm font-medium leading-6 text-slate-200">{plan.valueProp}</p>
-                    </div>
 
-                    <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/55 px-3 py-3 shadow-inner shadow-black/20">
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Credits</p>
-                      <p className="mt-1 text-sm font-semibold text-cyan-200">{plan.credits}</p>
-                    </div>
+                      <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/55 px-3 py-3 shadow-inner shadow-black/20">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Credits</p>
+                        <p className="mt-1 text-sm font-semibold text-cyan-200">{plan.credits}</p>
+                      </div>
 
-                    <ul className="mt-5 space-y-3 text-sm text-slate-200 flex-1">
-                      {plan.features.map((feature) => (
-                        <li key={feature} className="flex items-start gap-2.5 leading-relaxed">
-                          <span className="mt-2 inline-block h-2 w-2 shrink-0 rounded-full bg-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.7)]" />
-                          <span>{feature}</span>
-                        </li>
-                      ))}
-                    </ul>
+                      <ul className="mt-5 space-y-3 text-sm text-slate-200">
+                        {plan.features.map((feature) => (
+                          <li key={feature} className="flex items-start gap-2.5 leading-relaxed">
+                            <span className="mt-2 inline-block h-2 w-2 shrink-0 rounded-full bg-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.7)]" />
+                            <span>{feature}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
 
                     <button
                       type="button"
                       onClick={() => { void startPlanCheckout(plan.planId) }}
                       disabled={loadingPlanId === plan.planId}
-                      className={`mt-6 inline-flex justify-center rounded-2xl px-4 py-3 text-sm font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60 ${
+                      className={`mt-6 inline-flex w-full justify-center rounded-2xl px-4 py-3 text-sm font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60 ${
                         plan.popular
                           ? 'bg-gradient-to-r from-yellow-300 to-amber-400 text-slate-950 shadow-[0_16px_40px_rgba(250,204,21,0.28)] hover:brightness-105'
                           : 'border border-white/10 bg-slate-800/80 text-white shadow-[0_14px_30px_rgba(15,23,42,0.3)] hover:border-yellow-300/40 hover:bg-slate-700/80'
