@@ -9736,6 +9736,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         "scanned": 0,
     }
     heartbeat_stop = Event()
+    _app.state.scrape_stop_flags[task_user_id] = False
 
     def _safe_update_progress() -> None:
         try:
@@ -9758,6 +9759,28 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 _safe_update_progress()
             except Exception:
                 logging.debug("[scrape-task:%s] Heartbeat progress update failed", task_id)
+
+    def _scrape_stop_requested() -> bool:
+        return bool(_app.state.scrape_stop_flags.get(task_user_id, False))
+
+    def _finish_scrape_stopped() -> None:
+        progress_state["phase"] = "stopped"
+        progress_state["status_message"] = "Stopped by user."
+        _safe_update_progress()
+        finish_task_record(
+            db_path,
+            task_id,
+            status="stopped",
+            result_payload={
+                "phase": "stopped",
+                "total_to_find": int(progress_state.get("total_to_find") or requested_total),
+                "current_found": int(progress_state.get("current_found") or 0),
+                "scanned_count": int(progress_state.get("scanned_count") or 0),
+                "inserted": int(progress_state.get("inserted") or 0),
+                "status_message": "Stopped by user.",
+            },
+            error="Stopped by user.",
+        )
 
     heartbeat_thread = Thread(target=_scrape_heartbeat, daemon=True)
     heartbeat_thread.start()
@@ -9874,6 +9897,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
         scrape_stall_limit = max(10, int(os.environ.get("SCRAPE_STALL_TIMEOUT_SECONDS", "45") or "45"))
 
         def _scrape_once(headless_value: bool, scrape_keyword: str):
+            if _scrape_stop_requested():
+                raise RuntimeError("Stopped by user.")
             progress_state["status_message"] = "Launching browser..."
             _safe_update_progress()
             logging.info("[scrape-task:%s] Starting browser... headless=%s", task_id, bool(headless_value))
@@ -9940,6 +9965,17 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
             wait_started_at = datetime.now(timezone.utc)
             while True:
+                if _scrape_stop_requested():
+                    progress_state["status_message"] = "Stopping scrape..."
+                    _safe_update_progress()
+                    leaked_scraper = active_scraper_ref.get("instance")
+                    if leaked_scraper is not None:
+                        try:
+                            leaked_scraper.close()
+                        except Exception:
+                            logging.debug("[scrape-task:%s] Failed to close scraper during stop request.", task_id)
+                    raise RuntimeError("Stopped by user.")
+
                 if done.wait(timeout=5):
                     break
 
@@ -10005,6 +10041,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 keyword = str(niche_keyword or "").strip()
                 if not keyword:
                     continue
+                if _scrape_stop_requested():
+                    _finish_scrape_stopped()
+                    return
 
                 progress_state["status_message"] = f"Starting niche {niche_idx + 1}/{len(keywords_to_scrape)}: {keyword}"
                 _safe_update_progress()
@@ -10027,7 +10066,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 if niche_idx < len(keywords_to_scrape) - 1:
                     progress_state["status_message"] = f"Cooling down before next niche... ({keyword})"
                     _safe_update_progress()
-                    time.sleep(3)
+                    _time.sleep(3)
 
             logging.info("[scrape-task:%s] Combined scrape returned leads=%s", task_id, len(leads))
         except Exception as scrape_exc:
@@ -10048,7 +10087,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                             pass
                     leads.extend(niche_leads)
                     if niche_idx < len(keywords_to_scrape) - 1:
-                        time.sleep(3)
+                        _time.sleep(3)
                 logging.info("[scrape-task:%s] Fallback scrape thread returned leads=%s", task_id, len(leads))
             else:
                 raise
@@ -10392,6 +10431,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 logging.debug("[scrape-task:%s] Could not append auto_enrich_queued result payload.", task_id)
         logging.info("[scrape-task:%s] Task completed successfully", task_id)
     except Exception as exc:
+        if _scrape_stop_requested():
+            _finish_scrape_stopped()
+            return
+
         logging.exception("Background scrape failed")
         logging.error("[scrape-task:%s] Task failed: %s", task_id, exc)
         requested_total = int(payload_data.get("results", 25))
@@ -10425,6 +10468,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 logging.debug("[scrape-task:%s] Finalizer cleanup for lingering scraper skipped.", task_id)
             finally:
                 active_scraper_ref["instance"] = None
+        _app.state.scrape_stop_flags.pop(task_user_id, None)
         heartbeat_stop.set()
 
 
@@ -12377,6 +12421,7 @@ def create_app() -> FastAPI:
     app.state.active_task_threads = {}
     app.state.scheduler = None
     app.state.mailer_stop_event = Event()
+    app.state.scrape_stop_flags = {}
     app.state.thread_pool = _thread_pool  # available to any endpoint that needs it
     app.state.enrich_semaphore = BoundedSemaphore(value=ENRICH_CONCURRENCY_LIMIT)
 
@@ -18280,6 +18325,16 @@ def create_app() -> FastAPI:
             return {"status": "stopped", "task_id": latest_task.get("id")}
         app.state.mailer_stop_event.set()
         return {"status": "stop_requested"}
+
+    @app.post("/api/scraper/stop")
+    def stop_scraper(request: Request) -> dict:
+        """Signal the authenticated user's active scrape task to stop."""
+        print("[scrape] POST /api/scraper/stop")
+        user_id = require_current_user_id(request)
+        reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
+        latest_task = fetch_latest_task(DEFAULT_DB_PATH, "scrape", user_id=user_id)
+        app.state.scrape_stop_flags[user_id] = True
+        return {"status": "stop_requested", "task_id": latest_task.get("id")}
 
     @app.post("/api/tasks/{task_id}/retry")
     def retry_task(task_id: int, background_tasks: BackgroundTasks, request: Request) -> dict:

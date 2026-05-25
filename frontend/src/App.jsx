@@ -2886,6 +2886,7 @@ function App({ initialTab = 'leads' }) {
     }
   })
   const [scrapeSuccessLeadsFound, setScrapeSuccessLeadsFound] = useState(null)
+  const [scrapeStopRequested, setScrapeStopRequested] = useState(false)
   const previousTasksRef = useRef({})
   const leadSearchRef = useRef(null)
   const workflowRef = useRef(null)
@@ -3508,11 +3509,20 @@ function App({ initialTab = 'leads' }) {
   const scrapeIsActive = ['queued', 'running', 'processing', 'pending'].includes(scrapeRuntimeStatus)
   const scrapeCardStatusLabel = scrapeIsActive
     ? 'RUNNING'
-    : scrapeRuntimeStatus === 'completed'
-      ? 'SUCCESS'
-      : scrapeRuntimeStatus === 'failed'
-        ? 'FAILED'
-        : 'READY'
+    : scrapeRuntimeStatus === 'stopped'
+      ? 'STOPPED'
+      : scrapeRuntimeStatus === 'completed'
+        ? 'SUCCESS'
+        : scrapeRuntimeStatus === 'failed'
+          ? 'FAILED'
+          : 'READY'
+
+  useEffect(() => {
+    if (!scrapeIsActive) {
+      setScrapeStopRequested(false)
+    }
+  }, [scrapeIsActive])
+
   const scrapeButtonLocked = pendingRequest === 'scrape' || scrapeIsActive || Boolean(scrapeSuccessLeadsFound)
 
   const enrichProgress = useMemo(() => {
@@ -7222,6 +7232,12 @@ function App({ initialTab = 'leads' }) {
       toast('Auto-export unlocks on The Growth and above.', { icon: '🔒' })
       return
     }
+    if (scrapeSuccessResetTimerRef.current) {
+      window.clearTimeout(scrapeSuccessResetTimerRef.current)
+      scrapeSuccessResetTimerRef.current = null
+    }
+    setScrapeSuccessLeadsFound(null)
+    setScrapeStopRequested(false)
     setPendingRequest('scrape')
     setLastError('')
     try {
@@ -7389,6 +7405,19 @@ function App({ initialTab = 'leads' }) {
     } catch {
       setMailerStopRequested(false)
       toast.error('Failed to send stop signal.')
+    }
+  }
+
+  async function onScrapeStop() {
+    if (!scrapeIsActive) return
+    setScrapeStopRequested(true)
+    try {
+      await fetchJson('/api/scraper/stop', { method: 'POST' })
+      toast.error('Stop requested — scraper will halt shortly.', { duration: 5000 })
+      await Promise.allSettled([fetchTaskState(true), refreshStats()])
+    } catch (error) {
+      setScrapeStopRequested(false)
+      toast.error(error instanceof Error ? error.message : 'Failed to send stop signal.')
     }
   }
 
@@ -8575,21 +8604,32 @@ function App({ initialTab = 'leads' }) {
                   ) : null}
                 </div>
               </div>
-              <button className="workflow-btn" type="button" disabled={scrapeButtonLocked} onClick={onScrapeSubmit}>
-                {scrapeSuccessLeadsFound ? (
-                  <>
-                    <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
-                  </>
-                ) : scrapeIsActive || pendingRequest === 'scrape' ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" /> Scraper Running...
-                  </>
-                ) : (
-                  <>
-                    <Database className="h-4 w-4" /> Launch Scrape
-                  </>
-                )}
-              </button>
+              {scrapeSuccessLeadsFound ? (
+                <button className="workflow-btn" type="button" disabled>
+                  <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
+                </button>
+              ) : scrapeIsActive ? (
+                <button
+                  className="workflow-btn border-rose-500/50 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25"
+                  type="button"
+                  disabled={scrapeStopRequested}
+                  onClick={onScrapeStop}
+                >
+                  {scrapeStopRequested ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" /> Stopping...
+                    </>
+                  ) : (
+                    <>
+                      <Ban className="h-4 w-4" /> Stop Scraper
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button className="workflow-btn" type="button" disabled={scrapeButtonLocked} onClick={onScrapeSubmit}>
+                  <Database className="h-4 w-4" /> Launch Scrape
+                </button>
+              )}
               {isOutOfCredits ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-amber-300">
                   <span>Out of credits. You need at least 1 credit to scrape.</span>

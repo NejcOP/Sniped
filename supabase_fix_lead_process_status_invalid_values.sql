@@ -43,8 +43,8 @@ BEGIN
             END
             WHERE process_status IS NULL
                OR btrim(coalesce(process_status::text, '')) = ''
-               OR upper(process_status::text) NOT IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')
-               OR process_status::text <> upper(process_status::text)
+               OR COALESCE(NULLIF(UPPER(process_status::text), ''), 'PENDING') NOT IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')
+               OR process_status::text <> UPPER(process_status::text)
         $text_sql$;
     END IF;
 END
