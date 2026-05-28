@@ -2887,6 +2887,7 @@ function App({ initialTab = 'leads' }) {
   })
   const [scrapeSuccessLeadsFound, setScrapeSuccessLeadsFound] = useState(null)
   const [scrapeStopRequested, setScrapeStopRequested] = useState(false)
+  const [scrapeForceIdle, setScrapeForceIdle] = useState(false)
   const previousTasksRef = useRef({})
   const leadSearchRef = useRef(null)
   const workflowRef = useRef(null)
@@ -3507,7 +3508,8 @@ function App({ initialTab = 'leads' }) {
 
   const scrapeRuntimeStatus = String(scrapeTask.status || 'idle').toLowerCase().trim()
   const scrapeIsActive = ['queued', 'running', 'processing', 'pending'].includes(scrapeRuntimeStatus)
-  const scrapeCardStatusLabel = scrapeIsActive
+  const scrapeUiActive = scrapeIsActive && !scrapeForceIdle
+  const scrapeCardStatusLabel = scrapeUiActive
     ? 'RUNNING'
     : scrapeRuntimeStatus === 'stopped'
       ? 'STOPPED'
@@ -3518,12 +3520,32 @@ function App({ initialTab = 'leads' }) {
           : 'READY'
 
   useEffect(() => {
-    if (!scrapeIsActive) {
+    if (!scrapeStopRequested) return
+    const stopTimeoutId = window.setTimeout(() => {
+      setScrapeForceIdle(true)
+    }, 3000)
+
+    return () => window.clearTimeout(stopTimeoutId)
+  }, [scrapeStopRequested])
+
+  useEffect(() => {
+    if (!scrapeUiActive) {
       setScrapeStopRequested(false)
     }
-  }, [scrapeIsActive])
+  }, [scrapeUiActive])
 
-  const scrapeButtonLocked = pendingRequest === 'scrape' || scrapeIsActive || Boolean(scrapeSuccessLeadsFound)
+  useEffect(() => {
+    if (!scrapeForceIdle) return
+    setTasks((prev) => ({
+      ...prev,
+      scrape: getIdleTask('scrape'),
+    }))
+    setActiveScrapeTaskId(null)
+  }, [scrapeForceIdle])
+
+  const scrapeButtonLocked = pendingRequest === 'scrape'
+    || scrapeUiActive
+    || (Boolean(scrapeSuccessLeadsFound) && !scrapeForceIdle)
 
   const enrichProgress = useMemo(() => {
     const status = String(enrichTaskView.status || 'idle').toLowerCase()
@@ -5971,6 +5993,11 @@ function App({ initialTab = 'leads' }) {
         const history = Array.isArray(data.history) ? data.history : []
         const next = { ...incoming }
 
+        if (scrapeForceIdle) {
+          next.scrape = getIdleTask('scrape')
+          return next
+        }
+
         const trackedScrapeId = Number(activeScrapeTaskIdRef.current || prev?.scrape?.id || 0)
         if (trackedScrapeId > 0) {
           const explicitTrackedCandidate = trackedTask
@@ -6050,7 +6077,7 @@ function App({ initialTab = 'leads' }) {
       }
       console.error('[tasks] fetch failed:', error)
     }
-  }, [])
+  }, [scrapeForceIdle])
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -7238,6 +7265,7 @@ function App({ initialTab = 'leads' }) {
     }
     setScrapeSuccessLeadsFound(null)
     setScrapeStopRequested(false)
+    setScrapeForceIdle(false)
     setPendingRequest('scrape')
     setLastError('')
     try {
@@ -8552,12 +8580,29 @@ function App({ initialTab = 'leads' }) {
         />
 
         <section className="glass-card rounded-[28px] p-7" ref={workflowRef}>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="label-overline">Campaign Workflow</p>
-              <h2 className="mt-2 text-2xl font-semibold text-white">Scrape → Enrich → Mail</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-400">Each phase exposes the current queue and the next best action, without fragmenting the workflow into separate blocks.</p>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-3xl border border-slate-700/50 bg-slate-900/70 shadow-[0_0_28px_rgba(250,204,21,0.18)]">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-7 w-7 text-amber-300 drop-shadow-[0_0_18px_rgba(250,204,21,0.28)]">
+                  <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="M12 3.5V6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  <path d="M12 17.5V20.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  <path d="M3.5 12H6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  <path d="M17.5 12H20.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  <path d="M16.5 7.5L18 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  <path d="M7.5 16.5L9 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-end gap-1">
+                  <span className="text-[26px] font-extrabold tracking-[-0.03em] text-white">Sniped</span>
+                  <span className="text-[26px] font-extrabold tracking-[-0.03em] text-amber-300">.io</span>
+                </div>
+                <p className="mt-1 text-[12px] uppercase tracking-[0.35em] text-slate-400">Scrape • Enrich • Mail</p>
+              </div>
             </div>
+
             <div className="rounded-full border border-slate-700/50 bg-slate-900/70 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
               {activeTasks.length > 0 ? `${activeTasks.length} worker${activeTasks.length !== 1 ? 's' : ''} active` : 'All systems idle'}
             </div>
@@ -8608,7 +8653,7 @@ function App({ initialTab = 'leads' }) {
                 <button className="workflow-btn" type="button" disabled>
                   <CheckCircle2 className="h-4 w-4" /> Success! {scrapeSuccessLeadsFound} Leads Found
                 </button>
-              ) : scrapeIsActive ? (
+              ) : scrapeUiActive ? (
                 <button
                   className="workflow-btn border-rose-500/50 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25"
                   type="button"
