@@ -3521,6 +3521,7 @@ function App({ initialTab = 'leads' }) {
 
   useEffect(() => {
     if (!scrapeStopRequested) return
+    setScrapeForceIdle(true)
     const stopTimeoutId = window.setTimeout(() => {
       setScrapeForceIdle(true)
     }, 3000)
@@ -7439,6 +7440,13 @@ function App({ initialTab = 'leads' }) {
   async function onScrapeStop() {
     if (!scrapeIsActive) return
     setScrapeStopRequested(true)
+    setScrapeForceIdle(true)
+    setTasks((prev) => ({
+      ...prev,
+      scrape: getIdleTask('scrape'),
+    }))
+    setActiveScrapeTaskId(null)
+
     try {
       await fetchJson('/api/scraper/stop', { method: 'POST' })
       toast.error('Stop requested — scraper will halt shortly.', { duration: 5000 })

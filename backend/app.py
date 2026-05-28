@@ -9918,7 +9918,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 proxy_urls=_proxy_urls or None,
                 speed_mode=bool(payload_data.get("speed_mode", False)),
             )
+            scraper.register_abort_callback(lambda: _scrape_stop_requested())
             active_scraper_ref["instance"] = scraper
+            _app.state.scrape_active_scrapers[task_user_id] = scraper
             try:
                 with scraper:
                     progress_state["status_message"] = f"Browser launched. Searching for {scrape_keyword}..."
@@ -9937,6 +9939,18 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     logging.debug("[scrape-task:%s] Scraper cleanup in worker finally skipped", task_id)
                 if active_scraper_ref.get("instance") is scraper:
                     active_scraper_ref["instance"] = None
+                if _app.state.scrape_active_scrapers.get(task_user_id) is scraper:
+                    _app.state.scrape_active_scrapers.pop(task_user_id, None)
+
+        def _close_active_scraper(reason: str) -> None:
+            leaked_scraper = active_scraper_ref.get("instance")
+            if leaked_scraper is None:
+                return
+            try:
+                leaked_scraper.close()
+                logging.warning("[scrape-task:%s] %s", task_id, reason)
+            except Exception:
+                logging.debug("[scrape-task:%s] Failed to close scraper for: %s", task_id, reason)
 
         def _scrape_with_boot_timeout(headless_value: bool, scrape_keyword: str):
             timeout_raw = os.environ.get("SCRAPE_TASK_TIMEOUT_SECONDS") or os.environ.get("SCRAPE_BOOT_TIMEOUT_SECONDS")
@@ -9968,15 +9982,10 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 if _scrape_stop_requested():
                     progress_state["status_message"] = "Stopping scrape..."
                     _safe_update_progress()
-                    leaked_scraper = active_scraper_ref.get("instance")
-                    if leaked_scraper is not None:
-                        try:
-                            leaked_scraper.close()
-                        except Exception:
-                            logging.debug("[scrape-task:%s] Failed to close scraper during stop request.", task_id)
+                    _close_active_scraper("Force-closed scraper after stop request.")
                     raise RuntimeError("Stopped by user.")
 
-                if done.wait(timeout=5):
+                if done.wait(timeout=1):
                     break
 
                 elapsed_wait = int((datetime.now(timezone.utc) - wait_started_at).total_seconds())
@@ -10000,17 +10009,9 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
 
                 idle_seconds = int((datetime.now(timezone.utc) - progress_tracker["last_activity_at"]).total_seconds())
                 if idle_seconds >= int(no_progress_timeout_seconds):
-                    leaked_scraper = active_scraper_ref.get("instance")
-                    if leaked_scraper is not None:
-                        try:
-                            leaked_scraper.close()
-                            logging.warning(
-                                "[scrape-task:%s] Force-closed scraper after no-progress timeout (%ss).",
-                                task_id,
-                                int(no_progress_timeout_seconds),
-                            )
-                        except Exception:
-                            logging.debug("[scrape-task:%s] Failed to force-close scraper on no-progress timeout.", task_id)
+                    _close_active_scraper(
+                        f"Force-closed scraper after no-progress timeout ({int(no_progress_timeout_seconds)}s)."
+                    )
                     raise TimeoutError(
                         f"Scrape stalled with no progress for {int(no_progress_timeout_seconds)}s"
                     )
@@ -10019,13 +10020,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     break
 
             if not done.is_set():
-                leaked_scraper = active_scraper_ref.get("instance")
-                if leaked_scraper is not None:
-                    try:
-                        leaked_scraper.close()
-                        logging.warning("[scrape-task:%s] Force-closed scraper after boot timeout to avoid zombie browser.", task_id)
-                    except Exception:
-                        logging.debug("[scrape-task:%s] Failed to force-close scraper after timeout.", task_id)
+                _close_active_scraper("Force-closed scraper after boot timeout to avoid zombie browser.")
                 raise TimeoutError(
                     f"Scrape task timeout after {boot_timeout_seconds}s while waiting for browser/Maps workflow (keyword={scrape_keyword})."
                 )
@@ -12422,6 +12417,7 @@ def create_app() -> FastAPI:
     app.state.scheduler = None
     app.state.mailer_stop_event = Event()
     app.state.scrape_stop_flags = {}
+    app.state.scrape_active_scrapers = {}
     app.state.thread_pool = _thread_pool  # available to any endpoint that needs it
     app.state.enrich_semaphore = BoundedSemaphore(value=ENRICH_CONCURRENCY_LIMIT)
 
@@ -18328,12 +18324,41 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scraper/stop")
     def stop_scraper(request: Request) -> dict:
-        """Signal the authenticated user's active scrape task to stop."""
+        """Signal the authenticated user's active scrape task to stop and close any active browser session."""
         print("[scrape] POST /api/scraper/stop")
         user_id = require_current_user_id(request)
         reconcile_orphaned_active_tasks(app, DEFAULT_DB_PATH)
         latest_task = fetch_latest_task(DEFAULT_DB_PATH, "scrape", user_id=user_id)
         app.state.scrape_stop_flags[user_id] = True
+
+        if latest_task.get("running") and latest_task.get("id") is not None:
+            task_id = int(latest_task["id"])
+            result_payload = latest_task.get("result") or {}
+            finish_task_record(
+                DEFAULT_DB_PATH,
+                task_id,
+                status="stopped",
+                result_payload={
+                    "phase": "stopped",
+                    "total_to_find": int(result_payload.get("total_to_find") or 0),
+                    "current_found": int(result_payload.get("current_found") or 0),
+                    "scanned_count": int(result_payload.get("scanned_count") or 0),
+                    "inserted": int(result_payload.get("inserted") or 0),
+                    "status_message": "Stopped by user.",
+                },
+                error="Stopped by user.",
+            )
+
+        active_scraper = app.state.scrape_active_scrapers.get(user_id)
+        if active_scraper is not None:
+            try:
+                active_scraper.close()
+                logging.info("[scrape] Closed active scraper process for user %s on stop request.", user_id)
+            except Exception:
+                logging.exception("[scrape] Failed to close active scraper process for user %s on stop request.", user_id)
+            finally:
+                app.state.scrape_active_scrapers.pop(user_id, None)
+
         return {"status": "stop_requested", "task_id": latest_task.get("id")}
 
     @app.post("/api/tasks/{task_id}/retry")

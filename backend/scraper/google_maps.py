@@ -85,6 +85,7 @@ class GoogleMapsScraper:
         self.page: Optional[Page] = None
         self._using_shared_browser = False
         self._first_result_snapshot_written = False
+        self._abort_callback: Optional[Callable[[], bool]] = None
         self.inline_deep_scan = str(os.environ.get("SCRAPE_INLINE_DEEP_SCAN", "0") or "0").strip().lower() in {
             "1",
             "true",
@@ -509,6 +510,21 @@ class GoogleMapsScraper:
             finally:
                 self._playwright = None
 
+    def register_abort_callback(self, callback: Optional[Callable[[], bool]]) -> None:
+        self._abort_callback = callback
+
+    def _raise_if_aborted(self) -> None:
+        if self._abort_callback is None:
+            return
+
+        try:
+            if bool(self._abort_callback()):
+                raise RuntimeError("Stopped by user.")
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError("Stopped by user.")
+
     def _apply_stealth(self) -> None:
         assert self.page is not None
 
@@ -551,6 +567,7 @@ class GoogleMapsScraper:
         if not self.page:
             raise RuntimeError("Scraper not started. Use with-context or call start().")
 
+        self._raise_if_aborted()
         logging.info("Navigating to URL | keyword=%r country=%s headless=%s", keyword, self.country_code, bool(self.headless))
         self._open_maps_and_search(keyword)
         logging.info("Waiting for results | keyword=%r", keyword)
@@ -584,6 +601,7 @@ class GoogleMapsScraper:
 
         try:
             while len(leads) < max_results and stalled_rounds < 8:
+                self._raise_if_aborted()
                 now = time.monotonic()
                 if now - last_keep_alive_at >= 5.0:
                     keepalive = (
@@ -632,6 +650,7 @@ class GoogleMapsScraper:
                 for idx in range(count):
                     if len(leads) >= max_results:
                         break
+                    self._raise_if_aborted()
                     try:
                         card = cards.nth(idx)
                         card_key = self._card_key(card, idx)
