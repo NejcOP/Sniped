@@ -913,7 +913,7 @@ class GoogleMapsScraper:
                     pass
                 random_delay(900, 1700)
                 logging.info("Waiting for results | candidate=%s", url)
-                if self._wait_for_any_result_signal(timeout_ms=30000):
+                if self._wait_for_any_result_signal(timeout_ms=5000):
                     logging.info("Results found | candidate=%s", url)
                     return True
             except Exception as exc:
@@ -949,7 +949,7 @@ class GoogleMapsScraper:
                 self._accept_consent_if_present()
 
                 logging.info("Waiting for results | searchbox_base=%s", base_url)
-                if self._wait_for_any_result_signal(timeout_ms=30000):
+                if self._wait_for_any_result_signal(timeout_ms=5000):
                     logging.info("Results found | searchbox_base=%s", base_url)
                     return True
             except Exception as exc:

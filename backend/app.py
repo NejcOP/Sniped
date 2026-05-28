@@ -10043,7 +10043,39 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 progress_state["status_message"] = f"Starting niche {niche_idx + 1}/{len(keywords_to_scrape)}: {keyword}"
                 _safe_update_progress()
 
-                niche_leads = _scrape_with_boot_timeout(requested_headless, keyword)
+                try:
+                    niche_leads = _scrape_with_boot_timeout(requested_headless, keyword)
+                except TimeoutError as exc:
+                    logging.warning(
+                        "[scrape-task:%s] Skipping keyword after timeout: %s | keyword=%r",
+                        task_id,
+                        exc,
+                        keyword,
+                    )
+                    progress_state["status_message"] = f"Skipped blocked/timeout keyword: {keyword}"
+                    _safe_update_progress()
+                    continue
+                except Exception as exc:
+                    message = str(exc or "").lower()
+                    if any(token in message for token in [
+                        "captcha",
+                        "unusual traffic",
+                        "blocked",
+                        "google maps results did not load",
+                        "unable to locate",
+                        "challenge page",
+                    ]):
+                        logging.warning(
+                            "[scrape-task:%s] Skipping keyword due to block/challenge: %s | keyword=%r",
+                            task_id,
+                            exc,
+                            keyword,
+                        )
+                        progress_state["status_message"] = f"Skipped blocked keyword: {keyword}"
+                        _safe_update_progress()
+                        continue
+                    raise
+
                 for lead in niche_leads:
                     # Persist niche ownership by writing search_keyword explicitly.
                     try:
