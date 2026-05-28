@@ -8582,8 +8582,8 @@ function App({ initialTab = 'leads' }) {
         <section className="glass-card rounded-[28px] p-7" ref={workflowRef}>
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-4">
-              <div className="flex h-14 w-14 items-center justify-center rounded-3xl border border-slate-700/50 bg-slate-900/70 shadow-[0_0_28px_rgba(250,204,21,0.18)]">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-7 w-7 text-amber-300 drop-shadow-[0_0_18px_rgba(250,204,21,0.28)]">
+              <div className="flex h-16 w-16 items-center justify-center rounded-[1.25rem] border border-slate-700/50 bg-slate-900/80 shadow-[0_0_30px_rgba(250,204,21,0.18)]">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-amber-300 drop-shadow-[0_0_20px_rgba(250,204,21,0.28)]">
                   <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.8" />
                   <path d="M12 3.5V6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                   <path d="M12 17.5V20.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -8596,8 +8596,8 @@ function App({ initialTab = 'leads' }) {
 
               <div className="min-w-0">
                 <div className="flex flex-wrap items-end gap-1">
-                  <span className="text-[26px] font-extrabold tracking-[-0.03em] text-white">Sniped</span>
-                  <span className="text-[26px] font-extrabold tracking-[-0.03em] text-amber-300">.io</span>
+                  <span className="text-3xl font-extrabold tracking-[-0.03em] text-white">Sniped</span>
+                  <span className="text-3xl font-extrabold tracking-[-0.03em] text-amber-300">.io</span>
                 </div>
                 <p className="mt-1 text-[12px] uppercase tracking-[0.35em] text-slate-400">Scrape • Enrich • Mail</p>
               </div>
@@ -8610,7 +8610,7 @@ function App({ initialTab = 'leads' }) {
 
           <div className="workflow-grid mt-4">
             <WorkflowCard
-              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
+              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-7 w-7" />}
               step="01"
               title="Search & Scrape"
               summary={`${workflowStats.scraped} leads waiting for enrichment`}
@@ -8740,7 +8740,7 @@ function App({ initialTab = 'leads' }) {
             </WorkflowCard>
 
             <WorkflowCard
-              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
+              icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-7 w-7" />}
               step="02"
               title={<span className="flex items-center gap-2">AI Enrichment</span>}
               summary={`${workflowStats.scraped} raw leads need scoring and email discovery`}
@@ -8844,7 +8844,7 @@ function App({ initialTab = 'leads' }) {
 
             <div id="automation-card">
               <WorkflowCard
-                icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-5 w-5" />}
+                icon={<img src="/logos/sniped-icon-final.svg" alt="" className="h-7 w-7" />}
                 step="03"
                 title={<span className="flex items-center gap-2">Launch Mailer</span>}
                 summary={`${livePendingMailCount} leads waiting for outreach`}
