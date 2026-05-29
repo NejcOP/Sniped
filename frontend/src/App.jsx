@@ -4552,6 +4552,14 @@ function App({ initialTab = 'leads' }) {
 
   useEffect(() => {
     if (activeTab !== 'leads') return undefined
+    const debounceId = window.setTimeout(() => {
+      void fetchNicheAdvice({ silent: true, countryCode: scrapeForm.country })
+    }, 700)
+    return () => window.clearTimeout(debounceId)
+  }, [activeTab, fetchNicheAdvice, scrapeForm.country, scrapeForm.keyword])
+
+  useEffect(() => {
+    if (activeTab !== 'leads') return undefined
     if (!nicheAdvice.error) return undefined
     const retryId = window.setTimeout(() => {
       void fetchNicheAdvice({ silent: true, countryCode: scrapeForm.country })

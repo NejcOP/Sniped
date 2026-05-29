@@ -7615,6 +7615,187 @@ def build_market_intelligence_mock_response(
     }
 
 
+def _build_market_intelligence_from_supabase(
+    client: Any,
+    selected_country: str,
+    selected_country_label: str,
+    search_context: str,
+    user_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if client is None:
+        return None
+
+    try:
+        rows = supabase_select_rows(
+            client,
+            "leads",
+            columns=(
+                "business_name,search_keyword,address,website_url,linkedin_url,instagram_url,facebook_url," \
+                "tiktok_url,twitter_url,youtube_url,ai_score,qualification_score,rating,review_count"
+            ),
+            filters={"user_id": user_id} if user_id else None,
+            order_by="created_at",
+            desc=True,
+            limit=120,
+        )
+    except Exception as exc:
+        logging.warning("Could not fetch Supabase leads for market intelligence: %s", exc)
+        return None
+
+    if not rows:
+        return None
+
+    def _has_social(lead: dict[str, Any]) -> bool:
+        return any(str(lead.get(key) or "").strip() for key in [
+            "linkedin_url",
+            "instagram_url",
+            "facebook_url",
+            "tiktok_url",
+            "twitter_url",
+            "youtube_url",
+        ])
+
+    def _format_keyword(lead: dict[str, Any]) -> str:
+        keyword = str(lead.get("search_keyword") or "").strip()
+        if not keyword:
+            business_name = str(lead.get("business_name") or "").strip()
+            if business_name:
+                keyword = f"{business_name} services"
+        if keyword and " in " not in keyword.lower():
+            keyword = f"{keyword} in {selected_country_label}"
+        return keyword or f"Local services in {selected_country_label}"
+
+    def _format_location(lead: dict[str, Any]) -> str:
+        address = str(lead.get("address") or "").strip()
+        if address:
+            city_part = address.split(",")[0].strip()
+            if city_part:
+                return city_part
+        return selected_country_label
+
+    def _build_reason(lead: dict[str, Any], issues: list[str]) -> str:
+        if not issues:
+            return "This business has room to improve local visibility and customer acquisition."
+        if "missing website" in issues and "no social footprint" in issues:
+            return "No website and no social presence make this business a strong candidate for digital overhaul and lead generation support."
+        if "missing website" in issues:
+            return "This business lacks a functional website, which makes a website redesign or launch pitch especially urgent."
+        if "no social footprint" in issues:
+            return "No social footprint means they are missing retargeting and low-cost customer acquisition opportunities."
+        if "poor rating" in issues:
+            return "A weak Google rating signals reputation risk and a high-value need for review management and local SEO."
+        if "low ai score" in issues and "weak qualification" in issues:
+            return "AI data shows both low lead readiness and weak qualification, making this business a strong candidate for conversion-focused outreach."
+        if "low ai score" in issues:
+            return "AI signals show low lead readiness, so direct outreach and strategy support are likely to stand out."
+        if "weak qualification" in issues:
+            return "This business has a weak qualification profile, so a sales-ready positioning and nurture campaign can be very effective."
+        return f"The lead has {', '.join(issues)} and represents a concrete, help-needed opportunity."
+
+    def _score_expected_reply_rate(lead: dict[str, Any], issues: list[str]) -> float:
+        if "missing website" in issues and "no social footprint" in issues:
+            return 6.8
+        if "missing website" in issues:
+            return 6.1
+        if "no social footprint" in issues:
+            return 5.9
+        if "poor rating" in issues:
+            return 5.4
+        if "low ai score" in issues or "weak qualification" in issues:
+            return 5.7
+        return 6.2
+
+    random.shuffle(rows)
+    candidates: list[dict[str, Any]] = []
+    lower_context = str(search_context or "").strip().lower()
+
+    for row in rows:
+        website = bool(str(row.get("website_url") or "").strip())
+        social = _has_social(row)
+        ai_score = float(row.get("ai_score") or 0.0)
+        qual_score = float(row.get("qualification_score") or 0.0)
+        rating = float(row.get("rating") or 0.0)
+        review_count = int(row.get("review_count") or 0)
+
+        issues: list[str] = []
+        if ai_score > 0 and ai_score < 5:
+            issues.append("low ai score")
+        if qual_score > 0 and qual_score < 5:
+            issues.append("weak qualification")
+        if not website:
+            issues.append("missing website")
+        if not social:
+            issues.append("no social footprint")
+        if rating > 0 and rating < 4.0:
+            issues.append("poor rating")
+
+        if not issues:
+            continue
+
+        context_bonus = 0
+        if lower_context:
+            search_keyword = str(row.get("search_keyword") or "").lower()
+            business_name = str(row.get("business_name") or "").lower()
+            if lower_context in search_keyword or lower_context in business_name:
+                context_bonus = 1
+
+        priority = (
+            len(issues) * 10 + context_bonus,
+            -ai_score,
+            -qual_score,
+            -rating,
+            random.random(),
+        )
+
+        keyword = _format_keyword(row)
+        if not keyword:
+            continue
+
+        candidates.append({
+            "keyword": keyword,
+            "location": _format_location(row),
+            "country_code": selected_country,
+            "reason": _build_reason(row, issues),
+            "expected_reply_rate": round(max(1.0, min(_score_expected_reply_rate(row, issues), 12.5)), 1),
+            "priority": priority,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item["priority"], reverse=True)
+    final: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = str(item["keyword"]).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        final.append({
+            "keyword": item["keyword"],
+            "location": item["location"],
+            "country_code": item["country_code"],
+            "reason": item["reason"],
+            "expected_reply_rate": item["expected_reply_rate"],
+        })
+        if len(final) >= 3:
+            break
+
+    if not final:
+        return None
+
+    return {
+        "source": "supabase",
+        "generated_at": utc_now_iso(),
+        "recommendations": final,
+        "top_pick": final[0],
+        "performance_snapshot": [],
+        "selected_country_code": selected_country,
+        "selected_country_label": selected_country_label,
+        "search_context": search_context,
+    }
+
+
 def get_niche_recommendation(
     db_path: Path,
     config_path: Path,
@@ -7632,6 +7813,20 @@ def get_niche_recommendation(
     }
     selected_country_label = country_labels.get(selected_country, selected_country)
     normalized_search_context = str(search_context or "").strip()
+
+    if is_supabase_primary_enabled(config_path):
+        supabase_client = get_supabase_client(config_path)
+        if supabase_client is not None and supabase_table_available(config_path, "leads"):
+            supabase_result = _build_market_intelligence_from_supabase(
+                supabase_client,
+                selected_country,
+                selected_country_label,
+                normalized_search_context,
+                user_id=user_id,
+            )
+            if supabase_result is not None:
+                return supabase_result
+
     performance = extract_keyword_performance(db_path, user_id=user_id)
     heuristic = heuristic_recommendations_from_performance(performance, selected_country)
 
