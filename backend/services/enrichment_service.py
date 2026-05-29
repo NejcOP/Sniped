@@ -1,6 +1,7 @@
 ﻿import argparse
 import asyncio
 import csv
+import gc
 import json
 import logging
 import os
@@ -527,6 +528,8 @@ class LeadEnricher:
                     _emit_progress(processed, with_email, lead_name, "enriching")
                     if not self.speed_mode:
                         random_delay(250, 700)
+                    if processed and processed % 5 == 0:
+                        gc.collect()
             finally:
                 try:
                     context.close()
@@ -534,6 +537,10 @@ class LeadEnricher:
                     pass
                 try:
                     browser.close()
+                except Exception:
+                    pass
+                try:
+                    gc.collect()
                 except Exception:
                     pass
 
@@ -2948,7 +2955,8 @@ class LeadEnricher:
                 parsed = json.loads(content or "{}")
                 if not isinstance(parsed, dict) or not parsed:
                     logging.warning("Azure OpenAI returned empty/invalid JSON payload for enrichment request.")
-                return parsed if isinstance(parsed, dict) else {}
+                    return {}
+                return parsed
             except Exception as exc:
                 message = str(exc)
                 if "429" in message and attempt < OPENAI_429_MAX_RETRIES:
@@ -2961,9 +2969,19 @@ class LeadEnricher:
                     )
                     await asyncio.sleep(backoff_seconds)
                     continue
-                raise RuntimeError(f"Azure OpenAI scoring failed: {message[:400]}") from exc
+                if "API version not supported" in message or "BadRequest" in message or "400" in message:
+                    logging.warning(
+                        "Azure OpenAI API version unsupported or bad request; falling back to heuristic scoring: %s",
+                        message,
+                    )
+                else:
+                    logging.warning(
+                        "Azure OpenAI request failed; falling back to heuristic scoring: %s",
+                        message,
+                    )
+                return {}
 
-        raise RuntimeError("Azure OpenAI scoring failed after retry attempts.")
+        return {}
 
     def _check_supabase_score_cache(
         self,
