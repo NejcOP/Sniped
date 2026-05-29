@@ -307,9 +307,20 @@ class LeadEnricher:
             website_audits = self._audit_website_batch([item for item in prepared_leads if item.get("website_url")])
 
         with sync_playwright() as playwright:
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-extensions",
+                "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+            ]
             browser = playwright.chromium.launch(
                 headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled", "--disable-gpu", "--no-sandbox"],
+                args=launch_args,
             )
             context = browser.new_context(
                 user_agent=MODERN_USER_AGENT,
@@ -480,6 +491,9 @@ class LeadEnricher:
                                 facebook_url=social_profiles.get("facebook"),
                                 twitter_url=social_profiles.get("twitter"),
                                 youtube_url=social_profiles.get("youtube"),
+                                social_fb=social_profiles.get("facebook"),
+                                social_ig=social_profiles.get("instagram"),
+                                social_li=social_profiles.get("linkedin"),
                                 qualification_score=deep_intelligence.get("qualification_score"),
                             )
                         except Exception as save_exc:
@@ -796,6 +810,9 @@ class LeadEnricher:
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_url text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_url text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS social_fb text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS social_ig text',
+            'ALTER TABLE leads ADD COLUMN IF NOT EXISTS social_li text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS linkedin text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram text',
             'ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook text',
@@ -1144,6 +1161,9 @@ class LeadEnricher:
         facebook_url: Optional[str] = None,
         twitter_url: Optional[str] = None,
         youtube_url: Optional[str] = None,
+        social_fb: Optional[str] = None,
+        social_ig: Optional[str] = None,
+        social_li: Optional[str] = None,
         qualification_score: Optional[float] = None,
     ) -> int:
         new_status = "invalid_email" if invalid_email else "enriched"
@@ -1174,6 +1194,9 @@ class LeadEnricher:
             "facebook_url": facebook_url,
             "twitter_url": twitter_url,
             "youtube_url": youtube_url,
+            "social_fb": facebook_url,
+            "social_ig": instagram_url,
+            "social_li": linkedin_url,
             "phone_formatted": phone_formatted,
             "phone_type": phone_type,
             "lead_id": int(lead_id),
@@ -1204,6 +1227,9 @@ class LeadEnricher:
                         facebook_url = COALESCE(:facebook_url, facebook_url),
                         twitter_url = COALESCE(:twitter_url, twitter_url),
                         youtube_url = COALESCE(:youtube_url, youtube_url),
+                        social_fb = COALESCE(:social_fb, social_fb),
+                        social_ig = COALESCE(:social_ig, social_ig),
+                        social_li = COALESCE(:social_li, social_li),
                         linkedin = COALESCE(:linkedin_url, linkedin),
                         instagram = COALESCE(:instagram_url, instagram),
                         facebook = COALESCE(:facebook_url, facebook),
@@ -1331,6 +1357,10 @@ class LeadEnricher:
     def _audit_website(self, page, website_url: str) -> tuple[Optional[str], bool, str, dict[str, Any]]:
         try:
             page.goto(website_url, wait_until="domcontentloaded", timeout=10000)
+            try:
+                page.wait_for_selector("body", timeout=2000)
+            except PlaywrightTimeoutError:
+                pass
         except PlaywrightTimeoutError:
             logging.warning("Timeout while loading website: %s", website_url)
             return None, not website_url.lower().startswith("https://"), "", {}
@@ -1339,7 +1369,8 @@ class LeadEnricher:
             return None, not website_url.lower().startswith("https://"), "", {}
 
         random_mouse_movements(page, count=3)
-        random_delay(250, 700)
+        if not self.speed_mode:
+            random_delay(250, 700)
 
         final_url = page.url or website_url
         insecure_site = not final_url.lower().startswith("https://")
@@ -1362,7 +1393,12 @@ class LeadEnricher:
         if contact_page:
             try:
                 page.goto(contact_page, wait_until="domcontentloaded", timeout=10000)
-                random_delay(250, 600)
+                try:
+                    page.wait_for_selector("body", timeout=2000)
+                except PlaywrightTimeoutError:
+                    pass
+                if not self.speed_mode:
+                    random_delay(250, 600)
                 try:
                     contact_html = page.content()
                 except Exception:
@@ -1465,6 +1501,9 @@ class LeadEnricher:
             except Exception:
                 domain_hint = ""
 
+        if self.speed_mode:
+            return profiles
+
         platform_queries = {
             "linkedin": ["linkedin.com/company", "linkedin.com/in"],
             "instagram": ["instagram.com"],
@@ -1491,6 +1530,7 @@ class LeadEnricher:
             )
             if match:
                 profiles[platform] = match
+
         return profiles
 
     def _search_social_profile_url(
