@@ -8643,14 +8643,25 @@ function App({ initialTab = 'leads' }) {
                   </div>
                 </label>
                 <div className="grid gap-2">
-                  <CheckboxField label="Headless" checked={scrapeForm.headless} onChange={(v) => setScrapeForm({ ...scrapeForm, headless: v })} />
-                  <CheckboxField label="Speed Mode" checked={scrapeForm.speedMode} onChange={(v) => setScrapeForm({ ...scrapeForm, speedMode: v })} title="Prioritize quantity — skips slow social metrics collection" />
+                  <CheckboxField
+                    label="Headless"
+                    checked={scrapeForm.headless}
+                    onChange={(v) => setScrapeForm({ ...scrapeForm, headless: v })}
+                    title="Zažene brskalnik v skritem načinu v ozadju za manjšo porabo sistemskih virov."
+                  />
+                  <CheckboxField
+                    label="Speed Mode"
+                    checked={scrapeForm.speedMode}
+                    onChange={(v) => setScrapeForm({ ...scrapeForm, speedMode: v })}
+                    title="Maksimalno pospeši praskanje tako, da blokira nalaganje slik in odvečnih stilov."
+                  />
                   <CheckboxField
                     label="Export targets"
                     checked={canBulkExport && scrapeForm.exportTargets}
                     onChange={(v) => setScrapeForm({ ...scrapeForm, exportTargets: v })}
                     disabled={!canBulkExport}
                     badge={!canBulkExport ? 'Growth+' : ''}
+                    title="Po zaključku praskanja avtomatsko pripravi datoteko za izvoz podatkov."
                   />
                   {!canBulkExport ? (
                     <p className="text-[11px] text-amber-300">Unlock The Growth to auto-export CSV targets after each scrape.</p>
@@ -8761,8 +8772,18 @@ function App({ initialTab = 'leads' }) {
                   <input className="glass-input" type="number" min="1" max="200" value={enrichForm.limit} onChange={(e) => setEnrichForm({ ...enrichForm, limit: e.target.value })} />
                 </label>
                 <div className="grid gap-2">
-                  <CheckboxField label="Headless" checked={enrichForm.headless} onChange={(v) => setEnrichForm({ ...enrichForm, headless: v })} />
-                  <CheckboxField label="Skip CSV export" checked={enrichForm.skipExport} onChange={(v) => setEnrichForm({ ...enrichForm, skipExport: v })} />
+                  <CheckboxField
+                    label="Headless"
+                    checked={enrichForm.headless}
+                    onChange={(v) => setEnrichForm({ ...enrichForm, headless: v })}
+                    title="Izvede AI analizo in iskanje e-mailov preko ozadnih procesov."
+                  />
+                  <CheckboxField
+                    label="Skip CSV export"
+                    checked={enrichForm.skipExport}
+                    onChange={(v) => setEnrichForm({ ...enrichForm, skipExport: v })}
+                    title="Preskoči generiranje lokalne CSV datoteke in podatke shrani direktno v oblak."
+                  />
                 </div>
               </div>
               <div className="workflow-meta">
@@ -13339,15 +13360,18 @@ function LockedFeatureNotice({ title, description }) {
   )
 }
 
-function CheckboxField({ label, checked, onChange, disabled = false, badge = '' }) {
+function CheckboxField({ label, checked, onChange, disabled = false, badge = '', title }) {
   return (
-    <label className={`flex items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition ${disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer hover:bg-white/[0.07]'}`}>
+    <label
+      title={title}
+      className={`flex items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition ${disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer hover:bg-white/[0.07]'}`}>
       <input
         className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-teal-500 focus:ring-teal-500"
         type="checkbox"
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
+        title={title}
       />
       <span className="flex items-center gap-2">
         <span>{label}</span>
