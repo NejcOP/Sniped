@@ -8647,13 +8647,13 @@ function App({ initialTab = 'leads' }) {
                     label="Headless"
                     checked={scrapeForm.headless}
                     onChange={(v) => setScrapeForm({ ...scrapeForm, headless: v })}
-                    title="Zažene brskalnik v skritem načinu v ozadju za manjšo porabo sistemskih virov."
+                    tooltip="Run the browser in headless mode so scraping stays fast and invisible in the background."
                   />
                   <CheckboxField
                     label="Speed Mode"
                     checked={scrapeForm.speedMode}
                     onChange={(v) => setScrapeForm({ ...scrapeForm, speedMode: v })}
-                    title="Maksimalno pospeši praskanje tako, da blokira nalaganje slik in odvečnih stilov."
+                    tooltip="Speed up scraping by blocking images and extra page assets for a faster crawl."
                   />
                   <CheckboxField
                     label="Export targets"
@@ -8661,7 +8661,7 @@ function App({ initialTab = 'leads' }) {
                     onChange={(v) => setScrapeForm({ ...scrapeForm, exportTargets: v })}
                     disabled={!canBulkExport}
                     badge={!canBulkExport ? 'Growth+' : ''}
-                    title="Po zaključku praskanja avtomatsko pripravi datoteko za izvoz podatkov."
+                    tooltip="Automatically prepare a CSV export of target leads when scraping finishes."
                   />
                   {!canBulkExport ? (
                     <p className="text-[11px] text-amber-300">Unlock The Growth to auto-export CSV targets after each scrape.</p>
@@ -8776,13 +8776,13 @@ function App({ initialTab = 'leads' }) {
                     label="Headless"
                     checked={enrichForm.headless}
                     onChange={(v) => setEnrichForm({ ...enrichForm, headless: v })}
-                    title="Izvede AI analizo in iskanje e-mailov preko ozadnih procesov."
+                    tooltip="Run enrichment tasks without opening a visible browser window during AI lookup."
                   />
                   <CheckboxField
                     label="Skip CSV export"
                     checked={enrichForm.skipExport}
                     onChange={(v) => setEnrichForm({ ...enrichForm, skipExport: v })}
-                    title="Preskoči generiranje lokalne CSV datoteke in podatke shrani direktno v oblak."
+                    tooltip="Skip local CSV export and keep enriched leads synced directly to the cloud."
                   />
                 </div>
               </div>
@@ -13360,23 +13360,28 @@ function LockedFeatureNotice({ title, description }) {
   )
 }
 
-function CheckboxField({ label, checked, onChange, disabled = false, badge = '', title }) {
+function CheckboxField({ label, checked, onChange, disabled = false, badge = '', tooltip = '' }) {
   return (
     <label
-      title={title}
-      className={`flex items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition ${disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer hover:bg-white/[0.07]'}`}>
+      className={`group relative flex items-center gap-3 rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition ${disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer hover:bg-white/[0.07]'}`}>
       <input
         className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-teal-500 focus:ring-teal-500"
         type="checkbox"
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
-        title={title}
+        title={tooltip}
+        aria-label={label}
       />
       <span className="flex items-center gap-2">
         <span>{label}</span>
         {badge ? <PremiumBadge label={badge} /> : null}
       </span>
+      {tooltip ? (
+        <div className="tooltip-card pointer-events-none absolute -top-12 left-1/2 hidden -translate-x-1/2 whitespace-nowrap text-center group-hover:block">
+          {tooltip}
+        </div>
+      ) : null}
     </label>
   )
 }
