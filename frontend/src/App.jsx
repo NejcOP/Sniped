@@ -4121,7 +4121,7 @@ function App({ initialTab = 'leads' }) {
       return
     }
     const headers = [
-      'id', 'business_name', 'contact_name', 'email', 'phone_number', 'website_url', 'maps_url', 'status', 'ai_score', 'qualification_score', 'pipeline_stage',
+      'id', 'created_at', 'business_name', 'contact_name', 'email', 'phone_number', 'website_url', 'maps_url', 'status', 'ai_score', 'qualification_score', 'pipeline_stage',
     ]
     const escapeCsv = (value) => {
       const text = String(value ?? '')
@@ -9806,6 +9806,9 @@ function App({ initialTab = 'leads' }) {
                             <div className="flex flex-col gap-0.5 min-w-0">
                               <span className="font-semibold text-white truncate block">{lead.business_name || '—'}</span>
                               <span className="text-[10px] text-slate-500 truncate block">{lead.search_keyword || 'manual'}</span>
+                              {lead.created_at && (
+                                <span className="text-[10px] text-slate-400 truncate block">Added {formatCommunicationTime(lead.created_at)}</span>
+                              )}
                               {lead.contact_name && <span className="text-[10px] text-slate-600 truncate block">{lead.contact_name}</span>}
                               <div className="mt-1 flex flex-wrap gap-1">
                                 {bestLeadScore > 0 && (
@@ -10195,6 +10198,9 @@ function App({ initialTab = 'leads' }) {
                               </label>
                               <p className="truncate text-base font-semibold text-white">{lead.business_name || '—'}</p>
                               <p className="truncate text-xs text-slate-400">{titleCaseLeadLabel(deriveLeadIndustry(lead))} • {deriveLeadRevenueBand(lead)}</p>
+                              {lead.created_at && (
+                                <p className="truncate text-[10px] text-slate-400">Added {formatCommunicationTime(lead.created_at)}</p>
+                              )}
                             </div>
                             <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${pipelineStageBadgeClass(pipelineStage)}`}>
                               {pipelineStage}
