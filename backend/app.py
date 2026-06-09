@@ -59,7 +59,7 @@ except Exception:
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 from backend.check_access import get_plan_feature_access, normalize_plan_key, require_feature_access
-from backend.scraper.db import batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, record_pool_saturation_event, upsert_lead
+from backend.scraper.db import _lead_to_create_payload, batch_upsert_leads, get_database_url as pg_get_database_url, get_engine as pg_get_engine, init_db, record_pool_saturation_event, upsert_lead
 from backend.scraper.exporter import export_target_leads
 from backend.scraper.full_enrichment import enrich_leads_full_data
 from backend.scraper.phone_extractor import PhoneExtractor
@@ -83,6 +83,9 @@ def _get_google_maps_scraper_class():
     from backend.scraper.google_maps import GoogleMapsScraper
 
     return GoogleMapsScraper
+
+
+GoogleMapsScraper = _get_google_maps_scraper_class()
 
 
 def _create_lead_enricher(*, db_path: str, headless: bool, config_path: str, **kwargs):
@@ -7266,6 +7269,22 @@ def maybe_sync_supabase(db_path: Path, config_path: Path) -> None:
         logging.warning("Supabase sync had errors: %s", result["errors"])
 
 
+def _insert_lead_to_supabase_immediately(lead: Any, user_id: str) -> None:
+    if not is_supabase_primary_enabled(DEFAULT_CONFIG_PATH):
+        return
+    try:
+        client = get_supabase_client(DEFAULT_CONFIG_PATH)
+        if client is None:
+            return
+        payload = _lead_to_create_payload(lead, user_id)
+        payload.setdefault("created_at", utc_now_iso())
+        payload.setdefault("scraped_at", payload["created_at"])
+        payload.setdefault("status", "scraped")
+        client.table("leads").insert(payload).execute()
+    except Exception as exc:
+        logging.warning("Immediate Supabase lead insert failed for user_id=%s: %s", user_id, exc)
+
+
 def insert_manual_lead_supabase(client: Any, payload: ManualLeadRequest) -> dict:
     row_data = {
         "business_name": payload.business_name.strip(),
@@ -9093,6 +9112,19 @@ def enqueue_task(
     payload_data["task_type"] = task_type
     payload_data["user_id"] = normalized_user_id
 
+    if _is_postgres_task_store_enabled():
+        logging.info(
+            "Postgres task store enabled; queueing task for worker execution | type=%s user_id=%s task_id=%s",
+            task_type,
+            normalized_user_id,
+            task_id,
+        )
+        return {
+            "status": "started",
+            "task_id": task_id,
+            "job_status": "queued",
+            "execution_mode": "worker",
+        }
     if _should_use_external_worker(task_type):
         logging.info(
             "Delegating task to external worker | type=%s user_id=%s task_id=%s",
@@ -9106,8 +9138,6 @@ def enqueue_task(
             "job_status": "queued",
             "execution_mode": "worker",
         }
-    if _is_postgres_task_store_enabled():
-        logging.info("No live worker heartbeat detected; using in-process task execution.")
     if task_type == "scrape" and FORCE_IN_PROCESS_SCRAPE:
         logging.info("Scrape task configured for in-process execution | task_id=%s", task_id)
 
@@ -10074,6 +10104,7 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                     if _immediate_saved:
                         progress_state["inserted"] = progress_state.get("inserted", 0) + 1
                         _safe_update_progress()
+                        _insert_lead_to_supabase_immediately(_lead, task_user_id)
                         if progress_save_mode == "sync" and is_supabase_auth_enabled(DEFAULT_CONFIG_PATH):
                             try:
                                 maybe_sync_supabase(db_path, DEFAULT_CONFIG_PATH)
@@ -10104,7 +10135,6 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 scrape_runtime_limit,
                 scrape_stall_limit,
             )
-            GoogleMapsScraper = _get_google_maps_scraper_class()
             scraper = GoogleMapsScraper(
                 headless=headless_value,
                 country=country_value,
@@ -10113,7 +10143,8 @@ def execute_scrape_task(_app: FastAPI, payload_data: dict) -> None:
                 proxy_urls=_proxy_urls or None,
                 speed_mode=bool(payload_data.get("speed_mode", False)),
             )
-            scraper.register_abort_callback(lambda: _scrape_stop_requested())
+            if hasattr(scraper, "register_abort_callback"):
+                scraper.register_abort_callback(lambda: _scrape_stop_requested())
             active_scraper_ref["instance"] = scraper
             _app.state.scrape_active_scrapers[task_user_id] = scraper
             try:
@@ -12822,8 +12853,9 @@ def create_app() -> FastAPI:
                 "(or SUPABASE_SERVICE_ROLE_KEY / SUPABASE_PUBLISHABLE_KEY)."
             )
         if not supabase_settings.get("has_database_url"):
-            raise RuntimeError(
-                "Postgres runtime is required. Set DATABASE_URL or SUPABASE_DATABASE_URL to the Supabase Postgres connection string."
+            logging.warning(
+                "[startup] DATABASE_URL is not configured; continuing in Supabase-only mode. "
+                "Scrape, worker, and DB-backed features may be limited until DATABASE_URL or SUPABASE_DATABASE_URL is set."
             )
 
         async def _timed_startup_step(step_name: str, fn: Callable[..., Any], *args: Any) -> None:

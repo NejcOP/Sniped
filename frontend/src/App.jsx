@@ -1889,7 +1889,7 @@ function normalizeSavedSegmentFilters(filters) {
     leadSearch: String(filters?.leadSearch || ''),
     leadStatusFilter: String(filters?.leadStatusFilter || 'all'),
     leadQuickFilter: String(filters?.leadQuickFilter || 'all'),
-    leadSortMode: String(filters?.leadSortMode || 'best'),
+    leadSortMode: String(filters?.leadSortMode || 'recent'),
     showBlacklisted: Boolean(filters?.showBlacklisted),
     advancedLeadFilters: {
       industries: Array.isArray(advanced?.industries) ? advanced.industries : [],
@@ -2482,7 +2482,7 @@ function App({ initialTab = 'leads' }) {
   const [leadPage, setLeadPage] = useState(0)
   const [leadStatusFilter, setLeadStatusFilter] = useState('all')
   const [leadQuickFilter, setLeadQuickFilter] = useState(() => normalizeLeadQuickFilterParam(searchParams.get('filter'), 'all'))
-  const [leadSortMode, setLeadSortMode] = useState('best')
+  const [leadSortMode, setLeadSortMode] = useState('recent')
   const [showBlacklisted, setShowBlacklisted] = useState(false)
   const [loadingLeads, setLoadingLeads] = useState(false)
   const [leadServerTotal, setLeadServerTotal] = useState(0)
@@ -6197,6 +6197,9 @@ function App({ initialTab = 'leads' }) {
     const fastId = window.setInterval(() => {
       if (activeTab === 'leads' || activeTab === 'tasks' || activeTab === 'history') {
         void fetchTaskState()
+        if (activeTab === 'leads') {
+          void refreshLeads({ silent: true })
+        }
       }
     }, 3000)
 
